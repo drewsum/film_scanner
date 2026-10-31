@@ -1,0 +1,26 @@
+[package]
+name = "film-scanner"
+description = "Open-source film scanning workflow: scan, crop, invert, adjust, export"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "film-scanner"
+path = "src/main.rs"
+
+[dependencies]
+scan-core.workspace = true
+scan-wia.workspace = true
+eframe.workspace = true
+rfd.workspace = true
+log.workspace = true
+env_logger.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
