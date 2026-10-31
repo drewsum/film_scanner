@@ -1,0 +1,4 @@
+/target
+*.tif
+*.tiff
+!tests/fixtures/**

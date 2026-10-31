@@ -1,0 +1,19 @@
+[package]
+name = "scan-core"
+description = "Backend-agnostic scanner abstraction for film_scanner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+image.workspace = true
+thiserror.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

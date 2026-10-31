@@ -1,0 +1,29 @@
+[workspace]
+resolver = "3"
+members = ["crates/scan-core", "crates/scan-wia", "crates/app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/drewsum/film_scanner"
+rust-version = "1.85"
+
+[workspace.dependencies]
+scan-core = { path = "crates/scan-core" }
+scan-wia = { path = "crates/scan-wia" }
+image = { version = "0.25", default-features = false, features = ["tiff", "bmp", "png"] }
+thiserror = "2"
+log = "0.4"
+env_logger = "0.11"
+eframe = "0.37"
+rfd = "0.17"
+tempfile = "3"
+windows = "0.62"
+windows-core = "0.62"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
