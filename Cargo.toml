@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/scan-core", "crates/scan-wia", "crates/app"]
+members = ["crates/scan-core", "crates/scan-wia", "crates/scan-epson", "crates/app"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,6 +12,7 @@ rust-version = "1.95"
 [workspace.dependencies]
 scan-core = { path = "crates/scan-core" }
 scan-wia = { path = "crates/scan-wia" }
+scan-epson = { path = "crates/scan-epson" }
 image = { version = "0.25", default-features = false, features = ["tiff", "bmp", "png"] }
 thiserror = "2"
 log = "0.4"

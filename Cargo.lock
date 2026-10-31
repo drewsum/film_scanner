@@ -3018,6 +3018,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "scan-epson"
+version = "0.1.0"
+dependencies = [
+ "env_logger",
+ "log",
+ "scan-core",
+ "windows",
+]
+
+[[package]]
 name = "scan-wia"
 version = "0.1.0"
 dependencies = [
