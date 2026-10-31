@@ -89,18 +89,15 @@ pub fn decode_memory_bmp(data: &[u8]) -> Result<DynamicImage, ScanError> {
         16 => {
             let mut out = Vec::with_capacity(width * rows);
             for y in 0..rows {
-                out.extend(
-                    row(y)[..width * 2]
-                        .chunks_exact(2)
-                        .map(|p| u16::from_le_bytes([p[0], p[1]])),
-                );
+                let (pixels, _) = row(y)[..width * 2].as_chunks::<2>();
+                out.extend(pixels.iter().map(|&p| u16::from_le_bytes(p)));
             }
             DynamicImage::ImageLuma16(ImageBuffer::<Luma<u16>, _>::from_raw(w, h, out).unwrap())
         }
         24 => {
             let mut out = Vec::with_capacity(width * rows * 3);
             for y in 0..rows {
-                for bgr in row(y)[..width * 3].chunks_exact(3) {
+                for bgr in row(y)[..width * 3].as_chunks::<3>().0 {
                     out.extend_from_slice(&[bgr[2], bgr[1], bgr[0]]);
                 }
             }
@@ -109,7 +106,7 @@ pub fn decode_memory_bmp(data: &[u8]) -> Result<DynamicImage, ScanError> {
         48 => {
             let mut out = Vec::with_capacity(width * rows * 3);
             for y in 0..rows {
-                for bgr in row(y)[..width * 6].chunks_exact(6) {
+                for bgr in row(y)[..width * 6].as_chunks::<6>().0 {
                     let c = |i: usize| u16::from_le_bytes([bgr[i], bgr[i + 1]]);
                     out.extend_from_slice(&[c(4), c(2), c(0)]);
                 }
