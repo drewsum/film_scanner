@@ -8,6 +8,7 @@
 mod backend;
 mod error;
 pub mod export;
+pub use image;
 pub mod mock;
 mod progress;
 mod registry;

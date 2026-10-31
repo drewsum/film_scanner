@@ -93,3 +93,26 @@ fn sixteen_bit_scan() {
         image::DynamicImage::ImageRgb16(_)
     ));
 }
+
+/// Regression: the full bed at 75 dpi is a fractional pixel count (637.5 px for 8.5in), which
+/// the driver rejects unless truncated.
+#[test]
+#[ignore = "requires a scanner attached via WIA"]
+fn full_bed_preview_scan() {
+    let info = pick_device();
+    let mut dev = WiaBackend.open(&info).expect("open device");
+    let src = dev
+        .capabilities()
+        .source(ScanSource::Flatbed)
+        .expect("flatbed")
+        .clone();
+    let mut req = ScanRequest::new(ScanSource::Flatbed, src.preview_resolution(75).unwrap());
+    req.bit_depth = BitDepth::Eight;
+    let result = dev.scan(&req, &mut NoProgress).expect("full-bed scan");
+    let (w, h) = result.dimensions();
+    let expected = src.max_area.pixel_size(req.dpi);
+    assert!(
+        w.abs_diff(expected.0) <= 1 && h.abs_diff(expected.1) <= 1,
+        "{w}x{h} vs {expected:?}"
+    );
+}

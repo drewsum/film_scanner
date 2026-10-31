@@ -247,11 +247,20 @@ fn configure(
     }
     props.write_i32(WIA_IPS_XRES, request.dpi as i32)?;
     props.write_i32(WIA_IPS_YRES, request.dpi as i32)?;
-    // Position and extent constrain each other, so reset the origin, size the window, move
-    // it into place, then re-apply the size in case the driver adjusted it.
-    let (x, y, w, h) = convert::area_to_pixels(area, max, request.dpi);
+    // Position and extent constrain each other: reset the origin, then take the bed size in
+    // pixels from the extent range the driver reports for the new resolution (falling back
+    // to our own computation), size the window, move it into place, and re-apply the size
+    // in case the driver adjusted it.
     props.write_i32(WIA_IPS_XPOS, 0)?;
     props.write_i32(WIA_IPS_YPOS, 0)?;
+    let (bed_w, bed_h) = convert::bed_pixels(max, request.dpi);
+    let limit = |id, computed: i32| match props.valid_values(id) {
+        Ok(ValidValues::Range { max, .. }) if max > 0 => max,
+        _ => computed,
+    };
+    let bed = (limit(WIA_IPS_XEXTENT, bed_w), limit(WIA_IPS_YEXTENT, bed_h));
+    let (x, y, w, h) = convert::area_to_pixels(area, bed, request.dpi);
+    log::debug!("WIA window {x},{y} {w}x{h} px (bed {bed:?})");
     props.write_i32(WIA_IPS_XEXTENT, w)?;
     props.write_i32(WIA_IPS_YEXTENT, h)?;
     props.write_i32(WIA_IPS_XPOS, x)?;

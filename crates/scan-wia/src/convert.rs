@@ -99,11 +99,21 @@ pub fn thousandths_to_mm(v: i32) -> f32 {
     v as f32 / 1000.0 * MM_PER_INCH
 }
 
+/// Whole pixels that fit in the bed `max` at `dpi`. Drivers truncate partial pixels.
+pub fn bed_pixels(max: ScanArea, dpi: u32) -> (i32, i32) {
+    // The epsilon keeps exact sizes (8.5in at 100 dpi = 850) from flooring down a pixel.
+    let px = |mm: f32| (mm / MM_PER_INCH * dpi as f32 + 1e-3).floor() as i32;
+    (px(max.width_mm).max(1), px(max.height_mm).max(1))
+}
+
 /// Scan window in pixels (`x, y, width, height`) for `WIA_IPS_XPOS/YPOS/XEXTENT/YEXTENT`,
-/// clamped to the bed size `max` (also in millimetres).
-pub fn area_to_pixels(area: ScanArea, max: ScanArea, dpi: u32) -> (i32, i32, i32, i32) {
+/// clamped to a bed of `max_w` x `max_h` pixels.
+pub fn area_to_pixels(
+    area: ScanArea,
+    (max_w, max_h): (i32, i32),
+    dpi: u32,
+) -> (i32, i32, i32, i32) {
     let px = |mm: f32| (mm / MM_PER_INCH * dpi as f32).round() as i32;
-    let (max_w, max_h) = (px(max.width_mm), px(max.height_mm));
     let x = px(area.x_mm).clamp(0, max_w - 1);
     let y = px(area.y_mm).clamp(0, max_h - 1);
     let w = px(area.width_mm).clamp(1, max_w - x);
@@ -174,13 +184,24 @@ mod tests {
     fn units() {
         assert!((thousandths_to_mm(8500) - 215.9).abs() < 0.01);
         let max = ScanArea::full(25.4, 25.4);
-        assert_eq!(area_to_pixels(max, max, 300), (0, 0, 300, 300));
+        assert_eq!(bed_pixels(max, 300), (300, 300));
+        assert_eq!(area_to_pixels(max, (300, 300), 300), (0, 0, 300, 300));
         let off = ScanArea {
             x_mm: 12.7,
             y_mm: 0.0,
             width_mm: 25.4,
             height_mm: 1.0,
         };
-        assert_eq!(area_to_pixels(off, max, 300), (150, 0, 150, 12));
+        assert_eq!(area_to_pixels(off, (300, 300), 300), (150, 0, 150, 12));
+    }
+
+    #[test]
+    fn letter_bed_truncates_partial_pixels() {
+        // 8.5in is 637.5 px at 75 dpi; the V500 driver only accepts 637.
+        let letter = ScanArea::full(215.9, 297.18);
+        assert_eq!(bed_pixels(letter, 75), (637, 877));
+        assert_eq!(bed_pixels(letter, 100), (850, 1170));
+        let bed = bed_pixels(letter, 75);
+        assert_eq!(area_to_pixels(letter, bed, 75), (0, 0, 637, 877));
     }
 }

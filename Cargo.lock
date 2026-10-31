@@ -1189,6 +1189,7 @@ dependencies = [
  "rfd",
  "scan-core",
  "scan-wia",
+ "tempfile",
 ]
 
 [[package]]
