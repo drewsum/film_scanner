@@ -155,16 +155,56 @@ red from j + 2 × skew.
 10,848 at 1,600 on the flatbed). SilverFast's film scans leave it 0 and set u16 at 6 instead.
 Probably exposure time per lamp; open.
 
-**Calibration-derived, per scan:** `1e 31` (analog offset/gain), `1e 42` (18 bytes; per-channel
-u16 pairs that change from run to run), `1e 43` (12 bytes, usually `00 80 …` or `84 7d 77 7e df 7f`)
-and the `1e 84` table uploads (gamma and shading).
+**`1e 84` (table upload):** an 8-byte header, then the table. Byte 0 is the type and bytes 5–7
+the table's length (u24 LE). Type 2: three 8,192-byte gamma curves (u16 × 4,096); type 3: three
+256-byte curves; type 5: motor acceleration; type 6: shading; type 7: 256 bytes, constant.
+
+### Flatbed calibration
+
+Diffing two WIA sessions that differ only in y position (24 and 28) shows what changes from run to
+run: the carriage move, the `1e 57` "last scan" record (read back by the next session's `1e 53`),
+and the calibration below. Everything else is constant for a given geometry.
+
+1. **Analog offsets on the scanner.** `1e 46` (`04 00 00 0f 00…`) starts the scanner's own
+   calibration; `1e 04` polls it (`02` busy, `01` done) and `1e 92` returns the result, 12 bytes
+   (e.g. `86 00 86 00 8c 00 00 00 34 30 31 00`). The driver runs it twice and sends the second
+   result unchanged as the `1e 31` parameters.
+2. **Masked-strip read** (x 21–37, 4 lines, 16-bit): the CCD's black level. Its per-channel means
+   go into the next `1e 42`.
+3. **White read** of the calibration strip at the home position: 32 lines, 16-bit, at the image
+   read's x range, `1e a2 01` (lamp on). The `1e 42` before it is
+   `00 00 00 00 00 00 Dr Dr Dg Dg Db Db` (u16 LE) with D from step 2; the scanner subtracts
+   those.
+4. **Dark read**: 16 lines with the lamp off (`1e a2 00`, `1e 22` byte 9 = 1, `1e 42` zero).
+5. **Image read.** `1e 42` holds a white base per channel (u16 × 3), then each channel's dark base
+   twice (u16 × 6). The shading table (`1e 84` type 6) has one u16 per pixel and channel,
+   pixel-interleaved. Its upper 10 bits are the pixel's white level above the white base in
+   64-count steps. Its lower 6 bits are the pixel's dark level above the dark base. The driver
+   smooths the dark profile (a ~65 px box filter matches) and takes its minimum as the dark
+   base. The white base is the dimmest lit pixel's white level.
+
+`scan_epson::calibration` computes all of this from the scanner's own reads. In capture 24, the
+table's upper field correlates 0.9999 with the white read and the lower field is within ~2
+counts of the smoothed dark read. The driver's white levels carry some noise this read doesn't
+explain (±2 steps), so the table isn't byte-identical. On hardware, against WIA's scan of the same
+area (mean absolute difference, 0–255):
+
+| Calibration (`--calibration`) | 75 dpi, 80 × 50 mm | 300 dpi, 30 × 20 mm |
+|---|---|---|
+| `live`: computed from the session's reads | 1.81 | 3.52 |
+| `recorded`: the template's values | 1.86 | 3.57 |
+| `flat`: shading table flattened | 2.82, 2–14 % brighter, varying across the area | |
+
+`1e 43` (12 bytes) stays `84 7d 77 7e df 7f` for image reads; it is probably the CCD's
+per-channel gain from the scanner's EEPROM (`1e 87` returns 10 bytes of what looks like device
+data).
 
 ### Native scans from templates
 
 `epson-scan` scans any flatbed area at up to 400 dpi without Epson's software running. It uses
-full-width captures of Epson's driver as templates for the calibration, lamp and table commands,
-and patches only the carriage move, line count and scan length. It reads the full width and crops
-when decoding:
+full-width captures of Epson's driver as templates for the lamp, gamma and motor commands. It
+redoes the [calibration](#flatbed-calibration) from the scanner's own reads and patches the
+carriage move, line count and scan length. It reads the full width and crops when decoding:
 
 ```sh
 Stop-Service stisvc -Force     # admin; Start-Service stisvc afterwards
@@ -193,8 +233,9 @@ wider x range:
 Dust and scratches are sharp dark specks on a bright, low-contrast image (the dyes are nearly
 transparent to infrared). That gives the defect mask for dust removal.
 
-So `1e a2` selects the light: `00` flatbed, `02` film unit (visible), `03` off (dark reads),
-`04` film unit infrared, `06` infrared calibration.
+So `1e a2` selects the light. Epson's flatbed sessions use `01` (flatbed lamp) and `00` (off, for
+the dark read). SilverFast's film sessions use `02` (film unit, visible) and `03` (off, dark
+reads), and for infrared `06` (calibration), `05` and `04` (the infrared pass).
 
 SilverFast drives the scanner itself, with the same command set as Epson's driver. Its captures
 are an independent reference: commands both programs send are probably required.
@@ -213,7 +254,8 @@ Findings so far:
   each way.
 - Final image data is pixel-interleaved 8-bit RGB, wider than requested and with R/G/B line
   skew. The driver crops, resamples and realigns it.
-- Calibration (dark/white reads, shading uploads with `1e 84`) is done by the host.
+- Calibration (dark/white reads, shading uploads with `1e 84`) is done by the host, except for
+  the analog offsets (see [Flatbed calibration](#flatbed-calibration)).
 - `1e a2` + 1 byte selects the light source (see [Infrared](#infrared-capture-13)).
 - `1e 31` (12 bytes) sets per-channel analog front-end values: three u16 at 0 (offset; SilverFast
   binary-searches them, `80 → c0 → a0 → 90 → 88 → 8c`, against dark reads), and three bytes at

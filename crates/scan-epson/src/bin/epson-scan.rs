@@ -2,7 +2,8 @@
 //! template for everything we don't generate yet.
 //!
 //! ```text
-//! epson-scan --template CAPTURE.pcap [--template ...] --dpi N --area X,Y,W,H --out OUT.png [--path DEV]
+//! epson-scan --template CAPTURE.pcap [--template ...] --dpi N --area X,Y,W,H --out OUT.png
+//!            [--calibration live|recorded|flat] [--path DEV]
 //! epson-scan --template CAPTURE.pcap --dpi N --area X,Y,W,H --out OUT.png --offline
 //! ```
 //!
@@ -12,11 +13,14 @@
 //! first that fits is used. Stop the WIA service first
 //! (`Stop-Service stisvc -Force`), or its polling interferes. `--offline` decodes the
 //! template's own recorded read instead of scanning, for checking the decoding.
+//!
+//! Calibration is computed from the scan's own reads by default; `recorded` replays the
+//! template's values and `flat` turns shading correction off, for comparison.
 
 use std::process::ExitCode;
 
 use scan_core::ScanArea;
-use scan_epson::template::Template;
+use scan_epson::template::{Calibration, Template};
 use scan_epson::{decode, pcap, trace};
 
 struct Args {
@@ -26,14 +30,16 @@ struct Args {
     out: String,
     path: Option<String>,
     offline: bool,
+    calibration: Calibration,
 }
 
 fn parse_args() -> Result<Args, String> {
     let usage = "usage: epson-scan --template CAPTURE.pcap --dpi N --area X,Y,W,H --out OUT.png \
-                 [--path DEV] [--offline]";
+                 [--calibration live|recorded|flat] [--path DEV] [--offline]";
     let mut args = std::env::args().skip(1);
     let (mut templates, mut dpi, mut area, mut out, mut path, mut offline) =
         (Vec::new(), None, None, None, None, false);
+    let mut calibration = Calibration::Live;
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
@@ -57,6 +63,14 @@ fn parse_args() -> Result<Args, String> {
             "--out" => out = Some(value()?),
             "--path" => path = Some(value()?),
             "--offline" => offline = true,
+            "--calibration" => {
+                calibration = match value()?.as_str() {
+                    "live" => Calibration::Live,
+                    "recorded" => Calibration::Recorded,
+                    "flat" => Calibration::Flat,
+                    _ => return Err("--calibration is live, recorded or flat".into()),
+                }
+            }
             _ => return Err(usage.into()),
         }
     }
@@ -71,6 +85,7 @@ fn parse_args() -> Result<Args, String> {
         out: out.ok_or(usage)?,
         path,
         offline,
+        calibration,
     })
 }
 
@@ -120,7 +135,7 @@ fn run() -> Result<(), String> {
         }
         data
     } else {
-        scan(&script, args.path)?
+        scan(&script, args.path, args.calibration)?
     };
     let image = decode::flatbed_rgb8(&raw, script.layout, &script.plan);
     image
@@ -139,7 +154,11 @@ fn load_template(path: &str) -> Result<Template, String> {
 }
 
 #[cfg(windows)]
-fn scan(script: &scan_epson::template::Script, path: Option<String>) -> Result<Vec<u8>, String> {
+fn scan(
+    script: &scan_epson::template::Script,
+    path: Option<String>,
+    calibration: Calibration,
+) -> Result<Vec<u8>, String> {
     use scan_epson::transport::{UsbScan, find_usbscan_devices};
     let path = match path {
         Some(p) => p,
@@ -151,11 +170,21 @@ fn scan(script: &scan_epson::template::Script, path: Option<String>) -> Result<V
     };
     let mut dev = UsbScan::open(&path).map_err(|e| e.to_string())?;
     dev.set_timeouts(30, 30).map_err(|e| e.to_string())?;
-    Template::run(script, &mut dev, std::time::Duration::from_millis(25)).map_err(|e| e.to_string())
+    Template::run(
+        script,
+        &mut dev,
+        std::time::Duration::from_millis(25),
+        calibration,
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[cfg(not(windows))]
-fn scan(_: &scan_epson::template::Script, _: Option<String>) -> Result<Vec<u8>, String> {
+fn scan(
+    _: &scan_epson::template::Script,
+    _: Option<String>,
+    _: Calibration,
+) -> Result<Vec<u8>, String> {
     Err("scanning currently supports only Windows (usbscan.sys); use --offline".into())
 }
 

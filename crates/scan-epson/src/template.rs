@@ -1,18 +1,21 @@
 //! Flatbed scans built from a captured session of Epson's driver.
 //!
-//! A full-width capture supplies everything we don't generate yet (calibration, lamp, gamma).
+//! A full-width capture supplies everything we don't generate yet (lamp, gamma, motor tables).
 //! For a new request only the final read changes: the carriage move before it, its line
 //! count and its motor steps. The read keeps the template's full width, and the area is
-//! cropped from it when decoding.
+//! cropped from it when decoding. Calibration is redone from the scanner's own reads
+//! (see [`crate::calibration`]) unless the recorded values are asked for.
 
+use std::ops::Range;
 use std::time::Duration;
 
 use scan_core::{ScanArea, ScanError};
 
+use crate::calibration::{self, Shading};
 use crate::data::BlockAssembler;
 use crate::geometry::{self, FlatbedPlan, MoveProfile};
 use crate::pcap::TransferType;
-use crate::replay::replay;
+use crate::replay::{ReplayReport, replay};
 use crate::trace::{Direction, Transfer};
 use crate::transport::Transport;
 
@@ -20,6 +23,11 @@ const SET_GEOMETRY: [u8; 2] = [0x1e, 0x41];
 const MOTOR: [u8; 2] = [0x1e, 0x01];
 const MOVE: [u8; 2] = [0x1e, 0x05];
 const READ: [u8; 2] = [0x1e, 0x47];
+const OFFSETS: [u8; 2] = [0x1e, 0x31];
+const AUTO_OFFSETS: [u8; 2] = [0x1e, 0x92];
+const LEVELS: [u8; 2] = [0x1e, 0x42];
+const TABLE: [u8; 2] = [0x1e, 0x84];
+const SHADING_TABLE: u8 = 6;
 
 /// A captured flatbed session, with the positions of the commands a new request patches.
 #[derive(Clone, Debug)]
@@ -40,6 +48,39 @@ pub struct Template {
     pub x_end: u32,
     /// Pixels per line of the read (8-bit RGB).
     pub width: u32,
+    calibration: Option<CalibrationPoints>,
+}
+
+/// Where the driver calibrates in a template, so a scan can redo it. Indices are transfers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CalibrationPoints {
+    /// The scanner's reply to the last `1e 92` (its own analog offset calibration), and the
+    /// `1e 31` parameters that apply it.
+    offsets_reply: usize,
+    offsets: usize,
+    /// The ends of the masked-strip, white and dark reads (the next OUT after each).
+    dark_ref_end: usize,
+    white_end: usize,
+    dark_end: usize,
+    /// `1e 42` parameters for the white read and for the image read.
+    white_levels: usize,
+    levels: usize,
+    /// The shading table's data.
+    table: usize,
+    /// Pixels per line of the calibration reads.
+    width: usize,
+}
+
+/// Where a scan's calibration comes from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Calibration {
+    /// Computed from this session's reads.
+    #[default]
+    Live,
+    /// The template's recorded values.
+    Recorded,
+    /// No shading correction: the recorded table, flattened to each channel's mean.
+    Flat,
 }
 
 /// The transfers to replay for one request, split around the image read.
@@ -53,6 +94,7 @@ pub struct Script {
     pub after: Vec<Transfer>,
     pub plan: FlatbedPlan,
     pub layout: RawLayout,
+    pub calibration: Option<CalibrationPoints>,
 }
 
 /// Where the requested area sits in the raw read.
@@ -66,6 +108,86 @@ pub struct RawLayout {
 
 fn bad(why: impl std::fmt::Display) -> ScanError {
     ScanError::Backend(format!("unusable template: {why}"))
+}
+
+/// Find the driver's calibration before the image read at `read`: three reads (masked strip,
+/// white, dark), the offsets and levels that follow from them, and the shading table.
+fn calibration_points(t: &[Transfer], read: usize) -> Option<CalibrationPoints> {
+    let is_out = |i: usize, cmd: &[u8]| t[i].direction == Direction::Out && t[i].data == cmd;
+    let next_out = |i: usize| {
+        (i + 1..t.len())
+            .find(|&j| t[j].direction == Direction::Out)
+            .unwrap_or(t.len())
+    };
+    let last_before = |end: usize, cmd: &[u8]| (0..end).rev().find(|&i| is_out(i, cmd));
+    let reads: Vec<usize> = (0..read).filter(|&i| is_out(i, &READ)).collect();
+    let [dark_ref, white, dark] = reads[..] else {
+        return None;
+    };
+    let auto = last_before(dark_ref, &AUTO_OFFSETS)?;
+    let offsets_reply =
+        Some(auto + 1).filter(|&i| t.get(i).is_some_and(|r| r.direction == Direction::In))?;
+    let offsets = next_out((auto..dark_ref).find(|&i| is_out(i, &OFFSETS))?);
+    let white_levels = next_out(last_before(white, &LEVELS)?);
+    let levels = next_out(last_before(read, &LEVELS)?);
+    let table = (dark..read)
+        .rev()
+        .filter(|&i| is_out(i, &TABLE))
+        .map(next_out)
+        .find(|&h| {
+            t.get(h)
+                .is_some_and(|h| h.data.first() == Some(&SHADING_TABLE))
+        })
+        .map(next_out)?;
+    let geometry = next_out(last_before(white, &SET_GEOMETRY)?);
+    let lines = t
+        .get(geometry)
+        .filter(|g| g.data.len() == 22)
+        .map(|g| u16_at(&g.data, 4))?;
+    let mut blocks = BlockAssembler::default();
+    let white_bytes: usize = t[white + 1..next_out(white)]
+        .iter()
+        .filter_map(|x| blocks.push(&x.data))
+        .map(|b| b.len())
+        .sum();
+    let width = white_bytes / (lines.max(1) as usize * 6);
+    let sizes_ok = width > 0
+        && t[offsets_reply].data.len() == t.get(offsets)?.data.len()
+        && t.get(white_levels)?.data.len() == 18
+        && t.get(levels)?.data.len() == 18
+        && t.get(table)?.data.len() == width * 6;
+    sizes_ok.then_some(CalibrationPoints {
+        offsets_reply,
+        offsets,
+        dark_ref_end: next_out(dark_ref),
+        white_end: next_out(white),
+        dark_end: next_out(dark),
+        white_levels,
+        levels,
+        table,
+        width,
+    })
+}
+
+/// The reply the scanner gave at transfer `index` of a replay starting at 0.
+fn reply_at(report: &ReplayReport, transfers: &[Transfer], index: usize) -> Vec<u8> {
+    report
+        .mismatches
+        .iter()
+        .find(|m| m.index == index)
+        .map_or_else(|| transfers[index].data.clone(), |m| m.actual.clone())
+}
+
+/// Replace each entry of a shading table with its channel's mean.
+fn flatten(table: &mut [u8]) {
+    let mut sum = [0u64; 3];
+    for (i, b) in table.as_chunks::<2>().0.iter().enumerate() {
+        sum[i % 3] += u64::from(u16::from_le_bytes(*b));
+    }
+    let n = (table.len() as u64 / 6).max(1);
+    for (i, b) in table.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+        b.copy_from_slice(&((sum[i % 3] / n) as u16).to_le_bytes());
+    }
 }
 
 fn u16_at(b: &[u8], i: usize) -> u32 {
@@ -93,9 +215,12 @@ impl Template {
         let scan_length = payload(last_before(read, &MOTOR).ok_or_else(|| bad("no 1e 01"))?)?;
         let moved = last_before(read, &MOVE).ok_or_else(|| bad("no carriage move"))?;
         let carriage_move = payload(last_before(moved, &MOTOR).ok_or_else(|| bad("no move"))?)?;
-        let after = (read + 1..t.len())
-            .find(|&i| t[i].direction == Direction::Out)
-            .unwrap_or(t.len());
+        let next_out = |i: usize| {
+            (i + 1..t.len())
+                .find(|&j| t[j].direction == Direction::Out)
+                .unwrap_or(t.len())
+        };
+        let after = next_out(read);
 
         let g = &t[geometry].data;
         if g.len() != 22 || t[scan_length].data.len() != 12 || t[carriage_move].data.len() != 12 {
@@ -120,7 +245,12 @@ impl Template {
                 "{data} bytes don't split into {lines} RGB lines"
             )));
         }
+        let calibration = calibration_points(&t, read);
+        if calibration.is_none() {
+            log::warn!("template: no calibration found; its recorded values will be used");
+        }
         Ok(Self {
+            calibration,
             read,
             geometry,
             scan_length,
@@ -176,6 +306,7 @@ impl Template {
                 crop_x: crop_x as u32,
             },
             plan,
+            calibration: self.calibration,
         })
     }
 
@@ -199,21 +330,63 @@ impl Template {
         script: &Script,
         dev: &mut dyn Transport,
         poll_delay: Duration,
+        calibration: Calibration,
     ) -> Result<Vec<u8>, ScanError> {
         let threshold = 512;
-        let report = replay(&script.before, dev, threshold, poll_delay);
-        if let Some((i, e)) = report.error {
-            return Err(ScanError::Backend(format!(
-                "scan setup failed at transfer {i}: {e}"
-            )));
-        }
-        for m in &report.mismatches {
-            log::debug!(
-                "reply {} differs: {:02x?} vs {:02x?}",
-                m.index,
-                m.actual,
-                m.expected
-            );
+        let mut stage = |before: &[Transfer], range: Range<usize>| {
+            let report = replay(&before[range.clone()], dev, threshold, poll_delay);
+            if let Some((i, e)) = report.error {
+                return Err(ScanError::Backend(format!(
+                    "scan setup failed at transfer {}: {e}",
+                    range.start + i
+                )));
+            }
+            for m in &report.mismatches {
+                log::debug!(
+                    "reply {} differs: {:02x?} vs {:02x?}",
+                    range.start + m.index,
+                    m.actual,
+                    m.expected
+                );
+            }
+            Ok(report)
+        };
+        let mut before = script.before.clone();
+        match (calibration, script.calibration) {
+            (Calibration::Live, Some(p)) => {
+                let report = stage(&before, 0..p.offsets_reply + 1)?;
+                before[p.offsets].data = reply_at(&report, &before, p.offsets_reply);
+                let report = stage(&before, p.offsets_reply + 1..p.dark_ref_end)?;
+                let darks = calibration::white_read_darks(&report.data);
+                before[p.white_levels].data = calibration::white_read_levels(darks).to_vec();
+                let white = stage(&before, p.dark_ref_end..p.white_end)?.data;
+                let dark = stage(&before, p.white_end..p.dark_end)?.data;
+                let shading = Shading::compute(&white, &dark, p.width, darks).ok_or_else(|| {
+                    ScanError::Backend(format!(
+                        "calibration reads of {} and {} bytes don't fit {} pixels",
+                        white.len(),
+                        dark.len(),
+                        p.width
+                    ))
+                })?;
+                log::info!(
+                    "calibration: offsets {:02x?}, white-read darks {darks:?}, \
+                     white base {:?}, dark base {:?}",
+                    before[p.offsets].data,
+                    shading.white_base,
+                    shading.dark_base
+                );
+                before[p.levels].data = shading.levels().to_vec();
+                before[p.table].data = shading.table;
+                stage(&before, p.dark_end..before.len())?;
+            }
+            (Calibration::Flat, Some(p)) => {
+                flatten(&mut before[p.table].data);
+                stage(&before, 0..before.len())?;
+            }
+            (Calibration::Recorded, _) | (_, None) => {
+                stage(&before, 0..before.len())?;
+            }
         }
 
         let mut data = Vec::with_capacity(script.data_len);
