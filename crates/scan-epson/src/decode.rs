@@ -1,9 +1,13 @@
 //! Raw flatbed data to an image.
 
-use scan_core::image::{Rgb, RgbImage};
+use scan_core::image::{ImageBuffer, Pixel, Rgb, RgbImage};
 
 use crate::geometry::{FlatbedPlan, skew_lines};
+use crate::tables;
 use crate::template::RawLayout;
+
+/// A 16-bit RGB image.
+pub type Rgb16Image = ImageBuffer<Rgb<u16>, Vec<u16>>;
 
 /// Decode an 8-bit pixel-interleaved RGB read into the planned image: realign the colour
 /// rows, crop to the area and box-filter down to the requested resolution.
@@ -11,6 +15,43 @@ use crate::template::RawLayout;
 /// Output row `j` takes blue from raw line `j`, green from `j + skew` and red from
 /// `j + 2 × skew` (at hardware resolution), as Epson's driver does.
 pub fn flatbed_rgb8(raw: &[u8], layout: RawLayout, plan: &FlatbedPlan) -> RgbImage {
+    resample(
+        layout,
+        plan,
+        |i| raw.get(i).copied().unwrap_or(0).into(),
+        |mean| mean.round() as u8,
+    )
+}
+
+/// Decode a 16-bit (little-endian) linear read like [`flatbed_rgb8`], then apply the tone
+/// curve the scanner applies to 8-bit reads, so both depths look alike.
+pub fn flatbed_rgb16(raw: &[u8], layout: RawLayout, plan: &FlatbedPlan) -> Rgb16Image {
+    let curve: Vec<u16> = (0..=u16::MAX)
+        .map(|v| (65535.0 * tables::tone(f64::from(v) / 65535.0)).round() as u16)
+        .collect();
+    resample(
+        layout,
+        plan,
+        |i| {
+            raw.get(2 * i..2 * i + 2)
+                .map_or(0, |b| u16::from_le_bytes([b[0], b[1]]).into())
+        },
+        |mean| curve[mean.round() as usize],
+    )
+}
+
+/// Realign, crop and box-filter the raw samples (`sample(i)` is the `i`th, pixel-interleaved
+/// RGB at hardware resolution; 0 past the end) into the planned image, mapping each channel's
+/// mean with `out`.
+fn resample<S>(
+    layout: RawLayout,
+    plan: &FlatbedPlan,
+    sample: impl Fn(usize) -> u32,
+    out: impl Fn(f64) -> S,
+) -> ImageBuffer<Rgb<S>, Vec<S>>
+where
+    Rgb<S>: Pixel<Subpixel = S>,
+{
     let width = layout.width as usize;
     let skew = skew_lines(plan.hw_dpi) as usize;
     let scale = f64::from(plan.hw_dpi) / f64::from(plan.dpi);
@@ -20,26 +61,20 @@ pub fn flatbed_rgb8(raw: &[u8], layout: RawLayout, plan: &FlatbedPlan) -> RgbIma
         let b = ((f64::from(i + 1) * scale) as usize).max(a + 1);
         a..b
     };
-    let sample = |line: usize, col: usize, ch: usize| -> u32 {
-        raw.get((line * width + col) * 3 + ch)
-            .copied()
-            .unwrap_or(0)
-            .into()
-    };
-    RgbImage::from_fn(plan.width, plan.height, |x, y| {
+    ImageBuffer::from_fn(plan.width, plan.height, |x, y| {
         let cols = span(x);
         let rows = span(y);
-        let n = (cols.len() * rows.len()) as u32;
-        let mut px = [0u8; 3];
-        for (ch, offset) in [(0, 2 * skew), (1, skew), (2, 0)] {
-            let mut sum = 0;
+        let n = (cols.len() * rows.len()) as f64;
+        let px = [(0, 2 * skew), (1, skew), (2, 0)].map(|(ch, offset)| {
+            let mut sum = 0u64;
             for line in rows.clone() {
                 for col in cols.clone() {
-                    sum += sample(line + offset, col + layout.crop_x as usize, ch);
+                    let i = ((line + offset) * width + col + layout.crop_x as usize) * 3 + ch;
+                    sum += u64::from(sample(i));
                 }
             }
-            px[ch] = ((sum + n / 2) / n) as u8;
-        }
+            out(sum as f64 / n)
+        });
         Rgb(px)
     })
 }
@@ -80,5 +115,16 @@ mod tests {
         // Mean of line*10+col over lines {l, l+1} and cols {1, 2} = 10l + 5 + 1.5.
         assert_eq!(img.get_pixel(0, 0).0, [107, 57, 7]);
         assert_eq!(img.get_pixel(1, 1).0, [129, 79, 29]);
+
+        // The same read at 16 bits, scaled by 256, gets the tone curve.
+        let raw16: Vec<u8> = raw
+            .iter()
+            .flat_map(|&v| (u16::from(v) << 8).to_le_bytes())
+            .collect();
+        let img16 = flatbed_rgb16(&raw16, layout, &plan);
+        for (c, mean) in [106.5, 56.5, 6.5].into_iter().enumerate() {
+            let want = 65535.0 * tables::tone(mean * 256.0 / 65535.0);
+            assert_eq!(f64::from(img16.get_pixel(0, 0).0[c]), want.round());
+        }
     }
 }

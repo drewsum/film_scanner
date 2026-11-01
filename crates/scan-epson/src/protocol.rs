@@ -124,7 +124,12 @@ impl<'a> Protocol<'a> {
         let mut blocks = BlockAssembler::default();
         let mut buf = vec![0u8; 65536];
         while data.len() < len {
-            let n = self.dev.read(&mut buf)?;
+            let n = self.dev.read(&mut buf).map_err(|e| {
+                protocol_error(format!(
+                    "image read failed after {} of {len} bytes: {e}",
+                    data.len() + blocks.pending()
+                ))
+            })?;
             if n == 0 {
                 return Err(protocol_error(format!(
                     "scanner stopped after {} of {len} image bytes",
@@ -132,6 +137,7 @@ impl<'a> Protocol<'a> {
                 )));
             }
             if let Some(block) = blocks.push(&buf[..n]) {
+                log::trace!("block of {} bytes", block.len());
                 data.extend_from_slice(&block);
                 received(data.len().min(len));
             }

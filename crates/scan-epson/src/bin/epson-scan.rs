@@ -1,7 +1,7 @@
 //! Scan an area of the flatbed natively, up to 400 dpi.
 //!
 //! ```text
-//! epson-scan --dpi N --area X,Y,W,H --out OUT.png [--path DEV] [--simulate]
+//! epson-scan --dpi N --area X,Y,W,H --out OUT.png [--bits 8|16] [--path DEV] [--simulate]
 //! epson-scan --template CAPTURE.pcap [--template ...] --dpi N --area X,Y,W,H --out OUT.png
 //!            [--calibration live|recorded|flat] [--path DEV] [--offline]
 //! ```
@@ -21,7 +21,7 @@
 
 use std::process::ExitCode;
 
-use scan_core::ScanArea;
+use scan_core::{BitDepth, ScanArea};
 use scan_epson::session::FlatbedSession;
 use scan_epson::sim::SimulatedScanner;
 use scan_epson::template::{Calibration, Template};
@@ -39,6 +39,7 @@ struct Args {
     offline: bool,
     simulate: bool,
     calibration: Calibration,
+    bit_depth: BitDepth,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -49,6 +50,7 @@ fn parse_args() -> Result<Args, String> {
         (Vec::new(), None, None, None, None, false);
     let mut simulate = false;
     let mut calibration = Calibration::Live;
+    let mut bit_depth = BitDepth::Eight;
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
@@ -73,6 +75,13 @@ fn parse_args() -> Result<Args, String> {
             "--path" => path = Some(value()?),
             "--offline" => offline = true,
             "--simulate" => simulate = true,
+            "--bits" => {
+                bit_depth = match value()?.as_str() {
+                    "8" => BitDepth::Eight,
+                    "16" => BitDepth::Sixteen,
+                    _ => return Err("--bits is 8 or 16".into()),
+                }
+            }
             "--calibration" => {
                 calibration = match value()?.as_str() {
                     "live" => Calibration::Live,
@@ -83,6 +92,9 @@ fn parse_args() -> Result<Args, String> {
             }
             _ => return Err(usage.into()),
         }
+    }
+    if bit_depth == BitDepth::Sixteen && !templates.is_empty() {
+        return Err("--template scans are 8-bit".into());
     }
     if offline && templates.is_empty() {
         return Err("--offline needs --template".into());
@@ -96,6 +108,7 @@ fn parse_args() -> Result<Args, String> {
         offline,
         simulate,
         calibration,
+        bit_depth,
     })
 }
 
@@ -169,7 +182,8 @@ fn load_template(path: &str) -> Result<Template, String> {
 }
 
 fn run_session(args: &Args) -> Result<(), String> {
-    let session = FlatbedSession::new(&args.area, args.dpi).map_err(|e| e.to_string())?;
+    let session =
+        FlatbedSession::new(&args.area, args.dpi, args.bit_depth).map_err(|e| e.to_string())?;
     let plan = &session.plan;
     println!(
         "plan: {}x{} px, {} lines at {} dpi, {:?} move of {} steps, scan {} steps, crop x {}",
@@ -190,11 +204,13 @@ fn run_session(args: &Args) -> Result<(), String> {
     let raw = session
         .run(dev.as_mut(), POLL_DELAY)
         .map_err(|e| e.to_string())?;
-    let image = decode::flatbed_rgb8(&raw, session.layout, plan);
-    image
-        .save(&args.out)
-        .map_err(|e| format!("{}: {e}", args.out))?;
-    println!("saved {}x{} to {}", image.width(), image.height(), args.out);
+    let (width, height) = (plan.width, plan.height);
+    let saved = match args.bit_depth {
+        BitDepth::Eight => decode::flatbed_rgb8(&raw, session.layout, plan).save(&args.out),
+        BitDepth::Sixteen => decode::flatbed_rgb16(&raw, session.layout, plan).save(&args.out),
+    };
+    saved.map_err(|e| format!("{}: {e}", args.out))?;
+    println!("saved {width}x{height} to {}", args.out);
     Ok(())
 }
 

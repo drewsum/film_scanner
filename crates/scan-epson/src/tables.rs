@@ -30,6 +30,21 @@ pub fn gamma12() -> Vec<u8> {
         .collect()
 }
 
+/// The tone curve as a function on 0–1, for applying it on the host to 16-bit reads.
+pub fn tone(x: f64) -> f64 {
+    x.clamp(0.0, 1.0).powf(1.0 / GAMMA)
+}
+
+/// Flat tone curves (8- and 12-bit), as SilverFast uploads them for 16-bit reads: the
+/// scanner then returns linear data.
+pub fn linear8() -> [u8; 256] {
+    std::array::from_fn(|i| i as u8)
+}
+
+pub fn linear12() -> Vec<u8> {
+    (0..4096u16).flat_map(u16::to_le_bytes).collect()
+}
+
 /// A motor acceleration table (type 5): `len` step periods (u16 LE, in the scanner's ticks)
 /// under constant acceleration, from `start` for the first step to `end` from the last on.
 /// Matches the driver's tables to within one tick.
@@ -134,6 +149,9 @@ mod tests {
         assert_eq!((g[16], g[32], g[240]), (192, 273, 851));
         assert_eq!(g[4080..], [4095; 16]);
         assert!(g.windows(2).all(|w| w[0] <= w[1]));
+        assert_eq!(u16s(&linear12())[4095], 4095);
+        assert_eq!((tone(0.0), tone(1.0)), (0.0, 1.0));
+        assert_eq!((255.0 * tone(1.0 / 255.0)).round(), 12.0);
     }
 
     #[test]

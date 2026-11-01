@@ -121,11 +121,11 @@ SilverFast film in 11–14). Sequence for one read:
 |---|---|---|
 | 0–1, 2–3 | x start, x end (u16 LE) | units below |
 | 4–5 | line count (u16 LE) | equals the lines received |
-| 8 | horizontal subsampling / mode: `b1` → ÷8/3, `a1` → ÷4/3, `10` → ÷2, `00`/`01` → ÷1 | units per pixel |
+| 8 | upper bits: horizontal subsampling, `b_` → ÷8/3, `a_` → ÷4/3, `1_` → ÷2, `0_` → ÷1. Bit 0: **8-bit samples** (set in all of WIA's reads); clear, the read returns 16-bit little-endian samples | units per pixel; a native 16-bit read with `a0`/`b0` returns twice the bytes of `a1`/`b1` |
 | 9, 10 | resolution: **hardware dpi = 2400 × b9 / b10** | `01 0c` 200, `01 06` 400, `01 03` 800, `02 03` 1600, `01 01` 2400 |
-| 11 | `82`/`83` for 8-bit image reads, `40` white read, `00` dark and masked-strip reads (16-bit) | open: the low bit |
+| 11 | `82`/`83` for image reads (SilverFast's 16-bit ones too), `40` white read, `00` dark and masked-strip reads | open: the low bit |
 | 15 | varies 0x10–0x60 between otherwise equal scans | open |
-| 16 | `2e` in captures 02–09, `00` from 15 on; `1e` for a 400 dpi read at the top of the bed | open |
+| 16 | `2e` in captures 02–09, `00` from 15 on; `1e` for a 400 dpi read at the top of the bed; `80` in SilverFast's reads and calibration reads | open; not the bit depth: 16-bit reads with and without `80` are alike |
 | 18 | lines per data block: as many as fit in 64 KiB (11 at 1,920 px of RGB) | full-width captures |
 
 x units are pixels at max(hardware dpi, 533⅓) per inch; for the flatbed, x = 0 mm is about 143
@@ -237,7 +237,11 @@ Stop-Service stisvc -Force     # admin; Start-Service stisvc afterwards
 cargo run -p scan-epson --bin epson-scan -- --dpi 300 --area 40,60,30,20 --out scan.png
 ```
 
-`--simulate` runs the session against `scan_epson::sim::SimulatedScanner` instead. From the
+`--bits 16` makes a 16-bit read: `1e 41` byte 8 bit 0 cleared, and flat 8- and 12-bit tone
+curves uploaded instead of the gamma ones, as SilverFast does, so the samples are linear.
+`scan_epson::decode::flatbed_rgb16` applies the 1.8 tone curve on the host, so 8- and 16-bit
+scans of the same area match (mean absolute difference 1.25 of 255 on hardware, two scans
+apart) and the 16-bit one has levels between the 8-bit steps. `--simulate` runs the session against `scan_epson::sim::SimulatedScanner` instead. From the
 `1e 57` record on, a session's commands match Epson's driver in full-width captures 24, 25, 28
 and 29 (checked by `cargo test -p scan-epson -- --ignored` when the captures are present), except
 for the per-session calibration values, the tables' small differences above, and the carriage
@@ -246,7 +250,7 @@ move's step count. On hardware, against WIA's scans of the same areas (mean abso
 at the top of the bed (1 line offset).
 
 In the app, the V500 appears as **EPSON Perfection V500 (epson)** (`scan_epson::EpsonBackend`):
-flatbed, 8-bit colour, 50–400 dpi, any area of the 215.9 × 297.18 mm bed. The app relaunches
+flatbed, 8- or 16-bit colour, 50–400 dpi, any area of the 215.9 × 297.18 mm bed. The app relaunches
 itself elevated once at startup when a V500 is attached (`--no-elevate` skips this). Each scan
 stops `stisvc` and starts it again afterwards, so WIA stays usable between scans. A scanner that
 was just powered on gets its firmware from Epson Scan's `esfw7c.bin` first. A cancel is honoured
@@ -300,7 +304,7 @@ Findings so far:
 - `1e 31` (12 bytes) sets per-channel analog front-end values: three u16 at 0 (offset; SilverFast
   binary-searches them, `80 → c0 → a0 → 90 → 88 → 8c`, against dark reads), and three bytes at
   8 (gain, e.g. `22 16 16`).
-- `1e 41` byte 8 is `0x10` for 16-bit-per-channel data (`0x00` for 8-bit). Capture 11's preview
+- `1e 41` byte 8 is `0x10` (÷2, 16-bit) in capture 11. Its preview
   is 1,088 px × 3,720 lines of 16-bit LE interleaved RGB at hardware divisor 6 (400 dpi), sent in
   261,120-byte (40-line) blocks. The x range in `1e 41` is 2× the pixel width at that
   resolution.

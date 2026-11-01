@@ -45,6 +45,11 @@ impl BlockAssembler {
     }
 
     /// Forget a partial block, e.g. when the host sends the next command.
+    /// Bytes received of the block in progress.
+    pub fn pending(&self) -> usize {
+        self.buf.len()
+    }
+
     pub fn reset(&mut self) {
         self.buf.clear();
     }

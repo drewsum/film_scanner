@@ -68,20 +68,20 @@ impl SimulatedScanner {
         }
         let u16_at = |i: usize| usize::from(u16::from_le_bytes([g[i], g[i + 1]]));
         let units = u16_at(2).saturating_sub(u16_at(0));
-        // Horizontal subsampling (`1e 41` byte 8): 8/3, 4/3 or 2.
-        let width = match g[8] {
-            0xb1 => units * 3 / 8,
-            0xa1 => units * 3 / 4,
+        // Horizontal subsampling (`1e 41` byte 8, upper bits): 8/3, 4/3 or 2.
+        let width = match g[8] & !0x01 {
+            0xb0 => units * 3 / 8,
+            0xa0 => units * 3 / 4,
             0x10 => units / 2,
             _ => units,
         };
         let (lines, per_block) = (u16_at(4), usize::from(g[18]).max(1));
-        // Image reads (`1e 41` byte 11 = 82/83) are 8-bit; calibration reads 16-bit.
-        let eight_bit = g[11] & 0x80 != 0;
-        let sample: Vec<u8> = match (eight_bit, self.lamp_off) {
-            (true, _) => vec![IMAGE_LEVEL],
-            (false, true) => DARK_LEVEL.to_le_bytes().to_vec(),
-            (false, false) => WHITE_LEVEL.to_le_bytes().to_vec(),
+        // `1e 41` byte 8 bit 0 selects 8-bit samples; calibration reads are 16-bit.
+        let sixteen_bit = g[8] & 0x01 == 0;
+        let sample: Vec<u8> = match (sixteen_bit, self.lamp_off) {
+            (false, _) => vec![IMAGE_LEVEL],
+            (true, true) => DARK_LEVEL.to_le_bytes().to_vec(),
+            (true, false) => WHITE_LEVEL.to_le_bytes().to_vec(),
         };
         let line: Vec<u8> = sample.repeat(width * 3);
         let mut transfers = Vec::new();

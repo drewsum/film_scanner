@@ -2,12 +2,13 @@
 //! constants and tables (see `docs/epson-v500`), so no capture is needed.
 //!
 //! Like the driver, a session reads the bed's full width at the hardware resolution and the
-//! requested area is cropped from it when decoding. Supported: 8-bit RGB at hardware
-//! resolutions 200 and 400 dpi (requests up to 400 dpi).
+//! requested area is cropped from it when decoding. Supported: 8- and 16-bit RGB at hardware
+//! resolutions 200 and 400 dpi (requests up to 400 dpi). 16-bit reads are linear, with flat
+//! tone curves as SilverFast loads them; [`crate::decode::flatbed_rgb16`] applies the curve.
 
 use std::time::Duration;
 
-use scan_core::{MM_PER_INCH, NoProgress, ProgressSink, ScanArea, ScanError};
+use scan_core::{BitDepth, MM_PER_INCH, NoProgress, ProgressSink, ScanArea, ScanError};
 
 use crate::calibration::{self, Shading};
 use crate::geometry::{self, FlatbedPlan, MoveProfile};
@@ -61,6 +62,9 @@ const DARK_LINES: u16 = 16;
 /// The white read moves the carriage over the calibration strip at this period.
 const WHITE_MOTOR: [u8; 12] = [0x33, 0, 0, 0, 0x03, 0, 0, 0, 0, 0, 0x08, 0];
 const MAX_BLOCK: usize = 65536;
+/// `1e 41` byte 8 bit 0: 8-bit samples. WIA's reads all set it; calibration reads and
+/// SilverFast's 48-bit scans clear it and get 16-bit samples.
+const EIGHT_BIT: u8 = 0x01;
 
 /// Constants of one hardware resolution, from captures of Epson's driver.
 #[derive(Clone, Copy, Debug)]
@@ -68,7 +72,7 @@ struct Mode {
     hw_dpi: u32,
     /// `1e 41` bytes 9–10 give 2400 × 1 / divisor dpi.
     divisor: u8,
-    /// `1e 41` byte 8 of the image read: the horizontal subsampling.
+    /// `1e 41` byte 8 of the 8-bit image read: the horizontal subsampling, bit 0 set.
     subsampling: u8,
     /// Pixels per line of the image read, after subsampling.
     width: u32,
@@ -164,11 +168,12 @@ pub struct FlatbedSession {
     mode: Mode,
     pub plan: FlatbedPlan,
     pub layout: RawLayout,
+    pub bit_depth: BitDepth,
     area: ScanArea,
 }
 
 impl FlatbedSession {
-    pub fn new(area: &ScanArea, dpi: u32) -> Result<Self, ScanError> {
+    pub fn new(area: &ScanArea, dpi: u32, bit_depth: BitDepth) -> Result<Self, ScanError> {
         let plan = FlatbedPlan::new(area, dpi, u32::from(X_START))?;
         let mode = *MODES
             .iter()
@@ -197,13 +202,23 @@ impl FlatbedSession {
                 crop_x,
             },
             plan,
+            bit_depth,
             area: *area,
         })
     }
 
-    /// Bytes of 8-bit RGB the image read returns.
+    fn sixteen(&self) -> bool {
+        self.bit_depth == BitDepth::Sixteen
+    }
+
+    /// Bytes per line of the image read.
+    fn line_len(&self) -> usize {
+        self.mode.width as usize * 3 * if self.sixteen() { 2 } else { 1 }
+    }
+
+    /// Bytes the image read returns.
     pub fn data_len(&self) -> usize {
-        self.plan.lines as usize * self.mode.width as usize * 3
+        self.plan.lines as usize * self.line_len()
     }
 
     /// The `1e 57` record of the scan (read back by the next session's `1e 53`): resolution,
@@ -263,7 +278,11 @@ impl FlatbedSession {
         log::info!("scanner: {}", String::from_utf8_lossy(&id).trim());
         p.query(STATE_A1, 1)?;
         p.query(STATE_65, 1)?;
-        let gamma8 = tables::gamma8();
+        let gamma8 = if self.sixteen() {
+            tables::linear8()
+        } else {
+            tables::gamma8()
+        };
         for address in tables::GAMMA8_ADDRESS {
             upload(&mut p, tables::GAMMA8, address, &gamma8)?;
         }
@@ -435,7 +454,11 @@ impl FlatbedSession {
         progress.progress(CALIBRATED);
 
         // Tone curves, then move the carriage to the area.
-        let gamma12 = tables::gamma12();
+        let gamma12 = if self.sixteen() {
+            tables::linear12()
+        } else {
+            tables::gamma12()
+        };
         for address in tables::GAMMA12_ADDRESS {
             upload(&mut p, tables::GAMMA12, address, &gamma12)?;
         }
@@ -456,7 +479,12 @@ impl FlatbedSession {
         // The image read.
         let lines = u16::try_from(self.plan.lines)
             .map_err(|_| ScanError::InvalidRequest("area too tall".into()))?;
-        let lines_per_block = (MAX_BLOCK / (m.width as usize * 3)).min(255) as u8;
+        let lines_per_block = (MAX_BLOCK / self.line_len()).min(255) as u8;
+        let subsampling = if self.sixteen() {
+            m.subsampling & !EIGHT_BIT
+        } else {
+            m.subsampling
+        };
         p.command(EXPOSURE, &[&exposure_params(m.exposure, false)])?;
         p.command(
             GEOMETRY,
@@ -467,7 +495,7 @@ impl FlatbedSession {
                 [
                     0,
                     0,
-                    m.subsampling,
+                    subsampling,
                     0x01,
                     m.divisor,
                     0x82,
@@ -534,26 +562,43 @@ mod tests {
     #[test]
     fn runs_on_simulator() {
         for (dpi, y) in [(75, 0.0), (75, 60.0), (300, 0.0), (300, 60.0)] {
-            let session = FlatbedSession::new(&area(40.0, y, 30.0, 20.0), dpi).unwrap();
+            let session =
+                FlatbedSession::new(&area(40.0, y, 30.0, 20.0), dpi, BitDepth::Eight).unwrap();
             let mut sim = SimulatedScanner::default();
             let data = session.run(&mut sim, Duration::ZERO).unwrap();
             assert_eq!(data.len(), session.data_len());
             // The simulator's lit flatbed reads back as a bright, flat image.
             assert!(data.iter().all(|&v| v > 100), "{dpi} dpi, y {y}");
         }
+        let session =
+            FlatbedSession::new(&area(40.0, 60.0, 30.0, 20.0), 300, BitDepth::Sixteen).unwrap();
+        let mut sim = SimulatedScanner::default();
+        let data = session.run(&mut sim, Duration::ZERO).unwrap();
+        assert_eq!(data.len(), 2 * session.plan.lines as usize * 3456 * 3);
+        assert!(
+            data.as_chunks::<2>()
+                .0
+                .iter()
+                .all(|v| u16::from_le_bytes(*v) > 20000)
+        );
+        // The image read asks for 16 bits, with flat tone curves.
+        let geometry = sim.writes.iter().rev().find(|w| w.len() == 22).unwrap();
+        assert_eq!(geometry[8], 0xa0);
+        assert!(sim.writes.contains(&tables::linear12()));
     }
 
     #[test]
     fn rejects_unsupported_requests() {
-        assert!(FlatbedSession::new(&area(0.0, 0.0, 10.0, 10.0), 600).is_err());
+        let new = |a, dpi| FlatbedSession::new(&a, dpi, BitDepth::Eight);
+        assert!(new(area(0.0, 0.0, 10.0, 10.0), 600).is_err());
         // The full-width read is 243 mm wide at 200 dpi, 219 mm at 400.
-        assert!(FlatbedSession::new(&area(230.0, 0.0, 30.0, 10.0), 75).is_err());
-        assert!(FlatbedSession::new(&area(200.0, 0.0, 30.0, 10.0), 300).is_err());
+        assert!(new(area(230.0, 0.0, 30.0, 10.0), 75).is_err());
+        assert!(new(area(200.0, 0.0, 30.0, 10.0), 300).is_err());
     }
 
     #[test]
     fn records_the_scan() {
-        let s = FlatbedSession::new(&area(0.0, 30.0, 215.9, 20.0), 300).unwrap();
+        let s = FlatbedSession::new(&area(0.0, 30.0, 215.9, 20.0), 300, BitDepth::Eight).unwrap();
         let r = s.record();
         // Capture 29: 400 dpi, y 472, 3,400 × 314 px.
         assert_eq!(r[..8], [0x90, 0x01, 0, 0, 0x90, 0x01, 0, 0]);
@@ -587,7 +632,8 @@ mod tests {
                 .filter(|t| t.direction == Direction::Out && !skip(&t.data))
                 .map(|t| t.data)
                 .collect();
-            let session = FlatbedSession::new(&area(0.0, y, 215.9, 20.0), dpi).unwrap();
+            let session =
+                FlatbedSession::new(&area(0.0, y, 215.9, 20.0), dpi, BitDepth::Eight).unwrap();
             let mut sim = SimulatedScanner::default();
             session.run(&mut sim, Duration::ZERO).unwrap();
             let ours: Vec<Vec<u8>> = sim.writes.into_iter().filter(|w| !skip(w)).collect();

@@ -99,7 +99,7 @@ fn capabilities() -> Capabilities {
         sources: vec![SourceCapabilities {
             source: ScanSource::Flatbed,
             resolutions: RESOLUTIONS.to_vec(),
-            bit_depths: vec![BitDepth::Eight],
+            bit_depths: vec![BitDepth::Eight, BitDepth::Sixteen],
             color_modes: vec![ColorMode::Color],
             infrared: false,
             max_exposure_passes: 1,
@@ -123,13 +123,19 @@ impl ScannerDevice for V500Device {
         progress: &mut dyn ProgressSink,
     ) -> Result<ScanResult, ScanError> {
         let (_, area) = request.validate(&self.caps)?;
-        let session = FlatbedSession::new(&area, request.dpi)?;
+        let session = FlatbedSession::new(&area, request.dpi, request.bit_depth)?;
         progress.progress(0.0);
         let _wia = self.pause_wia.then(WiaPause::new).transpose()?;
         let mut dev = (self.connect)()?;
         let raw = session.run_with(dev.as_mut(), self.poll_delay, progress)?;
         drop(dev);
-        let image = decode::flatbed_rgb8(&raw, session.layout, &session.plan);
+        let (layout, plan) = (session.layout, &session.plan);
+        let image = match request.bit_depth {
+            BitDepth::Eight => DynamicImage::ImageRgb8(decode::flatbed_rgb8(&raw, layout, plan)),
+            BitDepth::Sixteen => {
+                DynamicImage::ImageRgb16(decode::flatbed_rgb16(&raw, layout, plan))
+            }
+        };
         progress.progress(1.0);
         Ok(ScanResult {
             source: ScanSource::Flatbed,
@@ -137,7 +143,7 @@ impl ScannerDevice for V500Device {
             area,
             passes: vec![ScanPass {
                 exposure: Exposure::default(),
-                image: DynamicImage::ImageRgb8(image),
+                image,
             }],
             infrared: None,
         })
@@ -262,6 +268,14 @@ mod tests {
         assert_eq!(progress.fractions.last(), Some(&1.0));
         // The read reports progress as it goes.
         assert!(progress.fractions.iter().any(|&f| f > 0.2 && f < 0.9));
+
+        let request = ScanRequest {
+            bit_depth: BitDepth::Sixteen,
+            ..request(150)
+        };
+        let result = dev.scan(&request, &mut NoProgress).unwrap();
+        assert_eq!(result.dimensions(), (300, 150));
+        assert!(matches!(result.primary(), DynamicImage::ImageRgb16(_)));
     }
 
     #[test]
@@ -283,10 +297,6 @@ mod tests {
     fn rejects_what_it_cant_scan() {
         let mut dev = simulated();
         for req in [
-            ScanRequest {
-                bit_depth: BitDepth::Sixteen,
-                ..request(300)
-            },
             ScanRequest {
                 source: ScanSource::Transparency,
                 ..request(300)
