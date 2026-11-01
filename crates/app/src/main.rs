@@ -1,5 +1,8 @@
 //! Film Scanner: an open-source film scanning workflow (scan, crop, invert, adjust, export).
 
+// Release builds on Windows are a GUI program: no console window opens with them.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod state;
 mod ui;
 mod view;
@@ -19,7 +22,11 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("Film Scanner")
             .with_inner_size([1280.0, 800.0])
-            .with_min_inner_size([800.0, 500.0]),
+            .with_min_inner_size([800.0, 500.0])
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png"))
+                    .expect("the bundled icon is a PNG"),
+            ),
         ..Default::default()
     };
     let result = eframe::run_native(

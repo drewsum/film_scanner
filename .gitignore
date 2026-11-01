@@ -1,4 +1,5 @@
 /target
+/dist
 *.tif
 *.tiff
 !tests/fixtures/**

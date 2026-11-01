@@ -45,6 +45,18 @@ Then:
 cargo run --release -p film-scanner
 ```
 
+### Windows program
+
+To build a standalone `dist\Film Scanner.exe` that you can launch by double-clicking it, run
+this from PowerShell. The two switches add Start Menu and Desktop shortcuts:
+
+```powershell
+.\scripts\build-windows.ps1 -StartMenu -Desktop
+```
+
+The release program opens without a console window. With a V500 attached, it asks for
+administrator rights once at launch.
+
 ## Development
 
 ```sh
