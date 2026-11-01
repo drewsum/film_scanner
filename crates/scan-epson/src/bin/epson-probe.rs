@@ -8,6 +8,9 @@
 //! Each HEX argument (e.g. `1b40`) is written as one transfer, followed by one read of up to
 //! N bytes (`--read 0` skips the read). Only send commands whose effect you know: some
 //! scanners will move the carriage or lamp on command.
+//!
+//! `--drain` first reads and discards whatever the scanner is still sending (for example
+//! the rest of an interrupted image read), until a read times out.
 
 use std::process::ExitCode;
 
@@ -35,6 +38,7 @@ fn run() -> Result<(), String> {
     let mut path = None;
     let mut read_len = 512usize;
     let mut timeout = 5u32;
+    let mut drain = false;
     let mut commands = Vec::new();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -49,6 +53,7 @@ fn run() -> Result<(), String> {
                 return Ok(());
             }
             "--path" => path = args.next(),
+            "--drain" => drain = true,
             "--read" => {
                 read_len = args
                     .next()
@@ -77,6 +82,25 @@ fn run() -> Result<(), String> {
         eprintln!("warning: {e}");
     }
     println!("# {path}");
+    if drain {
+        let mut buf = vec![0u8; 65536];
+        let mut total = 0;
+        let mut last = Vec::new();
+        let end = loop {
+            match dev.read(&mut buf) {
+                Ok(0) => break "empty read".to_string(),
+                Ok(n) => {
+                    total += n;
+                    last = buf[n.saturating_sub(16)..n].to_vec();
+                }
+                Err(e) => break e.to_string(),
+            }
+        };
+        println!(
+            "drained {total} bytes, ending {} ({end})",
+            hex_ascii(&last, usize::MAX)
+        );
+    }
     for cmd in commands {
         println!("> {}", hex_ascii(&cmd, usize::MAX));
         dev.write(&cmd).map_err(|e| e.to_string())?;

@@ -8,8 +8,12 @@
 //! - [`pcap`] and [`trace`] read USBPcap captures and print the host/device conversation
 //!   (the `epson-trace` tool)
 //! - [`transport`] moves bytes over the scanner's bulk pipes (the `epson-probe` tool)
+//! - [`replay`] plays a captured session back to a scanner (the `epson-replay` tool)
+//! - [`firmware`] loads Epson's firmware into a freshly powered scanner (`epson-firmware`)
 
+pub mod firmware;
 pub mod pcap;
+pub mod replay;
 pub mod trace;
 pub mod transport;
 
