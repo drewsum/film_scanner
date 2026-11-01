@@ -361,14 +361,16 @@ impl Template {
                 before[p.white_levels].data = calibration::white_read_levels(darks).to_vec();
                 let white = stage(&before, p.dark_ref_end..p.white_end)?.data;
                 let dark = stage(&before, p.white_end..p.dark_end)?.data;
-                let shading = Shading::compute(&white, &dark, p.width, darks).ok_or_else(|| {
-                    ScanError::Backend(format!(
-                        "calibration reads of {} and {} bytes don't fit {} pixels",
-                        white.len(),
-                        dark.len(),
-                        p.width
-                    ))
-                })?;
+                let shading =
+                    Shading::compute(&white, &dark, p.width, darks, geometry::bed_units())
+                        .ok_or_else(|| {
+                            ScanError::Backend(format!(
+                                "calibration reads of {} and {} bytes don't fit {} pixels",
+                                white.len(),
+                                dark.len(),
+                                p.width
+                            ))
+                        })?;
                 log::info!(
                     "calibration: offsets {:02x?}, white-read darks {darks:?}, \
                      white base {:?}, dark base {:?}",

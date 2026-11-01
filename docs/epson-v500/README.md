@@ -123,10 +123,10 @@ SilverFast film in 11–14). Sequence for one read:
 | 4–5 | line count (u16 LE) | equals the lines received |
 | 8 | horizontal subsampling / mode: `b1` → ÷8/3, `a1` → ÷4/3, `10` → ÷2, `00`/`01` → ÷1 | units per pixel |
 | 9, 10 | resolution: **hardware dpi = 2400 × b9 / b10** | `01 0c` 200, `01 06` 400, `01 03` 800, `02 03` 1600, `01 01` 2400 |
-| 11 | `82`/`83` for image reads, `40` shading, `00` dark | open: the low bit |
+| 11 | `82`/`83` for 8-bit image reads, `40` white read, `00` dark and masked-strip reads (16-bit) | open: the low bit |
 | 15 | varies 0x10–0x60 between otherwise equal scans | open |
-| 16 | `2e` in captures 02–09, `00` from 15 on | open; maybe lamp/state |
-| 18 | varies with resolution and area (`1c`, `12`, `38`, `44`, …) | open; maybe lines per block |
+| 16 | `2e` in captures 02–09, `00` from 15 on; `1e` for a 400 dpi read at the top of the bed | open |
+| 18 | lines per data block: as many as fit in 64 KiB (11 at 1,920 px of RGB) | full-width captures |
 
 x units are pixels at max(hardware dpi, 533⅓) per inch; for the flatbed, x = 0 mm is about 143
 units at 533⅓/in (0.27 in from the edge). The driver asks for more width than requested and
@@ -151,13 +151,27 @@ Mixing them (a long move with the short profile's table) lands the read 0.2 in e
 skew = 0.025 in × hardware dpi. Output row j takes blue from raw line j, green from j + skew and
 red from j + 2 × skew.
 
-**`1e 22` (12 bytes):** u16 at 0 grows with resolution (3,840 at 200/400 dpi, 5,376 at 800,
-10,848 at 1,600 on the flatbed). SilverFast's film scans leave it 0 and set u16 at 6 instead.
-Probably exposure time per lamp; open.
+**`1e 22` (12 bytes):** u16 at 0 grows with resolution (3,840 at 200 dpi, 3,264 at 400, 5,376 at
+800, 10,848 at 1,600 on the flatbed). The same value leads `1e 21` (26 bytes) and follows `04 00`
+in `1e 46`. SilverFast's film scans leave it 0 and set u16 at 6 instead. Probably exposure time
+per lamp; open.
 
-**`1e 84` (table upload):** an 8-byte header, then the table. Byte 0 is the type and bytes 5–7
-the table's length (u24 LE). Type 2: three 8,192-byte gamma curves (u16 × 4,096); type 3: three
-256-byte curves; type 5: motor acceleration; type 6: shading; type 7: 256 bytes, constant.
+**`1e 57` (42 bytes), the scan record:** u32 LE fields: hardware dpi (twice), the area's x, y,
+width and height in pixels at that resolution, `0x0813`, `0x0300` + the resolution divisor, then
+`1e 41` byte 16 at byte 33. The next session reads it back with `1e 53`. SilverFast writes its
+own; it doesn't affect the scan.
+
+**`1e 84` (table upload):** an 8-byte header, then the table, acked once. Byte 0 is the type,
+bytes 1–4 an address and bytes 5–7 the table's length (u24 LE). `scan_epson::tables` generates
+them all:
+
+| Type | Table | Content |
+|---|---|---|
+| 3 | 8-bit tone curve, one per channel (256 B) | `round(255 · x^(1/1.8))`, exactly the driver's |
+| 2 | 12-bit tone curve, one per channel (u16 × 4,096) | knots every 16 entries are the 8-bit curve widened to 12 bits (`v << 4 \| v >> 4`), linear in between, 4,095 from 4,080 on. The driver's interpolation differs by at most 2 in 4 % of the entries |
+| 5 | motor acceleration (u16 step periods) | constant acceleration from the first period to the last over the table's length: 2,500 → 250 (256 entries) for a short move, 2,500 → 160 (512) for a long one, 2,500 → 320 / 1,249 → 272 (512) for the image read at 200 / 400 dpi, one entry (160 / 136) for the white read. Within one tick of the driver's |
+| 6 | shading, see [Flatbed calibration](#flatbed-calibration) | |
+| 7 | 256 B, constant in every session (Epson's and SilverFast's) | `00 00 00 00 28 00 c0 31 c8 00 c0 31 90 01 00 10`, then `ff` |
 
 ### Flatbed calibration
 
@@ -181,7 +195,9 @@ and the calibration below. Everything else is constant for a given geometry.
    pixel-interleaved. Its upper 10 bits are the pixel's white level above the white base in
    64-count steps. Its lower 6 bits are the pixel's dark level above the dark base. The driver
    smooths the dark profile (a ~65 px box filter matches) and takes its minimum as the dark
-   base. The white base is the dimmest lit pixel's white level.
+   base. The white base is the dimmest pixel's white level under the glass (the first 8.5 in
+   of the read; past it the read falls off the calibration strip, and those pixels would halve
+   the base).
 
 `scan_epson::calibration` computes all of this from the scanner's own reads. In capture 24, the
 table's upper field correlates 0.9999 with the white read and the lower field is within ~2
@@ -195,29 +211,44 @@ area (mean absolute difference, 0–255):
 | `recorded`: the template's values | 1.86 | 3.57 |
 | `flat`: shading table flattened | 2.82, 2–14 % brighter, varying across the area | |
 
-`1e 43` (12 bytes) stays `84 7d 77 7e df 7f` for image reads; it is probably the CCD's
-per-channel gain from the scanner's EEPROM (`1e 87` returns 10 bytes of what looks like device
-data).
+`1e 43` (12 bytes) is `00 80 00 80 00 80 84 7d 77 7e df 7f` for calibration reads and
+`84 7d 77 7e df 7f` twice for image reads. SilverFast sends the same values, so they are fixed
+rather than per-device. `1e 87 00` returns 10 bytes that differ between sessions.
 
-### Native scans from templates
+### Native scans
 
-`epson-scan` scans any flatbed area at up to 400 dpi without Epson's software running. It uses
-full-width captures of Epson's driver as templates for the lamp, gamma and motor commands. It
-redoes the [calibration](#flatbed-calibration) from the scanner's own reads and patches the
-carriage move, line count and scan length. It reads the full width and crops when decoding:
+`epson-scan` scans any flatbed area at up to 400 dpi without Epson's software. It generates the
+whole session Epson's driver runs (`scan_epson::session`):
+
+1. Open: `1e 85`, `1e 53`, `1e e1 0b 00 25 61 00 00`, `1b 40`, `1b 13` (identity), `1e a1`,
+   `1e 65`, the 8-bit tone curves.
+2. `1e 57` (the scan record), lamp on (`1e a2 01`), `1e 87 00`, `1e 86`.
+3. [Calibration](#flatbed-calibration): the scanner's offset calibration, `1e 11 04`, `1e 21`,
+   the type-7 table, then the masked-strip, white and dark reads.
+4. The 12-bit tone curves, the carriage move (motor table, `1e 01`, `1e 05`).
+5. The image read: `1e 22`, `1e 41`, `1e 42`, `1e 43`, the shading table, the motor table,
+   `1e 01`, `1e 47`. Then `1e a1`, `1e 65`, `1e 85`.
+
+`1b 03` is polled until bit `0x40` (busy) clears after each read and move. Like the driver, a
+session reads the full width and the area is cropped when decoding:
 
 ```sh
 Stop-Service stisvc -Force     # admin; Start-Service stisvc afterwards
-cargo run -p scan-epson --bin epson-scan -- \
-  --template target/captures/24_75dpi_fullwidth.pcap \
-  --template target/captures/28_75dpi_fullwidth_y30.pcap \
-  --dpi 75 --area 40,60,80,50 --out scan.png
+cargo run -p scan-epson --bin epson-scan -- --dpi 300 --area 40,60,30,20 --out scan.png
 ```
 
-Templates are captures 24/28 (200 dpi hardware, top/lower move profile) and 25/29 (400 dpi) of
-WIA scans of `0,0,215.9,20` and `0,30,215.9,20` mm. Checked against WIA's own scans of the same
-areas: no offset at 75 dpi, at most 1 px at 300 dpi, mean difference 2–4 levels out of 255.
-Templates come from your own machine's captures and are not committed.
+`--simulate` runs the session against `scan_epson::sim::SimulatedScanner` instead. From the
+`1e 57` record on, a session's commands match Epson's driver in full-width captures 24, 25, 28
+and 29 (checked by `cargo test -p scan-epson -- --ignored` when the captures are present), except
+for the per-session calibration values, the tables' small differences above, and the carriage
+move's step count. On hardware, against WIA's scans of the same areas (mean absolute difference,
+0–255): 1.85 at 75 dpi (80 × 50 mm), 2.42 at 300 dpi (30 × 20 mm, 1 px offset), 3.96 at 150 dpi
+at the top of the bed (1 line offset).
+
+The older template mode (`--template CAPTURE.pcap`) replays a full-width capture of Epson's
+driver with the area patched in. Templates are captures 24/28 (200 dpi hardware, top/lower move
+profile) and 25/29 (400 dpi) of WIA scans of `0,0,215.9,20` and `0,30,215.9,20` mm. They come from
+your own machine's captures and are not committed.
 
 ### Infrared (capture 13)
 

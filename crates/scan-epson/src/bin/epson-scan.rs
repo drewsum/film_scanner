@@ -1,27 +1,34 @@
-//! Scan an area of the flatbed natively, using a full-width capture of Epson's driver as the
-//! template for everything we don't generate yet.
+//! Scan an area of the flatbed natively, up to 400 dpi.
 //!
 //! ```text
+//! epson-scan --dpi N --area X,Y,W,H --out OUT.png [--path DEV] [--simulate]
 //! epson-scan --template CAPTURE.pcap [--template ...] --dpi N --area X,Y,W,H --out OUT.png
-//!            [--calibration live|recorded|flat] [--path DEV]
-//! epson-scan --template CAPTURE.pcap --dpi N --area X,Y,W,H --out OUT.png --offline
+//!            [--calibration live|recorded|flat] [--path DEV] [--offline]
 //! ```
 //!
-//! The area is in mm from the bed's corner. A template fits when its hardware resolution matches
+//! The area is in mm from the bed's corner. Stop the WIA service first
+//! (`Stop-Service stisvc -Force`), or its polling interferes. By default the whole session is
+//! generated ([`scan_epson::session`]); `--simulate` runs it against a simulated scanner.
+//!
+//! With `--template`, a capture of Epson's driver is replayed instead, with the request's area
+//! patched in. A template fits when its hardware resolution matches
 //! the request's (200 dpi for up to 200 dpi, 400 for up to 400) and it was captured with the same
 //! carriage-move profile (an area at the top of the bed, or further down); pass several and the
-//! first that fits is used. Stop the WIA service first
-//! (`Stop-Service stisvc -Force`), or its polling interferes. `--offline` decodes the
-//! template's own recorded read instead of scanning, for checking the decoding.
-//!
-//! Calibration is computed from the scan's own reads by default; `recorded` replays the
-//! template's values and `flat` turns shading correction off, for comparison.
+//! first that fits is used. `--offline` decodes the template's own recorded read instead of
+//! scanning, for checking the decoding. Calibration is computed from the scan's own reads by
+//! default; `recorded` replays the template's values and `flat` turns shading correction off,
+//! for comparison.
 
 use std::process::ExitCode;
 
 use scan_core::ScanArea;
+use scan_epson::session::FlatbedSession;
+use scan_epson::sim::SimulatedScanner;
 use scan_epson::template::{Calibration, Template};
+use scan_epson::transport::Transport;
 use scan_epson::{decode, pcap, trace};
+
+const POLL_DELAY: std::time::Duration = std::time::Duration::from_millis(25);
 
 struct Args {
     templates: Vec<String>,
@@ -30,6 +37,7 @@ struct Args {
     out: String,
     path: Option<String>,
     offline: bool,
+    simulate: bool,
     calibration: Calibration,
 }
 
@@ -39,6 +47,7 @@ fn parse_args() -> Result<Args, String> {
     let mut args = std::env::args().skip(1);
     let (mut templates, mut dpi, mut area, mut out, mut path, mut offline) =
         (Vec::new(), None, None, None, None, false);
+    let mut simulate = false;
     let mut calibration = Calibration::Live;
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
@@ -63,6 +72,7 @@ fn parse_args() -> Result<Args, String> {
             "--out" => out = Some(value()?),
             "--path" => path = Some(value()?),
             "--offline" => offline = true,
+            "--simulate" => simulate = true,
             "--calibration" => {
                 calibration = match value()?.as_str() {
                     "live" => Calibration::Live,
@@ -74,23 +84,26 @@ fn parse_args() -> Result<Args, String> {
             _ => return Err(usage.into()),
         }
     }
+    if offline && templates.is_empty() {
+        return Err("--offline needs --template".into());
+    }
     Ok(Args {
-        templates: if templates.is_empty() {
-            return Err(usage.into());
-        } else {
-            templates
-        },
+        templates,
         dpi: dpi.ok_or(usage)?,
         area: area.ok_or(usage)?,
         out: out.ok_or(usage)?,
         path,
         offline,
+        simulate,
         calibration,
     })
 }
 
 fn run() -> Result<(), String> {
     let args = parse_args()?;
+    if args.templates.is_empty() {
+        return run_session(&args);
+    }
     // Use the first template that fits the request (resolution and carriage move).
     let mut chosen = None;
     let mut reasons = Vec::new();
@@ -135,7 +148,9 @@ fn run() -> Result<(), String> {
         }
         data
     } else {
-        scan(&script, args.path, args.calibration)?
+        let mut dev = open(args.path.clone())?;
+        Template::run(&script, dev.as_mut(), POLL_DELAY, args.calibration)
+            .map_err(|e| e.to_string())?
     };
     let image = decode::flatbed_rgb8(&raw, script.layout, &script.plan);
     image
@@ -153,12 +168,38 @@ fn load_template(path: &str) -> Result<Template, String> {
         .map_err(|e| format!("{path}: {e}"))
 }
 
+fn run_session(args: &Args) -> Result<(), String> {
+    let session = FlatbedSession::new(&args.area, args.dpi).map_err(|e| e.to_string())?;
+    let plan = &session.plan;
+    println!(
+        "plan: {}x{} px, {} lines at {} dpi, {:?} move of {} steps, scan {} steps, crop x {}",
+        plan.width,
+        plan.height,
+        plan.lines,
+        plan.hw_dpi,
+        plan.move_profile,
+        plan.move_steps,
+        plan.scan_steps,
+        session.layout.crop_x
+    );
+    let mut dev: Box<dyn Transport> = if args.simulate {
+        Box::new(SimulatedScanner::default())
+    } else {
+        open(args.path.clone())?
+    };
+    let raw = session
+        .run(dev.as_mut(), POLL_DELAY)
+        .map_err(|e| e.to_string())?;
+    let image = decode::flatbed_rgb8(&raw, session.layout, plan);
+    image
+        .save(&args.out)
+        .map_err(|e| format!("{}: {e}", args.out))?;
+    println!("saved {}x{} to {}", image.width(), image.height(), args.out);
+    Ok(())
+}
+
 #[cfg(windows)]
-fn scan(
-    script: &scan_epson::template::Script,
-    path: Option<String>,
-    calibration: Calibration,
-) -> Result<Vec<u8>, String> {
+fn open(path: Option<String>) -> Result<Box<dyn Transport>, String> {
     use scan_epson::transport::{UsbScan, find_usbscan_devices};
     let path = match path {
         Some(p) => p,
@@ -170,22 +211,12 @@ fn scan(
     };
     let mut dev = UsbScan::open(&path).map_err(|e| e.to_string())?;
     dev.set_timeouts(30, 30).map_err(|e| e.to_string())?;
-    Template::run(
-        script,
-        &mut dev,
-        std::time::Duration::from_millis(25),
-        calibration,
-    )
-    .map_err(|e| e.to_string())
+    Ok(Box::new(dev))
 }
 
 #[cfg(not(windows))]
-fn scan(
-    _: &scan_epson::template::Script,
-    _: Option<String>,
-    _: Calibration,
-) -> Result<Vec<u8>, String> {
-    Err("scanning currently supports only Windows (usbscan.sys); use --offline".into())
+fn open(_: Option<String>) -> Result<Box<dyn Transport>, String> {
+    Err("scanning currently supports only Windows (usbscan.sys); use --simulate".into())
 }
 
 fn main() -> ExitCode {

@@ -10,6 +10,8 @@
 //! - [`transport`] moves bytes over the scanner's bulk pipes (the `epson-probe` tool)
 //! - [`replay`] plays a captured session back to a scanner (the `epson-replay` tool)
 //! - [`firmware`] loads Epson's firmware into a freshly powered scanner (`epson-firmware`)
+//! - [`session`] runs a flatbed scan from scratch over [`protocol`] (the `epson-scan` tool);
+//!   [`sim`] simulates the scanner for tests
 
 pub mod calibration;
 pub mod data;
@@ -17,7 +19,11 @@ pub mod decode;
 pub mod firmware;
 pub mod geometry;
 pub mod pcap;
+pub mod protocol;
 pub mod replay;
+pub mod session;
+pub mod sim;
+pub mod tables;
 pub mod template;
 pub mod trace;
 pub mod transport;

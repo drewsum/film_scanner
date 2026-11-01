@@ -5,7 +5,8 @@
 //!    during the white read (`1e 42`).
 //! 2. A 32-line white read of the calibration strip gives each pixel's white level.
 //! 3. A 16-line read with the lamp off gives each pixel's dark level.
-//! 4. The final `1e 42` carries per-channel white and dark bases, and the shading table
+//! 4. The final `1e 42` carries per-channel white and dark bases (the dimmest pixel under the
+//!    glass, and the smoothed dark minimum), and the shading table
 //!    (`1e 84` type 6) per pixel and channel: the white level above its base in 64-count
 //!    steps (upper 10 bits) and the smoothed dark level above its base (lower 6 bits).
 //!
@@ -45,8 +46,16 @@ pub struct Shading {
 
 impl Shading {
     /// Compute from the white read (taken with `white_darks` subtracted) and the dark read.
-    /// Returns `None` if the reads don't split into `width`-pixel lines.
-    pub fn compute(white: &[u8], dark: &[u8], width: usize, white_darks: [u16; 3]) -> Option<Self> {
+    /// The white base comes from the first `bed` pixels, which lie under the glass; beyond
+    /// them the read falls off the calibration strip. Returns `None` if the reads don't split
+    /// into `width`-pixel lines.
+    pub fn compute(
+        white: &[u8],
+        dark: &[u8],
+        width: usize,
+        white_darks: [u16; 3],
+        bed: usize,
+    ) -> Option<Self> {
         let line = width * CHANNELS * 2;
         if width == 0
             || dark.is_empty()
@@ -68,7 +77,7 @@ impl Shading {
                 a[c] = w[c] + f64::from(white_darks[c]) - d[c];
             }
             let max = amplitude.iter().map(|a| a[c]).fold(0.0, f64::max);
-            let lit_min = amplitude
+            let lit_min = amplitude[..bed.min(width)]
                 .iter()
                 .map(|a| a[c])
                 .filter(|&a| a >= LIT_FRACTION * max)
@@ -195,17 +204,22 @@ mod tests {
     #[test]
     fn shading_encodes_white_and_dark() {
         let width = 200;
-        // Vignetted white (already dark-subtracted), unlit beyond x = 180.
+        // Vignetted white (already dark-subtracted), falling off past the bed at x = 170 and
+        // unlit beyond x = 180.
         let white = rgb16(
             32,
             |x| {
-                let v = if x < 180 { 24000 + 100 * x as u16 } else { 30 };
+                let v = match x {
+                    0..170 => 24000 + 100 * x as u16,
+                    170..180 => 3000 * (180 - x as u16),
+                    _ => 30,
+                };
                 [v, v + 1000, v]
             },
             width,
         );
         let dark = rgb16(16, |x| [1300 + (x / 50) as u16 * 10, 1250, 1100], width);
-        let s = Shading::compute(&white, &dark, width, [1300, 1250, 1100]).unwrap();
+        let s = Shading::compute(&white, &dark, width, [1300, 1250, 1100], 170).unwrap();
         assert_eq!(s.table.len(), width * 6);
         // White base: the dimmest lit pixel, measured against its own dark level.
         assert_eq!(s.white_base[1], 25000);
@@ -222,6 +236,6 @@ mod tests {
 
     #[test]
     fn rejects_mismatched_width() {
-        assert!(Shading::compute(&[0; 12], &[0; 12], 3, [0; 3]).is_none());
+        assert!(Shading::compute(&[0; 12], &[0; 12], 3, [0; 3], 3).is_none());
     }
 }

@@ -14,6 +14,8 @@ use scan_core::{MM_PER_INCH, ScanArea, ScanError};
 pub const STEPS_PER_INCH: f64 = 2400.0;
 /// x units per inch at hardware resolutions up to 400 dpi.
 const LOW_RES_UNITS_PER_INCH: f64 = 1600.0 / 3.0;
+/// Width of the bed (8.5 in).
+const BED_WIDTH_INCH: f64 = 8.5;
 /// Distance between the CCD's colour rows.
 const ROW_PITCH_INCH: f64 = 0.025;
 
@@ -37,6 +39,12 @@ pub fn hardware_dpi(dpi: u32) -> Option<u32> {
 /// x units per inch at a hardware resolution.
 pub fn units_per_inch(hw_dpi: u32) -> f64 {
     f64::from(hw_dpi).max(LOW_RES_UNITS_PER_INCH)
+}
+
+/// Width of the bed in x units at 533⅓ per inch: the pixels of a calibration read that lie
+/// under the glass, counted from the bed's edge.
+pub fn bed_units() -> usize {
+    (BED_WIDTH_INCH * LOW_RES_UNITS_PER_INCH).round() as usize
 }
 
 /// Lines between the CCD's blue and green (and green and red) rows.
