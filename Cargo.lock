@@ -3022,6 +3022,7 @@ name = "scan-epson"
 version = "0.1.0"
 dependencies = [
  "env_logger",
+ "image",
  "log",
  "scan-core",
  "windows",

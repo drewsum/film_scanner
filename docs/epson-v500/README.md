@@ -133,10 +133,23 @@ units at 533⅓/in (0.27 in from the edge). The driver asks for more width than 
 crops. It downsamples to the requested dpi from the next hardware resolution up.
 
 **`1e 01`, motor move (12 bytes):** u32 LE steps at 0, at 2,400 steps per inch. Sent with `1e 05`
-it moves the carriage: the vertical offset is a move of about `2400 × y_in − 307` steps (minimum
-194) before the scan (y = 0, 30, 150 mm → 194, 2,526, 13,854). Just before `1e 47` it is the scan
-length (≈ 2400 / hardware dpi × lines + lead-in). Bytes 4 and 6–10 vary with resolution (speed
-or step mode; open).
+it moves the carriage to the area before the read. Just before `1e 47` it is the scan length:
+`2400 / hardware dpi × lines` plus 120 (200 dpi) or 126 (400 dpi) steps.
+
+The move has two motor profiles, each with its own acceleration table (uploaded with
+`1e 84 05 00 00 01 02 00 {02|04} 00` just before) and `1e 01` bytes 6–9 (`ff 00 ff 00` or
+`ff 01 ff 01`). They end with different internal lead-ins, so the step count depends on the profile:
+
+| Hardware dpi | Short profile (top of the bed) | Long profile |
+|---|---|---|
+| 200 | 194 + 2400 × y_in | 2400 × y_in − 315 |
+| 400 | 444 + 2400 × y_in | 2400 × y_in − 69 |
+
+Mixing them (a long move with the short profile's table) lands the read 0.2 in early.
+
+**Lines:** a read of h px at the requested dpi needs `⌊h × hw/dpi⌋ + 2 × skew` lines, where
+skew = 0.025 in × hardware dpi. Output row j takes blue from raw line j, green from j + skew and
+red from j + 2 × skew.
 
 **`1e 22` (12 bytes):** u16 at 0 grows with resolution (3,840 at 200/400 dpi, 5,376 at 800,
 10,848 at 1,600 on the flatbed). SilverFast's film scans leave it 0 and set u16 at 6 instead.
@@ -145,6 +158,26 @@ Probably exposure time per lamp; open.
 **Calibration-derived, per scan:** `1e 31` (analog offset/gain), `1e 42` (18 bytes; per-channel
 u16 pairs that change from run to run), `1e 43` (12 bytes, usually `00 80 …` or `84 7d 77 7e df 7f`)
 and the `1e 84` table uploads (gamma and shading).
+
+### Native scans from templates
+
+`epson-scan` scans any flatbed area at up to 400 dpi without Epson's software running. It uses
+full-width captures of Epson's driver as templates for the calibration, lamp and table commands,
+and patches only the carriage move, line count and scan length. It reads the full width and crops
+when decoding:
+
+```sh
+Stop-Service stisvc -Force     # admin; Start-Service stisvc afterwards
+cargo run -p scan-epson --bin epson-scan -- \
+  --template target/captures/24_75dpi_fullwidth.pcap \
+  --template target/captures/28_75dpi_fullwidth_y30.pcap \
+  --dpi 75 --area 40,60,80,50 --out scan.png
+```
+
+Templates are captures 24/28 (200 dpi hardware, top/lower move profile) and 25/29 (400 dpi) of
+WIA scans of `0,0,215.9,20` and `0,30,215.9,20` mm. Checked against WIA's own scans of the same
+areas: no offset at 75 dpi, at most 1 px at 300 dpi, mean difference 2–4 levels out of 255.
+Templates come from your own machine's captures and are not committed.
 
 ### Infrared (capture 13)
 

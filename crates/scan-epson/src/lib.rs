@@ -12,9 +12,12 @@
 //! - [`firmware`] loads Epson's firmware into a freshly powered scanner (`epson-firmware`)
 
 pub mod data;
+pub mod decode;
 pub mod firmware;
+pub mod geometry;
 pub mod pcap;
 pub mod replay;
+pub mod template;
 pub mod trace;
 pub mod transport;
 
