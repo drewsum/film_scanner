@@ -102,6 +102,25 @@ Captures (in `target/captures`, not committed) are WIA scans made with
 | 10 | power-on, then a 75 dpi scan | firmware upload |
 | 11 | SilverFast preview, film holder with two 35 mm negative strips | its own calibration |
 | 12 | SilverFast zoom preview of one frame at 1,600 ppi (48-bit, no multi-exposure) | 1,600 × 2,482 px; `1e 41` bytes 9–10 = `02 03` |
+| 13a | as 12, a second run | |
+| 13 | as 12 with iSRD (infrared dust removal) | separate IR pass, below |
+
+### Infrared (capture 13)
+
+iSRD adds two reads after the colour pass, with the same `1e 41` geometry except for a slightly
+wider x range:
+
+1. `1e a2 06`, `1e 11 01`: a 490-line strip at another resolution (`01 01`), probably
+   calibration for the infrared lamp.
+2. `1e a2 04`, `1e 11 02`: the infrared pass. It is an ordinary 3-channel 16-bit read (1,520 ×
+   2,346 px here). All three CCD rows see the infrared, with the same line skew as in colour,
+   so align and average them for one IR plane.
+
+Dust and scratches are sharp dark specks on a bright, low-contrast image (the dyes are nearly
+transparent to infrared). That gives the defect mask for dust removal.
+
+So `1e a2` selects the light: `00` flatbed, `02` film unit (visible), `03` off (dark reads),
+`04` film unit infrared, `06` infrared calibration.
 
 SilverFast drives the scanner itself, with the same command set as Epson's driver. Its captures
 are an independent reference: commands both programs send are probably required.
@@ -121,8 +140,7 @@ Findings so far:
 - Final image data is pixel-interleaved 8-bit RGB, wider than requested and with R/G/B line
   skew. The driver crops, resamples and realigns it.
 - Calibration (dark/white reads, shading uploads with `1e 84`) is done by the host.
-- `1e a2` + 1 byte seems to select the light: `00` flatbed, `02` transparency unit, `03` lamp
-  off (used before dark reads).
+- `1e a2` + 1 byte selects the light source (see [Infrared](#infrared-capture-13)).
 - `1e 31` (12 bytes) sets per-channel analog front-end values: three u16 at 0 (offset; SilverFast
   binary-searches them, `80 → c0 → a0 → 90 → 88 → 8c`, against dark reads), and three bytes at
   8 (gain, e.g. `22 16 16`).
