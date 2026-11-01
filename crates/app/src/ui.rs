@@ -11,6 +11,7 @@ use crate::worker::{ScanKind, Worker};
 /// All backends compiled into this build, real hardware first.
 pub fn default_registry() -> DeviceRegistry {
     let mut registry = DeviceRegistry::new();
+    scan_epson::register(&mut registry);
     scan_wia::register(&mut registry);
     registry.register(MockBackend);
     registry
@@ -323,5 +324,15 @@ impl eframe::App for ScannerApp {
                 });
             });
         egui::CentralPanel::default().show(ui, |ui| self.central(ui));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn registry_has_native_backend_first() {
+        let names = super::default_registry().backend_names();
+        assert_eq!(names.first(), Some(&"epson"));
+        assert_eq!(names.last(), Some(&"mock"));
     }
 }

@@ -12,10 +12,13 @@
 //! - [`firmware`] loads Epson's firmware into a freshly powered scanner (`epson-firmware`)
 //! - [`session`] runs a flatbed scan from scratch over [`protocol`] (the `epson-scan` tool);
 //!   [`sim`] simulates the scanner for tests
+//! - [`device`] is the [`scan_core`] backend built on it; [`system`] handles the Windows side
+//!   (administrator rights, pausing the WIA service)
 
 pub mod calibration;
 pub mod data;
 pub mod decode;
+pub mod device;
 pub mod firmware;
 pub mod geometry;
 pub mod pcap;
@@ -23,6 +26,7 @@ pub mod protocol;
 pub mod replay;
 pub mod session;
 pub mod sim;
+pub mod system;
 pub mod tables;
 pub mod template;
 pub mod trace;
@@ -32,3 +36,10 @@ pub mod transport;
 pub const EPSON_VID: u16 = 0x04b8;
 /// Perfection V500 Photo (GT-X770).
 pub const V500_PID: u16 = 0x0130;
+
+pub use device::EpsonBackend;
+
+/// Register the native backend with `registry`.
+pub fn register(registry: &mut scan_core::DeviceRegistry) {
+    registry.register(EpsonBackend);
+}

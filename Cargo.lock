@@ -1188,6 +1188,7 @@ dependencies = [
  "log",
  "rfd",
  "scan-core",
+ "scan-epson",
  "scan-wia",
  "tempfile",
 ]

@@ -110,6 +110,15 @@ impl<'a> Protocol<'a> {
 
     /// Start a read with `1e 47` and return `len` bytes of image data, trailers removed.
     pub fn read_data(&mut self, len: usize) -> Result<Vec<u8>, ScanError> {
+        self.read_data_with(len, &mut |_| {})
+    }
+
+    /// [`Self::read_data`], calling `received` with the bytes read so far after each block.
+    pub fn read_data_with(
+        &mut self,
+        len: usize,
+        received: &mut dyn FnMut(usize),
+    ) -> Result<Vec<u8>, ScanError> {
         self.dev.write(&[0x1e, 0x47])?;
         let mut data = Vec::with_capacity(len);
         let mut blocks = BlockAssembler::default();
@@ -124,6 +133,7 @@ impl<'a> Protocol<'a> {
             }
             if let Some(block) = blocks.push(&buf[..n]) {
                 data.extend_from_slice(&block);
+                received(data.len().min(len));
             }
         }
         if data.len() != len {

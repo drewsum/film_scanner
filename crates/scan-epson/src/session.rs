@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use scan_core::{MM_PER_INCH, ScanArea, ScanError};
+use scan_core::{MM_PER_INCH, NoProgress, ProgressSink, ScanArea, ScanError};
 
 use crate::calibration::{self, Shading};
 use crate::geometry::{self, FlatbedPlan, MoveProfile};
@@ -143,6 +143,17 @@ fn gain(first: [u8; 6]) -> [u8; 12] {
     g
 }
 
+/// Progress once calibration is done; the image read takes the rest.
+const CALIBRATED: f32 = 0.15;
+
+fn cancelled(progress: &dyn ProgressSink) -> Result<(), ScanError> {
+    if progress.is_cancelled() {
+        Err(ScanError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
 fn upload(p: &mut Protocol<'_>, kind: u8, address: [u8; 4], data: &[u8]) -> Result<(), ScanError> {
     p.command(TABLE, &[&tables::header(kind, address, data.len()), data])
 }
@@ -227,6 +238,18 @@ impl FlatbedSession {
 
     /// Run the session on a scanner and return the raw image data (see [`Self::layout`]).
     pub fn run(&self, dev: &mut dyn Transport, poll_delay: Duration) -> Result<Vec<u8>, ScanError> {
+        self.run_with(dev, poll_delay, &mut NoProgress)
+    }
+
+    /// [`Self::run`], reporting progress. A cancel before calibration stops the session there,
+    /// with the carriage still home. Later, the session runs to the end (no way to abort a
+    /// read is known, and the carriage must get home) and the data is dropped.
+    pub fn run_with(
+        &self,
+        dev: &mut dyn Transport,
+        poll_delay: Duration,
+        progress: &mut dyn ProgressSink,
+    ) -> Result<Vec<u8>, ScanError> {
         let m = self.mode;
         let mut p = Protocol::new(dev, poll_delay);
 
@@ -281,6 +304,9 @@ impl FlatbedSession {
             tables::TYPE7_ADDRESS,
             &tables::type7(),
         )?;
+
+        progress.progress(0.05);
+        cancelled(progress)?;
 
         // Black level of the masked strip.
         let (x0, x1, lines) = MASKED_STRIP;
@@ -406,6 +432,8 @@ impl FlatbedSession {
             shading.dark_base
         );
 
+        progress.progress(CALIBRATED);
+
         // Tone curves, then move the carriage to the area.
         let gamma12 = tables::gamma12();
         for address in tables::GAMMA12_ADDRESS {
@@ -475,12 +503,16 @@ impl FlatbedSession {
         params[..4].copy_from_slice(&self.plan.scan_steps.to_le_bytes());
         params[4..].copy_from_slice(&m.scan_motor);
         p.command(MOTOR, &[&params])?;
-        let data = p.read_data(self.data_len())?;
+        let len = self.data_len();
+        let data = p.read_data_with(len, &mut |n| {
+            progress.progress(CALIBRATED + (1.0 - CALIBRATED) * n as f32 / len as f32);
+        })?;
 
         p.wait_ready()?;
         p.query(STATE_A1, 1)?;
         p.query(STATE_65, 1)?;
         p.query(OPEN, 1)?;
+        cancelled(progress)?;
         Ok(data)
     }
 }

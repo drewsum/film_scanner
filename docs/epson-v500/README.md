@@ -245,6 +245,15 @@ move's step count. On hardware, against WIA's scans of the same areas (mean abso
 0–255): 1.85 at 75 dpi (80 × 50 mm), 2.42 at 300 dpi (30 × 20 mm, 1 px offset), 3.96 at 150 dpi
 at the top of the bed (1 line offset).
 
+In the app, the V500 appears as **EPSON Perfection V500 (epson)** (`scan_epson::EpsonBackend`):
+flatbed, 8-bit colour, 50–400 dpi, any area of the 215.9 × 297.18 mm bed. The app relaunches
+itself elevated once at startup when a V500 is attached (`--no-elevate` skips this). Each scan
+stops `stisvc` and starts it again afterwards, so WIA stays usable between scans. A scanner that
+was just powered on gets its firmware from Epson Scan's `esfw7c.bin` first. A cancel is honoured
+only before calibration: after that the session runs to the end, because no way to abort a read
+is known and the carriage has to get home. The ignored test
+`cargo test -p scan-epson --test hardware -- --ignored` scans the live scanner (as admin).
+
 The older template mode (`--template CAPTURE.pcap`) replays a full-width capture of Epson's
 driver with the area patched in. Templates are captures 24/28 (200 dpi hardware, top/lower move
 profile) and 25/29 (400 dpi) of WIA scans of `0,0,215.9,20` and `0,30,215.9,20` mm. They come from
