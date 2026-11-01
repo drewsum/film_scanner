@@ -15,7 +15,12 @@ pub fn gamma8() -> [u8; 256] {
 /// at every 16th entry, linear in between, and flat at the top. The driver's curve has the same
 /// knots; between them it differs from this by at most 2 of 4,095 in 4 % of the entries.
 pub fn gamma12() -> Vec<u8> {
-    let knots = gamma8().map(|v| u32::from(v) << 4 | u32::from(v) >> 4);
+    widen(&gamma8())
+}
+
+/// A 12-bit curve from an 8-bit one: knots every 16 entries, linear in between.
+fn widen(curve: &[u8; 256]) -> Vec<u8> {
+    let knots = curve.map(|v| u32::from(v) << 4 | u32::from(v) >> 4);
     (0..4096u32)
         .flat_map(|k| {
             let j = (k / 16) as usize;
@@ -41,8 +46,10 @@ pub fn linear8() -> [u8; 256] {
     std::array::from_fn(|i| i as u8)
 }
 
+/// The flat 8-bit curve widened like [`gamma12`]; SilverFast's exactly (4,096 · 256/255 at
+/// the knots, so slightly steeper than the identity).
 pub fn linear12() -> Vec<u8> {
-    (0..4096u16).flat_map(u16::to_le_bytes).collect()
+    widen(&linear8())
 }
 
 /// A motor acceleration table (type 5): `len` step periods (u16 LE, in the scanner's ticks)
@@ -149,7 +156,8 @@ mod tests {
         assert_eq!((g[16], g[32], g[240]), (192, 273, 851));
         assert_eq!(g[4080..], [4095; 16]);
         assert!(g.windows(2).all(|w| w[0] <= w[1]));
-        assert_eq!(u16s(&linear12())[4095], 4095);
+        let l = u16s(&linear12());
+        assert_eq!((l[255], l[256], l[4079], l[4080]), (255, 257, 4094, 4095));
         assert_eq!((tone(0.0), tone(1.0)), (0.0, 1.0));
         assert_eq!((255.0 * tone(1.0 / 255.0)).round(), 12.0);
     }

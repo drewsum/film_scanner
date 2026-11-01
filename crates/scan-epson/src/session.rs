@@ -17,30 +17,30 @@ use crate::tables;
 use crate::template::RawLayout;
 use crate::transport::Transport;
 
-const INIT: [u8; 2] = [0x1b, 0x40];
-const IDENTIFY: [u8; 2] = [0x1b, 0x13];
-const OPEN: [u8; 2] = [0x1e, 0x85];
-const LAST_SCAN: [u8; 2] = [0x1e, 0x53];
-const RECORD_SCAN: [u8; 2] = [0x1e, 0x57];
-const SETUP: [u8; 2] = [0x1e, 0xe1];
-const STATE_A1: [u8; 2] = [0x1e, 0xa1];
-const STATE_65: [u8; 2] = [0x1e, 0x65];
-const LIGHT: [u8; 2] = [0x1e, 0xa2];
-const DEVICE_DATA: [u8; 2] = [0x1e, 0x87];
-const POSITION: [u8; 2] = [0x1e, 0x86];
-const OFFSETS: [u8; 2] = [0x1e, 0x31];
-const START_OFFSETS: [u8; 2] = [0x1e, 0x46];
-const OFFSETS_BUSY: [u8; 2] = [0x1e, 0x04];
-const AUTO_OFFSETS: [u8; 2] = [0x1e, 0x92];
-const PASS: [u8; 2] = [0x1e, 0x11];
-const EXPOSURE_21: [u8; 2] = [0x1e, 0x21];
-const EXPOSURE: [u8; 2] = [0x1e, 0x22];
-const GEOMETRY: [u8; 2] = [0x1e, 0x41];
-const LEVELS: [u8; 2] = [0x1e, 0x42];
-const GAIN: [u8; 2] = [0x1e, 0x43];
-const TABLE: [u8; 2] = [0x1e, 0x84];
-const MOTOR: [u8; 2] = [0x1e, 0x01];
-const MOVE: [u8; 2] = [0x1e, 0x05];
+pub(crate) const INIT: [u8; 2] = [0x1b, 0x40];
+pub(crate) const IDENTIFY: [u8; 2] = [0x1b, 0x13];
+pub(crate) const OPEN: [u8; 2] = [0x1e, 0x85];
+pub(crate) const LAST_SCAN: [u8; 2] = [0x1e, 0x53];
+pub(crate) const RECORD_SCAN: [u8; 2] = [0x1e, 0x57];
+pub(crate) const SETUP: [u8; 2] = [0x1e, 0xe1];
+pub(crate) const STATE_A1: [u8; 2] = [0x1e, 0xa1];
+pub(crate) const STATE_65: [u8; 2] = [0x1e, 0x65];
+pub(crate) const LIGHT: [u8; 2] = [0x1e, 0xa2];
+pub(crate) const DEVICE_DATA: [u8; 2] = [0x1e, 0x87];
+pub(crate) const POSITION: [u8; 2] = [0x1e, 0x86];
+pub(crate) const OFFSETS: [u8; 2] = [0x1e, 0x31];
+pub(crate) const START_OFFSETS: [u8; 2] = [0x1e, 0x46];
+pub(crate) const OFFSETS_BUSY: [u8; 2] = [0x1e, 0x04];
+pub(crate) const AUTO_OFFSETS: [u8; 2] = [0x1e, 0x92];
+pub(crate) const PASS: [u8; 2] = [0x1e, 0x11];
+pub(crate) const EXPOSURE_21: [u8; 2] = [0x1e, 0x21];
+pub(crate) const EXPOSURE: [u8; 2] = [0x1e, 0x22];
+pub(crate) const GEOMETRY: [u8; 2] = [0x1e, 0x41];
+pub(crate) const LEVELS: [u8; 2] = [0x1e, 0x42];
+pub(crate) const GAIN: [u8; 2] = [0x1e, 0x43];
+pub(crate) const TABLE: [u8; 2] = [0x1e, 0x84];
+pub(crate) const MOTOR: [u8; 2] = [0x1e, 0x01];
+pub(crate) const MOVE: [u8; 2] = [0x1e, 0x05];
 
 const LAMP_OFF: u8 = 0x00;
 const FLATBED_LAMP: u8 = 0x01;
@@ -52,16 +52,16 @@ const INITIAL_OFFSETS: [u8; 12] = [0x80, 0x00, 0x80, 0x00, 0x80, 0x00, 0, 0, 0, 
 const SETUP_PARAMS: [u8; 6] = [0x0b, 0x00, 0x25, 0x61, 0x00, 0x00];
 /// `1e 43` per channel; the same in Epson's and SilverFast's sessions.
 const GAIN_VALUES: [u8; 6] = [0x84, 0x7d, 0x77, 0x7e, 0xdf, 0x7f];
-const GAIN_NEUTRAL: [u8; 6] = [0x00, 0x80, 0x00, 0x80, 0x00, 0x80];
+pub(crate) const GAIN_NEUTRAL: [u8; 6] = [0x00, 0x80, 0x00, 0x80, 0x00, 0x80];
 /// x of the bed's left edge, in units of 533⅓ per inch; full-width reads start here.
 const X_START: u16 = 0x8c;
 /// The masked strip of the CCD read for its black level.
 const MASKED_STRIP: (u16, u16, u16) = (0x15, 0x25, 4);
-const WHITE_LINES: u16 = 32;
+pub(crate) const WHITE_LINES: u16 = 32;
 const DARK_LINES: u16 = 16;
 /// The white read moves the carriage over the calibration strip at this period.
-const WHITE_MOTOR: [u8; 12] = [0x33, 0, 0, 0, 0x03, 0, 0, 0, 0, 0, 0x08, 0];
-const MAX_BLOCK: usize = 65536;
+pub(crate) const WHITE_MOTOR: [u8; 12] = [0x33, 0, 0, 0, 0x03, 0, 0, 0, 0, 0, 0x08, 0];
+pub(crate) const MAX_BLOCK: usize = 65536;
 /// `1e 41` byte 8 bit 0: 8-bit samples. WIA's reads all set it; calibration reads and
 /// SilverFast's 48-bit scans clear it and get 16-bit samples.
 const EIGHT_BIT: u8 = 0x01;
@@ -126,7 +126,7 @@ fn move_motor(profile: MoveProfile) -> ((u16, u16, usize), [u8; 8]) {
 }
 
 /// `1e 41` parameters: x range, lines, then bytes 6–21.
-fn area_params(x0: u16, x1: u16, lines: u16, rest: [u8; 16]) -> Vec<u8> {
+pub(crate) fn area_params(x0: u16, x1: u16, lines: u16, rest: [u8; 16]) -> Vec<u8> {
     let mut g = Vec::with_capacity(22);
     for v in [x0, x1, lines] {
         g.extend_from_slice(&v.to_le_bytes());
@@ -148,9 +148,9 @@ fn gain(first: [u8; 6]) -> [u8; 12] {
 }
 
 /// Progress once calibration is done; the image read takes the rest.
-const CALIBRATED: f32 = 0.15;
+pub(crate) const CALIBRATED: f32 = 0.15;
 
-fn cancelled(progress: &dyn ProgressSink) -> Result<(), ScanError> {
+pub(crate) fn cancelled(progress: &dyn ProgressSink) -> Result<(), ScanError> {
     if progress.is_cancelled() {
         Err(ScanError::Cancelled)
     } else {
@@ -158,7 +158,12 @@ fn cancelled(progress: &dyn ProgressSink) -> Result<(), ScanError> {
     }
 }
 
-fn upload(p: &mut Protocol<'_>, kind: u8, address: [u8; 4], data: &[u8]) -> Result<(), ScanError> {
+pub(crate) fn upload(
+    p: &mut Protocol<'_>,
+    kind: u8,
+    address: [u8; 4],
+    data: &[u8],
+) -> Result<(), ScanError> {
     p.command(TABLE, &[&tables::header(kind, address, data.len()), data])
 }
 

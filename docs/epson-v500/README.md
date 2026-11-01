@@ -105,6 +105,11 @@ Captures (in `target/captures`, not committed) are WIA scans made with
 | 12 | SilverFast zoom preview of one frame at 1,600 ppi (48-bit, no multi-exposure) | 1,600 × 2,482 px; `1e 41` bytes 9–10 = `02 03` |
 | 13a | as 12, a second run | |
 | 13 | as 12 with iSRD (infrared dust removal) | separate IR pass, below |
+| 30, 31 | SilverFast, one frame at 400 and 800 ppi | [Film](#film-transparency-unit) |
+| 33 | the same frame at "3,200 ppi" | read at 1,600 dpi; SilverFast scales up |
+| 35, 36 | 1,600 ppi, a frame on the other strip and one further along | x and y positions |
+| 38 | 800 ppi with iSRD | colour pass at 200 dpi hardware, then infrared at 800 |
+| 39 | 400 ppi with multi-exposure | two whole sessions; the second exposes 2× |
 
 ### Scan parameters
 
@@ -153,8 +158,8 @@ red from j + 2 × skew.
 
 **`1e 22` (12 bytes):** u16 at 0 grows with resolution (3,840 at 200 dpi, 3,264 at 400, 5,376 at
 800, 10,848 at 1,600 on the flatbed). The same value leads `1e 21` (26 bytes) and follows `04 00`
-in `1e 46`. SilverFast's film scans leave it 0 and set u16 at 6 instead. Probably exposure time
-per lamp; open.
+in `1e 46`. SilverFast's film scans leave it 0 and set u16 at 6 instead: the exposure (doubling it
+doubles the signal), searched per session, see [Film](#film-transparency-unit).
 
 **`1e 57` (42 bytes), the scan record:** u32 LE fields: hardware dpi (twice), the area's x, y,
 width and height in pixels at that resolution, `0x0813`, `0x0300` + the resolution divisor, then
@@ -238,7 +243,9 @@ cargo run -p scan-epson --bin epson-scan -- --dpi 300 --area 40,60,30,20 --out s
 ```
 
 `--bits 16` makes a 16-bit read: `1e 41` byte 8 bit 0 cleared, and flat 8- and 12-bit tone
-curves uploaded instead of the gamma ones, as SilverFast does, so the samples are linear.
+curves uploaded instead of the gamma ones, as SilverFast does, so the samples are linear. (The
+flat 12-bit curve is the identity widened like the gamma one, `v << 4 | v >> 4` at the knots, so
+256 maps to 257: exactly SilverFast's.)
 `scan_epson::decode::flatbed_rgb16` applies the 1.8 tone curve on the host, so 8- and 16-bit
 scans of the same area match (mean absolute difference 1.25 of 255 on hardware, two scans
 apart) and the 16-bit one has levels between the 8-bit steps. `--simulate` runs the session against `scan_epson::sim::SimulatedScanner` instead. From the
@@ -250,7 +257,8 @@ move's step count. On hardware, against WIA's scans of the same areas (mean abso
 at the top of the bed (1 line offset).
 
 In the app, the V500 appears as **EPSON Perfection V500 (epson)** (`scan_epson::EpsonBackend`):
-flatbed, 8- or 16-bit colour, 50–400 dpi, any area of the 215.9 × 297.18 mm bed. The app relaunches
+flatbed, 8- or 16-bit colour, 50–400 dpi, any area of the 215.9 × 297.18 mm bed; and film,
+8- or 16-bit, 100–1,600 dpi, with an optional second pass at +1 EV. The app relaunches
 itself elevated once at startup when a V500 is attached (`--no-elevate` skips this). Each scan
 stops `stisvc` and starts it again afterwards, so WIA stays usable between scans. A scanner that
 was just powered on gets its firmware from Epson Scan's `esfw7c.bin` first. A cancel is honoured
@@ -262,6 +270,75 @@ The older template mode (`--template CAPTURE.pcap`) replays a full-width capture
 driver with the area patched in. Templates are captures 24/28 (200 dpi hardware, top/lower move
 profile) and 25/29 (400 dpi) of WIA scans of `0,0,215.9,20` and `0,30,215.9,20` mm. They come from
 your own machine's captures and are not committed.
+
+### Film (transparency unit)
+
+SilverFast's film sessions (captures 30–39) use the same commands as a flatbed session, with
+their own constants and searches. `scan_epson::film` generates them; outside the searches its
+commands match SilverFast's in captures 30, 31, 33, 35 and 36 write for write, except for the
+calibration values and the lines per block (checked by
+`cargo test -p scan-epson -- --ignored` when the captures are present).
+
+1. **Open** as for the flatbed, but `1e e1 0b 00 31 61 00 00`, flat 8-bit tone curves, no
+   `1e 87`/`1e 46`. The `1e 57` record holds the area in pixels at hardware resolution, then
+   `0x011012`, `0x0300` + `12`/`24`/`45` (400/800/1,600 dpi) and `0x8000`.
+2. **Film lamp** `1e a2 02`; `1e 25 00`; a fast move of 932 steps; `1e 25 02`, `1e 11 03`,
+   `1e 31` gains `1e 1e 1e`, `1e 21 80 1f…`, the type-7 table.
+3. **Calibration window.** A 150-line 8-bit read at 200 dpi (`1e 41 8f 0c 0f 0e 96 00 …`, x in the
+   gap between the strips) crosses a bright window in the holder. The carriage then moves back
+   276 steps (`1e 01` mode `ff 01 ff 01 30 00`: bit `0x20` of byte 10 reverses), 12 fewer for
+   each line the window's lower edge falls after line 91 (11 and 12 have it at 91.5 and move
+   264). `1e 8a` gets `0x400` + that move, then `00 77`. All calibration reads happen here.
+4. A 4-line 16-bit read at gain `01 01 01`, saturated (its purpose is unknown); `1e 25 03`,
+   `1e 87 00`.
+5. **Exposure and gains**, from 4-line 8-bit reads of the window across the film area's width.
+   Gain (`1e 31` bytes 8–10) is proportional to 1 / (72 − code): SilverFast's steps all fit
+   that within 1 %. SilverFast starts at `1c 17 13` and exposure 1,500 (4,000 at 1,600 dpi),
+   scales the exposure to bring the brightest channel to 243, balances the gains, and ends with
+   about 0.85 of that exposure and each channel at a mean of about 206. `scan_epson::film` gets
+   there directly: one read, then the exposure and gains from the model, refined once. On
+   hardware it lands within 4 % of SilverFast's exposure and one gain step of its gains. A
+   normal exposure is at most half of `1e 21` (`00 0f` up to 800 dpi, `f8 1c` at 1,600, sent
+   before the search; at 1,600 `1e 11 02` too).
+6. **Offsets** (`1e 31` bytes 0–5), against 4-line 16-bit reads of the masked strip with the lamp
+   off (`1e a2 03`; `1e 22` byte 9 = 4). Each channel steps up while its dark level is below
+   1,024 and down while above 1,536, from `80` by `40`, `20`, `10`, `8`, `4`, until all are in
+   range. This reproduces SilverFast's sequences exactly (`80 c0 a0 90 88`, then `8c` or not).
+7. **White and dark reads** at the area's x range: an 8-line masked-strip read for the levels,
+   then a 32-line white read (`02 03`, `40`) through the window and a 64-line dark read, as on
+   the flatbed. The shading table covers the read's x units (before subsampling).
+8. **Flat 12-bit tone curves, the move and the image read.** `1e 41`
+   `… 00 00 SS RR RR 83 80 00 00 20 80 a0 BB`, 16-bit; `1e 43` neutral for both halves.
+
+| Hardware dpi | `1e 41` 9–10, byte 8 | `1e 11` | x units/in, film area origin | Read motor: ramp, `1e 01` mode | Fast-move lead |
+|---|---|---|---|---|---|
+| 400 | `01 06`, `10` (÷2) | `03` | 800, 2,365 | 1,249 → 320, `7e 00 ff 00 ff 00 02 00` | 750 |
+| 800 | `01 03`, `00` | `03` | 800, 2,365 | 1,250 → 640, the same | 750 |
+| 1,600 | `02 03`, `00` | `02` | 1,600, 4,730 | 309 flat, `7e 00 00 00 00 00 08 00` | 494 |
+
+`1e 11` sets the CCD's horizontal sampling: x units are 2,400 (`01`), 1,600 (`02`), 800 (`03`) or
+533⅓ (`04`, the flatbed) per inch, and byte 8 subsamples from there. The film area is 2.7 × 9.33
+in (SilverFast's preview, 1,080 × 3,732 px at 400 dpi). An area at x px (hardware resolution)
+starts at origin + x px; its width is rounded up to 16 px. The move from the window is
+2,400 × y in − lead steps (fast: `ff 01 ff 01 10 00`, the 2,500 → 222 table). Shorter moves run
+at one speed (a one-entry table of 96, mode `00 00 00 00 18 00`) and land 1,024 steps further
+on: 274 steps for y = 0 at 400 dpi (capture 11). That offset is inferred for 800 and 1,600 dpi;
+on hardware, scans at y = 3 mm land where the preview has them, to within 0.25 mm. The read
+needs `2400 / hw × lines + 126` steps. SilverFast's lines per block reach 256 KiB at 1,600
+dpi; 64 KiB blocks work as well.
+
+**Multi-exposure** (capture 39) is a second whole session whose image read and its dark read use
+twice the exposure; the white read keeps the normal one, so the second pass comes out a stop
+brighter. `FilmSession::with_exposure` does the same (up to `1e 21`).
+
+```sh
+cargo run -p scan-epson --bin epson-scan -- --film --dpi 1600 --bits 16 --area 3,40,24,36 --out frame.png
+```
+
+On hardware, native scans of the frames of captures 31 (800 dpi) and 33 (1,600 dpi), against
+SilverFast's reads of them through the same decoding: mean absolute difference 2.33 and 2.41 of
+255, within a line and a pixel of each other, channel means within 3 %. A +1 EV pass is 1.99×
+the normal one in linear terms.
 
 ### Infrared (capture 13)
 
@@ -305,6 +382,6 @@ Findings so far:
   binary-searches them, `80 → c0 → a0 → 90 → 88 → 8c`, against dark reads), and three bytes at
   8 (gain, e.g. `22 16 16`).
 - `1e 41` byte 8 is `0x10` (÷2, 16-bit) in capture 11. Its preview
-  is 1,088 px × 3,720 lines of 16-bit LE interleaved RGB at hardware divisor 6 (400 dpi), sent in
+  is 1,088 px × 3,752 lines of 16-bit LE interleaved RGB at hardware divisor 6 (400 dpi), sent in
   261,120-byte (40-line) blocks. The x range in `1e 41` is 2× the pixel width at that
-  resolution.
+  resolution (800 units per inch, see [Film](#film-transparency-unit)).

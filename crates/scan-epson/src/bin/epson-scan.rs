@@ -1,12 +1,16 @@
-//! Scan an area of the flatbed natively, up to 400 dpi.
+//! Scan an area of the flatbed natively, up to 400 dpi, or of the film holder (`--film`), up
+//! to 1,600.
 //!
 //! ```text
-//! epson-scan --dpi N --area X,Y,W,H --out OUT.png [--bits 8|16] [--path DEV] [--simulate]
+//! epson-scan --dpi N --area X,Y,W,H --out OUT.png [--bits 8|16] [--film [--ev EV]]
+//!            [--path DEV] [--simulate]
 //! epson-scan --template CAPTURE.pcap [--template ...] --dpi N --area X,Y,W,H --out OUT.png
 //!            [--calibration live|recorded|flat] [--path DEV] [--offline]
 //! ```
 //!
-//! The area is in mm from the bed's corner. Stop the WIA service first
+//! The area is in mm from the bed's corner, or with `--film` from the film area's (2.7 × 9.33 in,
+//! SilverFast's preview). `--ev` exposes a film read up to one stop more than calibrated (a
+//! multi-exposure pass). Stop the WIA service first
 //! (`Stop-Service stisvc -Force`), or its polling interferes. By default the whole session is
 //! generated ([`scan_epson::session`]); `--simulate` runs it against a simulated scanner.
 //!
@@ -22,6 +26,7 @@
 use std::process::ExitCode;
 
 use scan_core::{BitDepth, ScanArea};
+use scan_epson::film::FilmSession;
 use scan_epson::session::FlatbedSession;
 use scan_epson::sim::SimulatedScanner;
 use scan_epson::template::{Calibration, Template};
@@ -40,6 +45,8 @@ struct Args {
     simulate: bool,
     calibration: Calibration,
     bit_depth: BitDepth,
+    film: bool,
+    ev: f32,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -51,6 +58,7 @@ fn parse_args() -> Result<Args, String> {
     let mut simulate = false;
     let mut calibration = Calibration::Live;
     let mut bit_depth = BitDepth::Eight;
+    let (mut film, mut ev) = (false, 0.0);
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
@@ -75,6 +83,8 @@ fn parse_args() -> Result<Args, String> {
             "--path" => path = Some(value()?),
             "--offline" => offline = true,
             "--simulate" => simulate = true,
+            "--film" => film = true,
+            "--ev" => ev = value()?.parse().map_err(|_| "bad --ev")?,
             "--bits" => {
                 bit_depth = match value()?.as_str() {
                     "8" => BitDepth::Eight,
@@ -96,6 +106,9 @@ fn parse_args() -> Result<Args, String> {
     if bit_depth == BitDepth::Sixteen && !templates.is_empty() {
         return Err("--template scans are 8-bit".into());
     }
+    if film && !templates.is_empty() {
+        return Err("--template is for the flatbed".into());
+    }
     if offline && templates.is_empty() {
         return Err("--offline needs --template".into());
     }
@@ -109,11 +122,16 @@ fn parse_args() -> Result<Args, String> {
         simulate,
         calibration,
         bit_depth,
+        film,
+        ev,
     })
 }
 
 fn run() -> Result<(), String> {
     let args = parse_args()?;
+    if args.film {
+        return run_film(&args);
+    }
     if args.templates.is_empty() {
         return run_session(&args);
     }
@@ -211,6 +229,46 @@ fn run_session(args: &Args) -> Result<(), String> {
     };
     saved.map_err(|e| format!("{}: {e}", args.out))?;
     println!("saved {width}x{height} to {}", args.out);
+    Ok(())
+}
+
+fn run_film(args: &Args) -> Result<(), String> {
+    let session = FilmSession::new(&args.area, args.dpi)
+        .map_err(|e| e.to_string())?
+        .with_exposure(args.ev);
+    let plan = &session.plan;
+    println!(
+        "plan: {}x{} px, {} lines at {} dpi, x {:?}, {:?}, scan {} steps",
+        plan.output.width,
+        plan.output.height,
+        plan.lines,
+        plan.output.hw_dpi,
+        plan.x_units,
+        plan.carriage,
+        plan.scan_steps
+    );
+    let mut dev: Box<dyn Transport> = if args.simulate {
+        Box::new(SimulatedScanner::default())
+    } else {
+        open(args.path.clone())?
+    };
+    let raw = session
+        .run(dev.as_mut(), POLL_DELAY)
+        .map_err(|e| e.to_string())?;
+    let image = scan_core::image::DynamicImage::ImageRgb16(decode::rgb16(
+        &raw,
+        session.layout,
+        plan.output,
+    ));
+    let saved = match args.bit_depth {
+        BitDepth::Eight => image.to_rgb8().save(&args.out),
+        BitDepth::Sixteen => image.save(&args.out),
+    };
+    saved.map_err(|e| format!("{}: {e}", args.out))?;
+    println!(
+        "saved {}x{} to {}",
+        plan.output.width, plan.output.height, args.out
+    );
     Ok(())
 }
 

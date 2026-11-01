@@ -1,4 +1,4 @@
-//! Raw flatbed data to an image.
+//! Raw scan data to an image.
 
 use scan_core::image::{ImageBuffer, Pixel, Rgb, RgbImage};
 
@@ -9,6 +9,27 @@ use crate::template::RawLayout;
 /// A 16-bit RGB image.
 pub type Rgb16Image = ImageBuffer<Rgb<u16>, Vec<u16>>;
 
+/// What a read becomes: the output size at the requested resolution, made from raw data at
+/// the hardware resolution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Resample {
+    pub dpi: u32,
+    pub hw_dpi: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl From<&FlatbedPlan> for Resample {
+    fn from(plan: &FlatbedPlan) -> Self {
+        Self {
+            dpi: plan.dpi,
+            hw_dpi: plan.hw_dpi,
+            width: plan.width,
+            height: plan.height,
+        }
+    }
+}
+
 /// Decode an 8-bit pixel-interleaved RGB read into the planned image: realign the colour
 /// rows, crop to the area and box-filter down to the requested resolution.
 ///
@@ -17,7 +38,7 @@ pub type Rgb16Image = ImageBuffer<Rgb<u16>, Vec<u16>>;
 pub fn flatbed_rgb8(raw: &[u8], layout: RawLayout, plan: &FlatbedPlan) -> RgbImage {
     resample(
         layout,
-        plan,
+        plan.into(),
         |i| raw.get(i).copied().unwrap_or(0).into(),
         |mean| mean.round() as u8,
     )
@@ -26,12 +47,17 @@ pub fn flatbed_rgb8(raw: &[u8], layout: RawLayout, plan: &FlatbedPlan) -> RgbIma
 /// Decode a 16-bit (little-endian) linear read like [`flatbed_rgb8`], then apply the tone
 /// curve the scanner applies to 8-bit reads, so both depths look alike.
 pub fn flatbed_rgb16(raw: &[u8], layout: RawLayout, plan: &FlatbedPlan) -> Rgb16Image {
+    rgb16(raw, layout, plan.into())
+}
+
+/// Decode a 16-bit linear read (flatbed or film) into `out`, with the tone curve applied.
+pub fn rgb16(raw: &[u8], layout: RawLayout, out: Resample) -> Rgb16Image {
     let curve: Vec<u16> = (0..=u16::MAX)
         .map(|v| (65535.0 * tables::tone(f64::from(v) / 65535.0)).round() as u16)
         .collect();
     resample(
         layout,
-        plan,
+        out,
         |i| {
             raw.get(2 * i..2 * i + 2)
                 .map_or(0, |b| u16::from_le_bytes([b[0], b[1]]).into())
@@ -45,7 +71,7 @@ pub fn flatbed_rgb16(raw: &[u8], layout: RawLayout, plan: &FlatbedPlan) -> Rgb16
 /// mean with `out`.
 fn resample<S>(
     layout: RawLayout,
-    plan: &FlatbedPlan,
+    plan: Resample,
     sample: impl Fn(usize) -> u32,
     out: impl Fn(f64) -> S,
 ) -> ImageBuffer<Rgb<S>, Vec<S>>

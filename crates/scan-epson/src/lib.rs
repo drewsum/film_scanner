@@ -10,8 +10,9 @@
 //! - [`transport`] moves bytes over the scanner's bulk pipes (the `epson-probe` tool)
 //! - [`replay`] plays a captured session back to a scanner (the `epson-replay` tool)
 //! - [`firmware`] loads Epson's firmware into a freshly powered scanner (`epson-firmware`)
-//! - [`session`] runs a flatbed scan from scratch over [`protocol`] (the `epson-scan` tool);
-//!   [`sim`] simulates the scanner for tests
+//! - [`session`] runs a flatbed scan from scratch over [`protocol`] (the `epson-scan` tool),
+//!   [`film`] a film scan through the transparency unit; [`sim`] simulates the scanner for
+//!   tests
 //! - [`device`] is the [`scan_core`] backend built on it; [`system`] handles the Windows side
 //!   (administrator rights, pausing the WIA service)
 
@@ -19,6 +20,7 @@ pub mod calibration;
 pub mod data;
 pub mod decode;
 pub mod device;
+pub mod film;
 pub mod firmware;
 pub mod geometry;
 pub mod pcap;
