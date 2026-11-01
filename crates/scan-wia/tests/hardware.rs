@@ -94,6 +94,57 @@ fn sixteen_bit_scan() {
     ));
 }
 
+/// A scan with settings from the environment, for capturing the USB traffic of known
+/// requests while reverse-engineering a scanner:
+///
+/// - `FILM_SCANNER_TEST_DPI` (default 75)
+/// - `FILM_SCANNER_TEST_AREA` as `x,y,width,height` in mm (default `0,0,50,50`)
+/// - `FILM_SCANNER_TEST_GRAY=1` for greyscale
+/// - `FILM_SCANNER_TEST_DEPTH=16` for 16 bits per channel (default 8)
+/// - `FILM_SCANNER_TEST_SOURCE=film` for the transparency unit (default flatbed)
+#[test]
+#[ignore = "requires a scanner attached via WIA"]
+fn configured_scan() {
+    let env = |k: &str| std::env::var(k).ok();
+    let dpi: u32 = env("FILM_SCANNER_TEST_DPI").map_or(75, |v| v.parse().expect("dpi"));
+    let area: Vec<f32> = env("FILM_SCANNER_TEST_AREA")
+        .unwrap_or_else(|| "0,0,50,50".into())
+        .split(',')
+        .map(|v| v.trim().parse().expect("area in mm"))
+        .collect();
+    let [x_mm, y_mm, width_mm, height_mm] = area[..] else {
+        panic!("FILM_SCANNER_TEST_AREA needs four values");
+    };
+    let info = pick_device();
+    let mut dev = WiaBackend.open(&info).expect("open device");
+    let source = match env("FILM_SCANNER_TEST_SOURCE").as_deref() {
+        Some("film") => ScanSource::Transparency,
+        _ => ScanSource::Flatbed,
+    };
+    let mut req = ScanRequest::new(source, dpi);
+    req.bit_depth = match env("FILM_SCANNER_TEST_DEPTH").as_deref() {
+        Some("16") => BitDepth::Sixteen,
+        _ => BitDepth::Eight,
+    };
+    if env("FILM_SCANNER_TEST_GRAY").is_some_and(|v| v == "1") {
+        req.color_mode = scan_core::ColorMode::Gray;
+    }
+    req.area = Some(ScanArea {
+        x_mm,
+        y_mm,
+        width_mm,
+        height_mm,
+    });
+    let result = dev.scan(&req, &mut NoProgress).expect("scan");
+    let (w, h) = result.dimensions();
+    println!(
+        "scanned {w}x{h} at {dpi} dpi, area {area:?}, {:?}, {:?}, {source:?}",
+        req.color_mode, req.bit_depth
+    );
+    let out = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("wia_configured.png");
+    result.primary().save(&out).unwrap();
+}
+
 /// Regression: the full bed at 75 dpi is a fractional pixel count (637.5 px for 8.5in), which
 /// the driver rejects unless truncated.
 #[test]

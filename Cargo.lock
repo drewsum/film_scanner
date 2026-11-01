@@ -1188,6 +1188,7 @@ dependencies = [
  "log",
  "rfd",
  "scan-core",
+ "scan-epson",
  "scan-wia",
  "tempfile",
 ]
@@ -3015,6 +3016,17 @@ dependencies = [
  "log",
  "tempfile",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "scan-epson"
+version = "0.1.0"
+dependencies = [
+ "env_logger",
+ "image",
+ "log",
+ "scan-core",
+ "windows",
 ]
 
 [[package]]
