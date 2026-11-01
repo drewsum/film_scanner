@@ -116,7 +116,7 @@ fn capabilities() -> Capabilities {
                 resolutions: FILM_RESOLUTIONS.to_vec(),
                 bit_depths: vec![BitDepth::Eight, BitDepth::Sixteen],
                 color_modes: vec![ColorMode::Color],
-                infrared: false,
+                infrared: true,
                 max_exposure_passes: 2,
                 max_area: film::FILM_AREA,
             },
@@ -179,7 +179,8 @@ impl ScannerDevice for V500Device {
 }
 
 impl V500Device {
-    /// One film session per exposure pass, as SilverFast runs them.
+    /// One film session per exposure pass, as SilverFast runs them, then one for infrared if
+    /// asked.
     fn scan_film(
         &mut self,
         request: &ScanRequest,
@@ -196,15 +197,19 @@ impl V500Device {
                 e.ev
             )));
         }
-        let sessions = exposures
+        let mut sessions = exposures
             .iter()
             .map(|e| Ok(FilmSession::new(&area, request.dpi)?.with_exposure(e.ev)))
             .collect::<Result<Vec<_>, ScanError>>()?;
+        if request.infrared {
+            sessions.push(FilmSession::infrared(&area, request.dpi)?);
+        }
         progress.progress(0.0);
         let _wia = self.pause_wia.then(WiaPause::new).transpose()?;
         let mut passes = Vec::new();
+        let mut infrared = None;
         let n = sessions.len() as f32;
-        for (i, (session, exposure)) in sessions.iter().zip(&exposures).enumerate() {
+        for (i, session) in sessions.iter().enumerate() {
             let mut dev = (self.connect)()?;
             let mut part = Part {
                 inner: &mut *progress,
@@ -213,11 +218,17 @@ impl V500Device {
             };
             let raw = session.run_with(dev.as_mut(), self.poll_delay, &mut part)?;
             drop(dev);
-            let rgb16 = decode::rgb16(&raw, session.layout, session.plan.output);
-            passes.push(ScanPass {
-                exposure: *exposure,
-                image: image(rgb16, request.bit_depth),
-            });
+            let output = session.plan.output;
+            match exposures.get(i) {
+                Some(exposure) => passes.push(ScanPass {
+                    exposure: *exposure,
+                    image: image(
+                        decode::rgb16(&raw, session.layout, output),
+                        request.bit_depth,
+                    ),
+                }),
+                None => infrared = Some(decode::infrared(&raw, session.layout, output)),
+            }
         }
         progress.progress(1.0);
         Ok(ScanResult {
@@ -225,7 +236,7 @@ impl V500Device {
             dpi: request.dpi,
             area,
             passes,
-            infrared: None,
+            infrared,
         })
     }
 }
@@ -396,7 +407,19 @@ mod tests {
         assert_eq!(result.passes.len(), 2);
         assert_eq!(result.dimensions(), (756, 1134));
         assert!(matches!(result.primary(), DynamicImage::ImageRgb16(_)));
+        assert!(result.infrared.is_none());
         assert!(progress.fractions.windows(2).all(|w| w[0] <= w[1]));
+
+        // With infrared: a plane the size of the image.
+        let request = ScanRequest {
+            infrared: true,
+            exposures: Vec::new(),
+            ..request
+        };
+        let result = dev.scan(&request, &mut NoProgress).unwrap();
+        assert_eq!(result.passes.len(), 1);
+        let ir = result.infrared.expect("infrared plane");
+        assert_eq!(ir.dimensions(), (756, 1134));
 
         // A preview of the whole film area, 8-bit.
         let request = ScanRequest {

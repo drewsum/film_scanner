@@ -1,6 +1,7 @@
 //! Raw scan data to an image.
 
-use scan_core::image::{ImageBuffer, Pixel, Rgb, RgbImage};
+use scan_core::Gray16Image;
+use scan_core::image::{ImageBuffer, Luma, Pixel, Rgb, RgbImage};
 
 use crate::geometry::{FlatbedPlan, skew_lines};
 use crate::tables;
@@ -64,6 +65,24 @@ pub fn rgb16(raw: &[u8], layout: RawLayout, out: Resample) -> Rgb16Image {
         },
         |mean| curve[mean.round() as usize],
     )
+}
+
+/// Decode an infrared read: all three CCD rows see the infrared, so realign them like colour
+/// and average them into one linear plane.
+pub fn infrared(raw: &[u8], layout: RawLayout, out: Resample) -> Gray16Image {
+    let rgb: Rgb16Image = resample(
+        layout,
+        out,
+        |i| {
+            raw.get(2 * i..2 * i + 2)
+                .map_or(0, |b| u16::from_le_bytes([b[0], b[1]]).into())
+        },
+        |mean| mean.round() as u16,
+    );
+    ImageBuffer::from_fn(out.width, out.height, |x, y| {
+        let p = rgb.get_pixel(x, y).0;
+        Luma([((u32::from(p[0]) + u32::from(p[1]) + u32::from(p[2]) + 1) / 3) as u16])
+    })
 }
 
 /// Realign, crop and box-filter the raw samples (`sample(i)` is the `i`th, pixel-interleaved
@@ -152,5 +171,12 @@ mod tests {
             let want = 65535.0 * tables::tone(mean * 256.0 / 65535.0);
             assert_eq!(f64::from(img16.get_pixel(0, 0).0[c]), want.round());
         }
+
+        // As infrared: the realigned rows averaged, linear.
+        let ir = infrared(&raw16, layout, (&plan).into());
+        assert_eq!(
+            ir.get_pixel(0, 0).0,
+            [((106.5 + 56.5 + 6.5) / 3.0 * 256.0) as u16]
+        );
     }
 }

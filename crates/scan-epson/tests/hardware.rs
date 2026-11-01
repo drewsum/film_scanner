@@ -116,6 +116,76 @@ fn scans_film() {
     save(&result.passes[0].image, "film-800");
 }
 
+#[test]
+#[ignore = "requires a V500 with the film holder, and administrator rights"]
+fn scans_film_infrared() {
+    let mut dev = open();
+    let area = ScanArea {
+        x_mm: 5.0,
+        y_mm: 40.0,
+        width_mm: 24.0,
+        height_mm: 36.0,
+    };
+    let request = ScanRequest {
+        area: Some(area),
+        infrared: true,
+        ..ScanRequest::new(ScanSource::Transparency, 800)
+    };
+    let result = dev
+        .scan(&request, &mut NoProgress)
+        .expect("infrared film scan");
+    let ir = result.infrared.as_ref().expect("infrared plane");
+    assert_eq!(ir.dimensions(), result.dimensions());
+    let colour = result.primary().to_luma16();
+    save(result.primary(), "film-ir-colour");
+    save(&DynamicImage::ImageLuma16(ir.clone()), "film-ir");
+
+    // Film dyes are nearly transparent to infrared: the frame reads bright.
+    let (w, h) = ir.dimensions();
+    let frame = (w / 8..w * 3 / 4).flat_map(|x| (h / 8..h * 7 / 8).map(move |y| (x, y)));
+    let n = f64::from((w * 3 / 4 - w / 8) * (h * 7 / 8 - h / 8));
+    let mean = frame
+        .map(|(x, y)| f64::from(ir.get_pixel(x, y).0[0]))
+        .sum::<f64>()
+        / n;
+    println!("infrared: frame mean {mean:.0}");
+    assert!(mean > 30000.0, "infrared frame mean {mean:.0}");
+
+    // The planes line up: the detail (each pixel less its neighbourhood) of both correlates
+    // best within a pixel of no shift.
+    let detail = |at: &dyn Fn(u32, u32) -> f64, x: u32, y: u32| {
+        let mut s = 0.0;
+        for dy in 0..5 {
+            for dx in 0..5 {
+                s += at(x + dx - 2, y + dy - 2);
+            }
+        }
+        at(x, y) - s / 25.0
+    };
+    let ir_at = |x: u32, y: u32| f64::from(ir.get_pixel(x, y).0[0]);
+    let colour_at = |x: u32, y: u32| f64::from(colour.get_pixel(x, y).0[0]);
+    let best = (-4i32..=4)
+        .flat_map(|dy| (-4i32..=4).map(move |dx| (dx, dy)))
+        .map(|(dx, dy)| {
+            let mut c = 0.0;
+            for y in (h / 8..h * 7 / 8).step_by(2) {
+                for x in (w / 8..w * 3 / 4).step_by(2) {
+                    let (sx, sy) = ((x as i32 + dx) as u32, (y as i32 + dy) as u32);
+                    c += detail(&ir_at, sx, sy) * detail(&colour_at, x, y);
+                }
+            }
+            ((dx, dy), c)
+        })
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .unwrap()
+        .0;
+    println!("infrared: best shift {best:?}");
+    assert!(
+        best.0.abs() <= 1 && best.1.abs() <= 1,
+        "infrared shifted {best:?}"
+    );
+}
+
 fn save(image: &DynamicImage, name: &str) {
     if let Ok(dir) = std::env::var("FILM_SCANNER_TEST_OUT") {
         image

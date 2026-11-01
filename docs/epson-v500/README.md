@@ -283,7 +283,10 @@ calibration values and the lines per block (checked by
    `1e 87`/`1e 46`. The `1e 57` record holds the area in pixels at hardware resolution, then
    `0x011012`, `0x0300` + `12`/`24`/`45` (400/800/1,600 dpi) and `0x8000`.
 2. **Film lamp** `1e a2 02`; `1e 25 00`; a fast move of 932 steps; `1e 25 02`, `1e 11 03`,
-   `1e 31` gains `1e 1e 1e`, `1e 21 80 1f…`, the type-7 table.
+   `1e 31` gains `1e 1e 1e`, `1e 21 80 1f…`, the type-7 table. `1e 25` picks what the motor
+   drives: `00` the CCD carriage, `02` the transparency unit's lamp, `03` both. `1e 86` reads
+   the two positions (u16 CCD, u16 lamp), so the window read below sweeps the lamp past the
+   parked CCD.
 3. **Calibration window.** A 150-line 8-bit read at 200 dpi (`1e 41 8f 0c 0f 0e 96 00 …`, x in the
    gap between the strips) crosses a bright window in the holder. The carriage then moves back
    276 steps (`1e 01` mode `ff 01 ff 01 30 00`: bit `0x20` of byte 10 reverses), 12 fewer for
@@ -340,19 +343,45 @@ SilverFast's reads of them through the same decoding: mean absolute difference 2
 255, within a line and a pixel of each other, channel means within 3 %. A +1 EV pass is 1.99×
 the normal one in linear terms.
 
-### Infrared (capture 13)
+### Infrared
 
-iSRD adds two reads after the colour pass, with the same `1e 41` geometry except for a slightly
-wider x range:
+iSRD (captures 13 and 38) runs a whole second session after the colour one, with the infrared
+LED: lamp `06` for the calibration reads, `05` off for the dark reads and `04` for the image read.
 
-1. `1e a2 06`, `1e 11 01`: a 490-line strip at another resolution (`01 01`), probably
-   calibration for the infrared lamp.
-2. `1e a2 04`, `1e 11 02`: the infrared pass. It is an ordinary 3-channel 16-bit read (1,520 ×
-   2,346 px here). All three CCD rows see the infrared, with the same line skew as in colour,
-   so align and average them for one IR plane.
+1. Opening as for colour, then `1e 25 02` and a fast move of **535 steps of the lamp alone**
+   (`1e 86` goes from `00 00 00 00` to `00 00 17 06`): the LED sits that far along the lamp
+   unit from the visible lamp. Without the move the window reads are dark. Then `1e 25 00` and
+   the CCD's 932-step move, and the window read and move back as for colour (no `1e 8a`, no
+   saturated read).
+2. `1e 11 01` reads at 2,400 x units per inch: a gain search, then a 490-line read during which
+   neither unit moves, between lamp and CCD moves that cancel out. SilverFast probably measures
+   the LED's alignment from it: its infrared read starts 8 px earlier than the colour one in
+   capture 38, and 1 later but 16 wider in capture 13. `scan_epson::film` leaves it out and
+   shifts its infrared read by a fixed 18/2,400 in (6 px at 800 dpi). That is measured on this
+   V500, and puts the two planes within a pixel of each other in x and 2 px (at 1,600 dpi) in y.
+3. `1e 25 03`, `1e 11 03` (`02` at 1,600 dpi). Exposure `1e 22` is zero throughout: the line
+   time `1e 21` sets it (`60 18` at 800 dpi, `a8 21` at 1,600). Gains start at 0 and aim for a
+   window mean of about 210 (`0f 16 14` at 800 dpi). The offsets, white and dark reads follow
+   as for colour, with the LED left on for the masked-strip reads.
+4. Flat tone curves, the move (its lead is 494, the colour lead + 256 at 800 dpi) and the
+   image read, at one motor speed: `1e 01` mode `7e 00 00 00 00 00 08 00` with a one-entry
+   period table (130 at 800 dpi, 359 at 1,600; a line takes period × 16 × steps per line, the
+   line time).
 
-Dust and scratches are sharp dark specks on a bright, low-contrast image (the dyes are nearly
-transparent to infrared). That gives the defect mask for dust removal.
+The image read is an ordinary 3-channel 16-bit read. All three CCD rows see the infrared, with
+the same line skew as in colour, so `decode::infrared` aligns and averages them into one linear
+plane. Dust and scratches are sharp dark specks on a bright, low-contrast image (the dyes are
+nearly transparent to infrared). That gives the defect mask for dust removal.
+
+```sh
+cargo run -p scan-epson --bin epson-scan -- --film --ir --dpi 800 --area 5,40,24,36 --out ir.png
+```
+
+**Positions.** Moves are relative, and `1e 86` counts a move's steps plus twice its ramp (a
+fast move of 932 steps on the 512-entry table reads 1,956). Only a session's image read takes
+both units home again. So a session that stops partway leaves them out, and the next one's
+window read misses the window. A film session therefore starts by moving each unit back by
+what `1e 86` reports. The firmware homes on its own sensor only after its upload at power-on.
 
 So `1e a2` selects the light. Epson's flatbed sessions use `01` (flatbed lamp) and `00` (off, for
 the dark read). SilverFast's film sessions use `02` (film unit, visible) and `03` (off, dark
@@ -377,7 +406,7 @@ Findings so far:
   skew. The driver crops, resamples and realigns it.
 - Calibration (dark/white reads, shading uploads with `1e 84`) is done by the host, except for
   the analog offsets (see [Flatbed calibration](#flatbed-calibration)).
-- `1e a2` + 1 byte selects the light source (see [Infrared](#infrared-capture-13)).
+- `1e a2` + 1 byte selects the light source (see [Infrared](#infrared)).
 - `1e 31` (12 bytes) sets per-channel analog front-end values: three u16 at 0 (offset; SilverFast
   binary-searches them, `80 → c0 → a0 → 90 → 88 → 8c`, against dark reads), and three bytes at
   8 (gain, e.g. `22 16 16`).

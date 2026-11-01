@@ -2,7 +2,7 @@
 //! to 1,600.
 //!
 //! ```text
-//! epson-scan --dpi N --area X,Y,W,H --out OUT.png [--bits 8|16] [--film [--ev EV]]
+//! epson-scan --dpi N --area X,Y,W,H --out OUT.png [--bits 8|16] [--film [--ev EV | --ir]]
 //!            [--path DEV] [--simulate]
 //! epson-scan --template CAPTURE.pcap [--template ...] --dpi N --area X,Y,W,H --out OUT.png
 //!            [--calibration live|recorded|flat] [--path DEV] [--offline]
@@ -10,7 +10,8 @@
 //!
 //! The area is in mm from the bed's corner, or with `--film` from the film area's (2.7 × 9.33 in,
 //! SilverFast's preview). `--ev` exposes a film read up to one stop more than calibrated (a
-//! multi-exposure pass). Stop the WIA service first
+//! multi-exposure pass); `--ir` makes the infrared pass instead, saved as a 16-bit grey plane.
+//! Stop the WIA service first
 //! (`Stop-Service stisvc -Force`), or its polling interferes. By default the whole session is
 //! generated ([`scan_epson::session`]); `--simulate` runs it against a simulated scanner.
 //!
@@ -47,6 +48,7 @@ struct Args {
     bit_depth: BitDepth,
     film: bool,
     ev: f32,
+    infrared: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -58,7 +60,7 @@ fn parse_args() -> Result<Args, String> {
     let mut simulate = false;
     let mut calibration = Calibration::Live;
     let mut bit_depth = BitDepth::Eight;
-    let (mut film, mut ev) = (false, 0.0);
+    let (mut film, mut ev, mut infrared) = (false, 0.0, false);
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
@@ -85,6 +87,7 @@ fn parse_args() -> Result<Args, String> {
             "--simulate" => simulate = true,
             "--film" => film = true,
             "--ev" => ev = value()?.parse().map_err(|_| "bad --ev")?,
+            "--ir" => infrared = true,
             "--bits" => {
                 bit_depth = match value()?.as_str() {
                     "8" => BitDepth::Eight,
@@ -106,6 +109,9 @@ fn parse_args() -> Result<Args, String> {
     if bit_depth == BitDepth::Sixteen && !templates.is_empty() {
         return Err("--template scans are 8-bit".into());
     }
+    if infrared && !film {
+        return Err("--ir needs --film".into());
+    }
     if film && !templates.is_empty() {
         return Err("--template is for the flatbed".into());
     }
@@ -124,6 +130,7 @@ fn parse_args() -> Result<Args, String> {
         bit_depth,
         film,
         ev,
+        infrared,
     })
 }
 
@@ -233,9 +240,12 @@ fn run_session(args: &Args) -> Result<(), String> {
 }
 
 fn run_film(args: &Args) -> Result<(), String> {
-    let session = FilmSession::new(&args.area, args.dpi)
-        .map_err(|e| e.to_string())?
-        .with_exposure(args.ev);
+    let session = if args.infrared {
+        FilmSession::infrared(&args.area, args.dpi)
+    } else {
+        FilmSession::new(&args.area, args.dpi).map(|s| s.with_exposure(args.ev))
+    }
+    .map_err(|e| e.to_string())?;
     let plan = &session.plan;
     println!(
         "plan: {}x{} px, {} lines at {} dpi, x {:?}, {:?}, scan {} steps",
@@ -255,14 +265,18 @@ fn run_film(args: &Args) -> Result<(), String> {
     let raw = session
         .run(dev.as_mut(), POLL_DELAY)
         .map_err(|e| e.to_string())?;
-    let image = scan_core::image::DynamicImage::ImageRgb16(decode::rgb16(
-        &raw,
-        session.layout,
-        plan.output,
-    ));
-    let saved = match args.bit_depth {
-        BitDepth::Eight => image.to_rgb8().save(&args.out),
-        BitDepth::Sixteen => image.save(&args.out),
+    let saved = if args.infrared {
+        decode::infrared(&raw, session.layout, plan.output).save(&args.out)
+    } else {
+        let image = scan_core::image::DynamicImage::ImageRgb16(decode::rgb16(
+            &raw,
+            session.layout,
+            plan.output,
+        ));
+        match args.bit_depth {
+            BitDepth::Eight => image.to_rgb8().save(&args.out),
+            BitDepth::Sixteen => image.save(&args.out),
+        }
     };
     saved.map_err(|e| format!("{}: {e}", args.out))?;
     println!(

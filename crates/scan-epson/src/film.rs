@@ -11,6 +11,9 @@
 //! 4. takes white and dark reads at the area's x range for the shading table;
 //! 5. moves to the area and reads it at 400, 800 or 1,600 dpi.
 //!
+//! An infrared pass ([`FilmSession::infrared`]) is a session of its own, as in SilverFast's
+//! iSRD: the infrared lamp, an exposure fixed by the line time, and gains searched for it.
+//!
 //! Reads are 16-bit and linear, with flat tone curves; [`crate::decode`] applies the curve, and
 //! makes 8-bit images from them.
 
@@ -32,14 +35,21 @@ use crate::tables;
 use crate::template::RawLayout;
 use crate::transport::Transport;
 
-/// Unknown; SilverFast sends `00` before the first move, `02` before the window reads and `03`
-/// after them.
+/// What the motor drives: `00` the CCD carriage, `02` the transparency unit's lamp, `03` both
+/// (`1e 86` reads the two positions). The window read sweeps the lamp past the parked CCD.
 const STAGE: [u8; 2] = [0x1e, 0x25];
+const STAGE_CCD: u8 = 0x00;
+const STAGE_LAMP: u8 = 0x02;
+const STAGE_BOTH: u8 = 0x03;
 /// The calibration window's position: `0x400` plus the move back to it, then `00 77`.
 const WINDOW: [u8; 2] = [0x1e, 0x8a];
 
 const FILM_LAMP: u8 = 0x02;
 const FILM_LAMP_OFF: u8 = 0x03;
+/// The infrared lamp: `06` for the calibration reads, `05` off, `04` for the image read.
+const IR_CALIBRATION_LAMP: u8 = 0x06;
+const IR_LAMP_OFF: u8 = 0x05;
+const IR_LAMP: u8 = 0x04;
 /// `1e e1` parameters in SilverFast's film sessions.
 const SETUP_PARAMS: [u8; 6] = [0x0b, 0x00, 0x31, 0x61, 0x00, 0x00];
 /// `1e 11` (the CCD's horizontal mode) for 800 x units per inch.
@@ -55,6 +65,13 @@ pub const FILM_AREA: ScanArea = ScanArea {
 
 /// Carriage steps from home to just above the holder's calibration window.
 const FIRST_MOVE: u32 = 932;
+/// The infrared LED sits this far along the lamp unit from the visible lamp: SilverFast's
+/// infrared pass moves the lamp alone this much first.
+const IR_LAMP_MOVE: u32 = 535;
+/// The infrared plane lands this far right of the colour one (in 1/2,400 in, measured on a
+/// V500: 6 px at 800 dpi, 12 at 1,600), so its read starts this much earlier. SilverFast seems
+/// to measure it each session (capture 38 starts its read 8 px earlier at 800 dpi).
+const IR_X_SHIFT: u32 = 18;
 /// The read that finds the window: 150 lines at 200 dpi of the gap between the strips.
 const WINDOW_READ: (u16, u16, u16) = (0x0c8f, 0x0e0f, 150);
 const WINDOW_READ_STEPS: u32 = 1920;
@@ -94,10 +111,22 @@ const BACK_MOTOR: [u8; 8] = [0, 0, 0xff, 0x01, 0xff, 0x01, 0x30, 0x00];
 /// Short moves (to the top of the film area) run at one speed, with this period.
 const SLOW_MOVE_PERIOD: u16 = 96;
 const SLOW_MOVE_MOTOR: [u8; 8] = [0, 0, 0, 0, 0, 0, 0x18, 0x00];
-/// The slow move's lead-in is this much shorter than the fast one's.
+const SLOW_BACK_MOTOR: [u8; 8] = [0, 0, 0, 0, 0, 0, 0x38, 0x00];
+/// The slow move's lead-in is this much shorter than the fast one's: a fast move goes its
+/// steps plus twice its 512-step ramp (as `1e 86` counts it).
 const SLOW_MOVE_OFFSET: i64 = 1024;
 const MIN_FAST_MOVE: i64 = 512;
 const SCAN_LEAD_IN: u32 = 126;
+
+/// Image reads at one motor speed (`1e 01` mode `08`): a line takes the motor period × 16 ×
+/// steps per line, which is the line time `1e 21` sets. The move to them lands short by this.
+const STEADY_SCAN_MOTOR: [u8; 8] = [0x7e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00];
+const STEADY_LEAD: i64 = 494;
+/// Infrared window reads run at this gain, unexposed (`1e 22` is 0 throughout an infrared
+/// pass; the line time sets the exposure).
+const IR_WINDOW_GAIN: u8 = 0x32;
+/// The infrared gain search starts from 0 and aims for this mean.
+const IR_TARGET: f64 = 210.0;
 
 /// Constants of one hardware resolution, from SilverFast's captures.
 #[derive(Clone, Copy, Debug)]
@@ -129,6 +158,11 @@ struct Mode {
     lead: i64,
     /// `1e 57` field 7, low byte.
     record_code: u32,
+    /// The infrared pass: line time (`1e 21`), the image read's motor period, and the white
+    /// read's.
+    ir_line_time: u16,
+    ir_period: u16,
+    ir_white_step: u16,
 }
 
 const MODES: [Mode; 3] = [
@@ -148,6 +182,10 @@ const MODES: [Mode; 3] = [
         scan_motor: [0x7e, 0x00, 0xff, 0x00, 0xff, 0x00, 0x02, 0x00],
         lead: 750,
         record_code: 0x12,
+        // Not captured; 800 dpi's line time at 6 steps a line.
+        ir_line_time: 0x1860,
+        ir_period: 65,
+        ir_white_step: 260,
     },
     Mode {
         hw_dpi: 800,
@@ -165,6 +203,10 @@ const MODES: [Mode; 3] = [
         scan_motor: [0x7e, 0x00, 0xff, 0x00, 0xff, 0x00, 0x02, 0x00],
         lead: 750,
         record_code: 0x24,
+        // Capture 38.
+        ir_line_time: 0x1860,
+        ir_period: 130,
+        ir_white_step: 260,
     },
     Mode {
         hw_dpi: 1600,
@@ -179,11 +221,87 @@ const MODES: [Mode; 3] = [
         max_exposure: 0x1cf8,
         white_step: 309,
         scan_ramp: (309, 309, 1),
-        scan_motor: [0x7e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00],
-        lead: 494,
+        scan_motor: STEADY_SCAN_MOTOR,
+        lead: STEADY_LEAD,
         record_code: 0x45,
+        // Capture 13.
+        ir_line_time: 0x21a8,
+        ir_period: 359,
+        ir_white_step: 359,
     },
 ];
+
+/// What differs between a colour pass and an infrared one.
+#[derive(Clone, Copy, Debug)]
+struct Light {
+    infrared: bool,
+    /// `1e a2` for the calibration reads, with the lamp off, and for the image read.
+    calibrate: u8,
+    off: u8,
+    image: u8,
+    window_exposure: u16,
+    window_gain: u8,
+    white_step: u16,
+    /// The image read's motor table and `1e 01` mode, and the move's lead.
+    scan_ramp: (u16, u16, usize),
+    scan_motor: [u8; 8],
+    lead: i64,
+}
+
+impl Light {
+    fn new(mode: &Mode, infrared: bool) -> Self {
+        if infrared {
+            Self {
+                infrared,
+                calibrate: IR_CALIBRATION_LAMP,
+                off: IR_LAMP_OFF,
+                image: IR_LAMP,
+                window_exposure: 0,
+                window_gain: IR_WINDOW_GAIN,
+                white_step: mode.ir_white_step,
+                scan_ramp: (mode.ir_period, mode.ir_period, 1),
+                scan_motor: STEADY_SCAN_MOTOR,
+                lead: STEADY_LEAD,
+            }
+        } else {
+            Self {
+                infrared,
+                calibrate: FILM_LAMP,
+                off: FILM_LAMP_OFF,
+                image: FILM_LAMP,
+                window_exposure: WINDOW_EXPOSURE,
+                window_gain: WINDOW_GAIN,
+                white_step: mode.white_step,
+                scan_ramp: mode.scan_ramp,
+                scan_motor: mode.scan_motor,
+                lead: mode.lead,
+            }
+        }
+    }
+
+    /// `1e 22`: the exposure at bytes 6–7; byte 9 is 4 for reads with the lamp off. All zero
+    /// in an infrared pass.
+    fn exposure(&self, e: u16, dark: bool) -> [u8; 12] {
+        if self.infrared {
+            return [0; 12];
+        }
+        let e = e.to_le_bytes();
+        [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            e[0],
+            e[1],
+            0,
+            if dark { 4 } else { 0 },
+            0,
+            0,
+        ]
+    }
+}
 
 /// A carriage move under the holder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -211,7 +329,7 @@ pub struct FilmPlan {
 }
 
 impl FilmPlan {
-    fn new(area: &ScanArea, dpi: u32, mode: &Mode) -> Result<Self, ScanError> {
+    fn new(area: &ScanArea, dpi: u32, mode: &Mode, lead: i64) -> Result<Self, ScanError> {
         let hw = mode.hw_dpi;
         let (width, height) = area.pixel_size(dpi);
         let scale = f64::from(hw) / f64::from(dpi);
@@ -234,10 +352,10 @@ impl FilmPlan {
             )));
         }
         let y_steps = i64::from(y) * STEPS_PER_INCH as i64 / i64::from(hw);
-        let carriage = if y_steps - mode.lead >= MIN_FAST_MOVE {
-            Carriage::Fast((y_steps - mode.lead) as u32)
+        let carriage = if y_steps - lead >= MIN_FAST_MOVE {
+            Carriage::Fast((y_steps - lead) as u32)
         } else {
-            Carriage::Slow((y_steps - mode.lead + SLOW_MOVE_OFFSET) as u32)
+            Carriage::Slow((y_steps - lead + SLOW_MOVE_OFFSET) as u32)
         };
         let lines = h + 2 * skew_lines(hw);
         Ok(Self {
@@ -260,25 +378,6 @@ impl FilmPlan {
     fn calibration_width(&self) -> usize {
         usize::from(self.x_units.1 - self.x_units.0)
     }
-}
-
-/// `1e 22`: the exposure at bytes 6–7; byte 9 is 4 for reads with the lamp off.
-fn exposure(e: u16, dark: bool) -> [u8; 12] {
-    let e = e.to_le_bytes();
-    [
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        e[0],
-        e[1],
-        0,
-        if dark { 4 } else { 0 },
-        0,
-        0,
-    ]
 }
 
 /// `1e 31`: per-channel offsets (u16), then gains.
@@ -354,6 +453,16 @@ fn channel_means(data: &[u8], sixteen: bool) -> [f64; 3] {
     sum.map(|s| s / n.max(1) as f64)
 }
 
+/// Gains that bring each channel's mean to `target`, from `means` read at `gains` and an
+/// exposure `ratio` times shorter than the next read's: gain is proportional to
+/// 1 / ([`GAIN_POLE`] − code).
+fn solve_gains(gains: [u8; 3], means: [f64; 3], ratio: f64, target: f64) -> [u8; 3] {
+    std::array::from_fn(|c| {
+        let g = GAIN_POLE - (GAIN_POLE - f64::from(gains[c])) * means[c] * ratio / target;
+        g.round().clamp(0.0, f64::from(MAX_GAIN)) as u8
+    })
+}
+
 /// The move back from the end of the window read, from where the window's lower edge falls
 /// in it. `None` if no window is visible.
 fn back_move(window: &[u8], width: usize) -> Option<u32> {
@@ -393,14 +502,31 @@ pub struct FilmSession {
     pub layout: RawLayout,
     /// Multiplies the exposure of the image read (multi-exposure passes).
     exposure_scale: f64,
+    light: Light,
 }
 
 impl FilmSession {
+    /// A colour pass.
     pub fn new(area: &ScanArea, dpi: u32) -> Result<Self, ScanError> {
+        Self::with_light(area, dpi, false)
+    }
+
+    /// An infrared pass of the same area: three channels that all see the infrared, at the
+    /// colour pass's geometry.
+    pub fn infrared(area: &ScanArea, dpi: u32) -> Result<Self, ScanError> {
+        Self::with_light(area, dpi, true)
+    }
+
+    fn with_light(area: &ScanArea, dpi: u32, infrared: bool) -> Result<Self, ScanError> {
         let mode = *MODES.iter().find(|m| m.hw_dpi >= dpi).ok_or_else(|| {
             ScanError::Unsupported(format!("{dpi} dpi: native film scans go up to 1,600"))
         })?;
-        let plan = FilmPlan::new(area, dpi, &mode)?;
+        let light = Light::new(&mode, infrared);
+        let mut plan = FilmPlan::new(area, dpi, &mode, light.lead)?;
+        if infrared {
+            let shift = (IR_X_SHIFT * mode.units_per_inch / STEPS_PER_INCH as u32) as u16;
+            plan.x_units = (plan.x_units.0 - shift, plan.x_units.1 - shift);
+        }
         Ok(Self {
             mode,
             layout: RawLayout {
@@ -410,6 +536,7 @@ impl FilmSession {
             },
             plan,
             exposure_scale: 1.0,
+            light,
         })
     }
 
@@ -474,12 +601,48 @@ impl FilmSession {
                     tables::MOTOR_ADDRESS,
                     &SLOW_MOVE_PERIOD.to_le_bytes(),
                 )?;
-                motor(steps, SLOW_MOVE_MOTOR)
+                motor(
+                    steps,
+                    if back {
+                        SLOW_BACK_MOTOR
+                    } else {
+                        SLOW_MOVE_MOTOR
+                    },
+                )
             }
         };
         p.command(MOTOR, &[&params])?;
         p.command(MOVE, &[])?;
         p.wait_ready()
+    }
+
+    /// Take the CCD and the lamp home if a session stopped partway left them out (the moves
+    /// are relative, and only a session's image read returns them).
+    fn home(p: &mut Protocol<'_>, position: &[u8]) -> Result<(), ScanError> {
+        for (stage, at) in [(STAGE_CCD, &position[..2]), (STAGE_LAMP, &position[2..])] {
+            let at = i64::from(u16::from_le_bytes([at[0], at[1]]));
+            if at == 0 {
+                continue;
+            }
+            log::warn!(
+                "{} is {at} steps from home; taking it back",
+                if stage == STAGE_CCD {
+                    "the CCD"
+                } else {
+                    "the lamp"
+                }
+            );
+            let carriage = if at - SLOW_MOVE_OFFSET >= MIN_FAST_MOVE {
+                Carriage::Fast((at - SLOW_MOVE_OFFSET) as u32)
+            } else {
+                Carriage::Slow(at as u32)
+            };
+            p.command(STAGE, &[&[stage]])?;
+            Self::move_carriage(p, carriage, true)?;
+            let left = p.query(POSITION, 4)?;
+            log::debug!("position after homing: {left:02x?}");
+        }
+        Ok(())
     }
 
     /// Run the session on a scanner and return the raw image data (see [`Self::layout`]).
@@ -495,7 +658,7 @@ impl FilmSession {
         poll_delay: Duration,
         progress: &mut dyn ProgressSink,
     ) -> Result<Vec<u8>, ScanError> {
-        let m = self.mode;
+        let (m, l) = (self.mode, self.light);
         let mut p = Protocol::new(dev, poll_delay);
 
         // Open the device, with flat tone curves.
@@ -515,18 +678,25 @@ impl FilmSession {
         p.query(LAST_SCAN, 42)?;
         p.command(RECORD_SCAN, &[&self.record()])?;
         p.query(STATE_A1, 1)?;
-        p.command(LIGHT, &[&[FILM_LAMP]])?;
-        p.query(POSITION, 4)?;
+        p.command(LIGHT, &[&[l.calibrate]])?;
+        let position = p.query(POSITION, 4)?;
         cancelled(progress)?;
+        Self::home(&mut p, &position)?;
 
         // Under the holder, find the calibration window and park under it.
-        p.command(STAGE, &[&[0x00]])?;
+        if l.infrared {
+            p.command(STAGE, &[&[STAGE_LAMP]])?;
+            Self::move_carriage(&mut p, Carriage::Fast(IR_LAMP_MOVE), false)?;
+            p.command(LIGHT, &[&[l.calibrate]])?;
+            p.query(POSITION, 4)?;
+        }
+        p.command(STAGE, &[&[STAGE_CCD]])?;
         Self::move_carriage(&mut p, Carriage::Fast(FIRST_MOVE), false)?;
         p.query(POSITION, 4)?;
-        p.command(LIGHT, &[&[FILM_LAMP]])?;
-        p.command(STAGE, &[&[0x02]])?;
+        p.command(LIGHT, &[&[l.calibrate]])?;
+        p.command(STAGE, &[&[STAGE_LAMP]])?;
         p.command(PASS, &[&[CCD_800]])?;
-        p.command(OFFSETS, &[&analog([FIRST_OFFSET; 3], [WINDOW_GAIN; 3])])?;
+        p.command(OFFSETS, &[&analog([FIRST_OFFSET; 3], [l.window_gain; 3])])?;
         let mut max_exposure = [0u8; 26];
         max_exposure[..2].copy_from_slice(&WINDOW_EXPOSURE.to_le_bytes());
         p.command(EXPOSURE_21, &[&max_exposure])?;
@@ -537,7 +707,7 @@ impl FilmSession {
             &tables::type7(),
         )?;
         let (x0, x1, lines) = WINDOW_READ;
-        p.command(EXPOSURE, &[&exposure(WINDOW_EXPOSURE, false)])?;
+        p.command(EXPOSURE, &[&l.exposure(l.window_exposure, false)])?;
         p.command(
             GEOMETRY,
             &[&area_params(
@@ -566,42 +736,51 @@ impl FilmSession {
         });
         log::debug!("calibration window: {back} steps back");
         Self::move_carriage(&mut p, Carriage::Fast(back), true)?;
-        let at = (0x400 + back as u16).to_le_bytes();
-        p.command(WINDOW, &[&[at[0], at[1], 0x00, 0x77]])?;
+        // SilverFast's infrared pass follows a colour pass and leaves these out.
+        if !l.infrared {
+            let at = (0x400 + back as u16).to_le_bytes();
+            p.command(WINDOW, &[&[at[0], at[1], 0x00, 0x77]])?;
 
-        // SilverFast's read at minimum gain.
-        p.command(OFFSETS, &[&analog([FIRST_OFFSET; 3], [1; 3])])?;
-        p.query(AUTO_OFFSETS, 12)?;
-        let (x0, x1, lines) = LAMP_CHECK;
-        p.command(EXPOSURE, &[&exposure(WINDOW_EXPOSURE, false)])?;
-        p.command(
-            GEOMETRY,
-            &[&area_params(
-                x0,
-                x1,
-                lines,
-                read_params(0x00, [1, 3], 0x00, [0x80, 0x00], lines as u8),
-            )],
-        )?;
-        p.command(LEVELS, &[&[0u8; 18]])?;
-        p.command(GAIN, &[&window_gain()])?;
-        p.read_data(usize::from(x1 - x0) * usize::from(lines) * 6)?;
-        p.wait_ready()?;
-        p.command(STAGE, &[&[0x03]])?;
+            // A read at minimum gain.
+            p.command(OFFSETS, &[&analog([FIRST_OFFSET; 3], [1; 3])])?;
+            p.query(AUTO_OFFSETS, 12)?;
+            let (x0, x1, lines) = LAMP_CHECK;
+            p.command(EXPOSURE, &[&l.exposure(WINDOW_EXPOSURE, false)])?;
+            p.command(
+                GEOMETRY,
+                &[&area_params(
+                    x0,
+                    x1,
+                    lines,
+                    read_params(0x00, [1, 3], 0x00, [0x80, 0x00], lines as u8),
+                )],
+            )?;
+            p.command(LEVELS, &[&[0u8; 18]])?;
+            p.command(GAIN, &[&window_gain()])?;
+            p.read_data(usize::from(x1 - x0) * usize::from(lines) * 6)?;
+            p.wait_ready()?;
+        }
+        p.command(STAGE, &[&[STAGE_BOTH]])?;
         p.request(DEVICE_DATA, &[0x00], 10)?;
         p.query(POSITION, 4)?;
         progress.progress(0.05);
 
-        let (base_exposure, gains) = self.search_exposure(&mut p)?;
+        let (base_exposure, gains) = if l.infrared {
+            (0, self.search_infrared_gains(&mut p)?)
+        } else {
+            self.search_exposure(&mut p)?
+        };
         let offsets = self.search_offsets(&mut p, base_exposure, gains)?;
         let image_exposure = ((f64::from(base_exposure) * self.exposure_scale).round() as u16)
             .clamp(1, m.max_exposure);
 
         // Black level of the masked strip, for the white read.
         let (s0, s1) = m.strip;
-        p.command(LIGHT, &[&[FILM_LAMP]])?;
-        p.command(LIGHT, &[&[FILM_LAMP_OFF]])?;
-        p.command(EXPOSURE, &[&exposure(base_exposure, true)])?;
+        if !l.infrared {
+            p.command(LIGHT, &[&[FILM_LAMP]])?;
+            p.command(LIGHT, &[&[FILM_LAMP_OFF]])?;
+        }
+        p.command(EXPOSURE, &[&l.exposure(base_exposure, true)])?;
         p.command(
             GEOMETRY,
             &[&area_params(
@@ -620,8 +799,10 @@ impl FilmSession {
         // White read through the window, then a dark read, at the area's x range.
         let (x0, x1) = self.plan.x_units;
         let cal_width = self.plan.calibration_width();
-        p.command(LIGHT, &[&[FILM_LAMP]])?;
-        p.command(EXPOSURE, &[&exposure(base_exposure, false)])?;
+        if !l.infrared {
+            p.command(LIGHT, &[&[l.calibrate]])?;
+        }
+        p.command(EXPOSURE, &[&l.exposure(base_exposure, false)])?;
         p.command(
             GEOMETRY,
             &[&area_params(
@@ -637,27 +818,27 @@ impl FilmSession {
             &mut p,
             tables::MOTOR,
             tables::MOTOR_ADDRESS,
-            &m.white_step.to_le_bytes(),
+            &l.white_step.to_le_bytes(),
         )?;
         p.command(MOTOR, &[&WHITE_MOTOR])?;
         let white = p.read_data(cal_width * usize::from(WHITE_LINES) * 6)?;
         p.wait_ready()?;
 
-        p.command(LIGHT, &[&[FILM_LAMP_OFF]])?;
+        p.command(LIGHT, &[&[l.off]])?;
         let dark_geometry = area_params(
             x0,
             x1,
             DARK_LINES,
             read_params(0x00, m.resolution, 0x00, [0x80, 0x00], DARK_LINES as u8),
         );
-        p.command(EXPOSURE, &[&exposure(image_exposure, true)])?;
+        p.command(EXPOSURE, &[&l.exposure(image_exposure, true)])?;
         p.command(GEOMETRY, &[&dark_geometry])?;
         p.command(LEVELS, &[&[0u8; 18]])?;
         p.command(GAIN, &[&neutral_gain()])?;
         p.command(GEOMETRY, &[&dark_geometry])?;
         let dark = p.read_data(cal_width * usize::from(DARK_LINES) * 6)?;
         p.wait_ready()?;
-        p.command(LIGHT, &[&[FILM_LAMP]])?;
+        p.command(LIGHT, &[&[l.image]])?;
         p.query(POSITION, 4)?;
 
         let shading =
@@ -669,8 +850,9 @@ impl FilmSession {
                 ))
             })?;
         log::info!(
-            "film calibration: exposure {base_exposure} (image {image_exposure}), gains \
+            "film calibration{}: exposure {base_exposure} (image {image_exposure}), gains \
              {gains:02x?}, offsets {offsets:02x?}, white base {:?}, dark base {:?}",
+            if l.infrared { " (infrared)" } else { "" },
             shading.white_base,
             shading.dark_base
         );
@@ -689,7 +871,7 @@ impl FilmSession {
         let mut params = read_params(m.subsampling, m.resolution, 0x83, [0x80, 0xa0], block);
         params[6] = 0x80;
         params[9] = 0x20;
-        p.command(EXPOSURE, &[&exposure(image_exposure, false)])?;
+        p.command(EXPOSURE, &[&l.exposure(image_exposure, false)])?;
         p.command(GEOMETRY, &[&area_params(x0, x1, lines, params)])?;
         p.command(LEVELS, &[&shading.levels()])?;
         p.command(GAIN, &[&neutral_gain()])?;
@@ -699,14 +881,14 @@ impl FilmSession {
             tables::SHADING_ADDRESS,
             &shading.table,
         )?;
-        let (start, end, len) = m.scan_ramp;
+        let (start, end, len) = l.scan_ramp;
         upload(
             &mut p,
             tables::MOTOR,
             tables::MOTOR_ADDRESS,
             &tables::motor_ramp(start, end, len),
         )?;
-        p.command(MOTOR, &[&motor(self.plan.scan_steps, m.scan_motor)])?;
+        p.command(MOTOR, &[&motor(self.plan.scan_steps, l.scan_motor)])?;
         let len = self.data_len();
         let data = p.read_data_with(len, &mut |n| {
             progress.progress(CALIBRATED + (1.0 - CALIBRATED) * n as f32 / len as f32);
@@ -720,7 +902,7 @@ impl FilmSession {
     fn window_means(&self, p: &mut Protocol<'_>, e: u16) -> Result<[f64; 3], ScanError> {
         let m = self.mode;
         let (x0, x1) = m.search_x;
-        p.command(EXPOSURE, &[&exposure(e, false)])?;
+        p.command(EXPOSURE, &[&self.light.exposure(e, false)])?;
         p.command(
             GEOMETRY,
             &[&area_params(
@@ -770,27 +952,50 @@ impl FilmSession {
         let new_e = (f64::from(e) * EXPOSURE_FRACTION / brightest)
             .round()
             .clamp(1.0, f64::from(m.max_exposure / 2)) as u16;
-        let solve = |gains: [u8; 3], means: [f64; 3], ratio: f64| {
-            let mut out = [0u8; 3];
-            for c in 0..3 {
-                let g = GAIN_POLE - (GAIN_POLE - f64::from(gains[c])) * means[c] * ratio / TARGET;
-                out[c] = g.round().clamp(0.0, f64::from(MAX_GAIN)) as u8;
-            }
-            out
-        };
-        gains = solve(gains, means, f64::from(new_e) / f64::from(e));
+        gains = solve_gains(gains, means, f64::from(new_e) / f64::from(e), TARGET);
         e = new_e;
         for _ in 0..2 {
             p.command(OFFSETS, &[&analog([FIRST_OFFSET; 3], gains)])?;
             means = self.window_means(p, e)?;
             log::debug!("exposure {e}, gains {gains:02x?}: window {means:.1?}");
-            let next = solve(gains, means, 1.0);
+            let next = solve_gains(gains, means, 1.0, TARGET);
             if next == gains {
                 break;
             }
             gains = next;
         }
         Ok((e, gains))
+    }
+
+    /// The infrared pass's gains: its exposure is the line time, so only the gains are
+    /// searched, from 0, as SilverFast does.
+    fn search_infrared_gains(&self, p: &mut Protocol<'_>) -> Result<[u8; 3], ScanError> {
+        let m = self.mode;
+        let mut gains = [0; 3];
+        p.command(OFFSETS, &[&analog([FIRST_OFFSET; 3], gains)])?;
+        p.command(PASS, &[&[m.ccd]])?;
+        let mut line_time = [0u8; 26];
+        line_time[..2].copy_from_slice(&m.ir_line_time.to_le_bytes());
+        p.command(EXPOSURE_21, &[&line_time])?;
+        upload(p, tables::TYPE7, tables::TYPE7_ADDRESS, &tables::type7())?;
+        let mut means = self.window_means(p, 0)?;
+        if means.iter().cloned().fold(0.0, f64::max) < 8.0 {
+            return Err(ScanError::Backend(format!(
+                "the infrared lamp gives no light through the holder's window (levels \
+                 {means:.0?})"
+            )));
+        }
+        for _ in 0..2 {
+            let next = solve_gains(gains, means, 1.0, IR_TARGET);
+            if next == gains {
+                break;
+            }
+            gains = next;
+            p.command(OFFSETS, &[&analog([FIRST_OFFSET; 3], gains)])?;
+            means = self.window_means(p, 0)?;
+            log::debug!("infrared gains {gains:02x?}: window {means:.1?}");
+        }
+        Ok(gains)
     }
 
     /// Search the analog offsets that put each channel's dark level in [`DARK_RANGE`], halving
@@ -808,7 +1013,7 @@ impl FilmSession {
             4,
             read_params(0x00, self.mode.resolution, 0x00, [0x80, 0x00], 4),
         );
-        p.command(EXPOSURE, &[&exposure(e, true)])?;
+        p.command(EXPOSURE, &[&self.light.exposure(e, true)])?;
         p.command(GEOMETRY, &[&geometry])?;
         p.command(LEVELS, &[&[0u8; 18]])?;
         p.command(GAIN, &[&neutral_gain()])?;
@@ -816,7 +1021,10 @@ impl FilmSession {
         let mut step = OFFSET_STEP;
         for _ in 0..OFFSET_TRIES {
             p.command(OFFSETS, &[&analog(offsets, gains)])?;
-            p.command(LIGHT, &[&[FILM_LAMP_OFF]])?;
+            // The strip is masked; the infrared pass leaves its lamp on.
+            if !self.light.infrared {
+                p.command(LIGHT, &[&[FILM_LAMP_OFF]])?;
+            }
             p.command(GEOMETRY, &[&geometry])?;
             let data = p.read_data(usize::from(s1 - s0) * 4 * 6)?;
             p.wait_ready()?;
@@ -1074,6 +1282,89 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The gain model against SilverFast's searches: from the levels it read, the gains it
+    /// chose next (captures 33 and 38).
+    #[test]
+    fn solves_gains_like_silverfast() {
+        // Colour, 1,600 dpi: 1c 17 13 read 205.1, 243.6, 229.1; SilverFast balanced G and B
+        // down to R in two steps, reaching 1c 0e 0d.
+        assert_eq!(
+            solve_gains([0x1c, 0x17, 0x13], [205.1, 243.6, 229.1], 1.0, 205.1),
+            [0x1c, 0x0e, 0x0d]
+        );
+        // Infrared, 800 dpi: from 0, 166.0, 146.2, 153.6 led to 0f 16 14 (and 210.4, 211.9,
+        // 213.7); the model lands within a step.
+        let ir = solve_gains([0; 3], [166.0, 146.2, 153.6], 1.0, IR_TARGET);
+        for (got, want) in ir.into_iter().zip([0x0f, 0x16, 0x14]) {
+            assert!(got.abs_diff(want) <= 1, "{ir:02x?}");
+        }
+    }
+
+    #[test]
+    fn infrared_pass_on_simulator() {
+        let a = area(5.0, 40.0, 24.0, 36.0);
+        for dpi in [800, 1600] {
+            let session = FilmSession::infrared(&a, dpi).unwrap();
+            // The same read as the colour pass, moved with the steady motor's lead.
+            let colour = FilmSession::new(&a, dpi).unwrap();
+            let shift = (dpi / 800 * 6) as u16;
+            let (x0, x1) = colour.plan.x_units;
+            assert_eq!(session.plan.x_units, (x0 - shift, x1 - shift));
+            assert_eq!(session.data_len(), colour.data_len());
+            let mut sim = SimulatedScanner::default();
+            let data = session.run(&mut sim, Duration::ZERO).unwrap();
+            assert_eq!(data.len(), session.data_len());
+            let lamps: Vec<u8> = sim
+                .writes
+                .windows(2)
+                .filter(|w| w[0] == LIGHT)
+                .map(|w| w[1][0])
+                .collect();
+            assert!(
+                lamps.contains(&IR_LAMP) && !lamps.contains(&FILM_LAMP),
+                "{lamps:02x?}"
+            );
+            // Unexposed throughout; the image read at one motor speed.
+            let exposures = sim.writes.windows(2).filter(|w| w[0] == EXPOSURE);
+            assert!(exposures.into_iter().all(|w| w[1] == [0; 12]));
+            let motor = sim.writes.iter().rev().find(|w| w.len() == 12).unwrap();
+            assert_eq!(motor[4..], STEADY_SCAN_MOTOR);
+        }
+        let ir = FilmSession::infrared(&a, 800).unwrap();
+        let colour = FilmSession::new(&a, 800).unwrap();
+        let (Carriage::Fast(i), Carriage::Fast(c)) = (ir.plan.carriage, colour.plan.carriage)
+        else {
+            panic!("slow move");
+        };
+        assert_eq!(i - c, 256);
+    }
+
+    /// A session that finds the CCD and the lamp out (as one stopped partway leaves them)
+    /// takes each back on its own before starting.
+    #[test]
+    fn starts_by_going_home() {
+        let session = FilmSession::new(&area(5.0, 40.0, 24.0, 36.0), 800).unwrap();
+        let mut sim = SimulatedScanner::default();
+        sim.position = [1956, 1300];
+        session.run(&mut sim, Duration::ZERO).unwrap();
+        // Each motor command with the stage selected before it.
+        let mut stage = None;
+        let mut moves = Vec::new();
+        for w in sim.writes.windows(2) {
+            if w[0] == STAGE {
+                stage = Some(w[1][0]);
+            } else if w[0] == MOTOR {
+                moves.push((stage.unwrap(), w[1].clone()));
+            }
+        }
+        assert_eq!(moves[0], (STAGE_CCD, motor(932, BACK_MOTOR).to_vec()));
+        assert_eq!(
+            moves[1],
+            (STAGE_LAMP, motor(1300, SLOW_BACK_MOTOR).to_vec())
+        );
+        assert_eq!(sim.position, [0; 2]);
     }
 
     #[test]

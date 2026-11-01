@@ -27,6 +27,11 @@ pub struct SimulatedScanner {
     awaiting: Option<([u8; 2], usize)>,
     geometry: Vec<u8>,
     lamp_off: bool,
+    /// What `1e 86` reports: the CCD's and the lamp's positions. A reverse move (`1e 01` mode
+    /// bit `0x20`, then `1e 05`) takes the units `1e 25` selects home.
+    pub position: [u16; 2],
+    stage: u8,
+    reverse: bool,
 }
 
 /// Parameter writes a command takes; `None` for queries, which reply instead of acking.
@@ -113,7 +118,9 @@ impl Transport for SimulatedScanner {
         if let Some((cmd, left)) = self.awaiting.take() {
             match cmd {
                 [0x1e, 0x41] => self.geometry = data.to_vec(),
-                [0x1e, 0xa2] => self.lamp_off = matches!(data, [0x00 | 0x03]),
+                [0x1e, 0xa2] => self.lamp_off = matches!(data, [0x00 | 0x03 | 0x05]),
+                [0x1e, 0x25] => self.stage = data.first().copied().unwrap_or(0),
+                [0x1e, 0x01] => self.reverse = data.get(10).is_some_and(|m| m & 0x20 != 0),
                 _ => {}
             }
             if left > 1 {
@@ -131,6 +138,18 @@ impl Transport for SimulatedScanner {
             .map_err(|_| ScanError::Backend(format!("simulator: {data:02x?} is not a command")))?;
         if cmd == [0x1e, 0x47] {
             self.replies.extend(self.image());
+            return Ok(());
+        }
+        if cmd == [0x1e, 0x05] && self.reverse {
+            match self.stage {
+                0x00 => self.position[0] = 0,
+                0x02 => self.position[1] = 0,
+                _ => self.position = [0; 2],
+            }
+        }
+        if cmd == [0x1e, 0x86] {
+            let [ccd, lamp] = self.position.map(u16::to_le_bytes);
+            self.replies.push_back([ccd, lamp].concat());
             return Ok(());
         }
         match param_writes(cmd) {
