@@ -7,6 +7,8 @@ use scan_core::{
     ScanSource, SourceCapabilities,
 };
 
+use scan_process::DustRemoval;
+
 use crate::worker::{Command, Event, ScanKind};
 
 /// The stages of the film scanning workflow, in order.
@@ -71,7 +73,36 @@ pub enum Activity {
     ListingDevices,
     OpeningDevice,
     Scanning { kind: ScanKind, progress: f32 },
+    RemovingDust,
     Saving,
+}
+
+/// Infrared dust and scratch removal of scans that have an infrared channel.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DustSettings {
+    pub enabled: bool,
+    /// 0 removes only obvious defects, 1 faint ones too.
+    pub strength: f32,
+    /// Show the defects found, in red over the image.
+    pub show_mask: bool,
+}
+
+impl Default for DustSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            strength: 0.5,
+            show_mask: false,
+        }
+    }
+}
+
+/// A dust removal of the result with some generation and strength.
+#[derive(Clone, Debug)]
+pub struct Cleaned {
+    pub generation: u64,
+    pub strength: f32,
+    pub removal: Arc<DustRemoval>,
 }
 
 /// User-chosen scan settings, kept valid for the selected device and source.
@@ -113,6 +144,9 @@ pub struct AppState {
     /// Incremented whenever `result` changes, so views can refresh cached textures.
     pub result_generation: u64,
     pub view_channel: ViewChannel,
+    pub dust: DustSettings,
+    /// The latest dust removal; see [`AppState::current_cleaned`].
+    pub cleaned: Option<Cleaned>,
     /// The device whose capabilities the settings were last fitted to.
     settings_device: Option<DeviceId>,
 }
@@ -132,6 +166,8 @@ impl Default for AppState {
             result_kind: None,
             result_generation: 0,
             view_channel: ViewChannel::Visible,
+            dust: DustSettings::default(),
+            cleaned: None,
             settings_device: None,
         }
     }
@@ -256,11 +292,45 @@ impl AppState {
         }
     }
 
+    /// The dust removal of the current result with the current settings, if it is done.
+    pub fn current_cleaned(&self) -> Option<&Cleaned> {
+        self.cleaned.as_ref().filter(|c| {
+            self.dust.enabled
+                && c.generation == self.result_generation
+                && c.strength == self.dust.strength
+        })
+    }
+
+    /// Start dust removal if it is enabled and the result has infrared but no up-to-date
+    /// removal yet. Call after the result or the dust settings change.
+    pub fn update_dust(&mut self) -> Option<Command> {
+        let result = self.result.clone()?;
+        if !self.dust.enabled
+            || result.infrared.is_none()
+            || self.is_busy()
+            || self.current_cleaned().is_some()
+        {
+            return None;
+        }
+        self.activity = Activity::RemovingDust;
+        self.status = "Removing dust and scratches...".into();
+        Some(Command::RemoveDust {
+            generation: self.result_generation,
+            strength: self.dust.strength,
+            result,
+        })
+    }
+
     pub fn start_save(&mut self, path: std::path::PathBuf) -> Option<Command> {
         let result = self.result.clone()?;
+        let cleaned = self.current_cleaned().map(|c| c.removal.clone());
         self.activity = Activity::Saving;
         self.status = format!("Saving {}...", path.display());
-        Some(Command::Save { result, path })
+        Some(Command::Save {
+            result,
+            cleaned,
+            path,
+        })
     }
 
     /// Apply a worker event, returning a follow-up command if one is needed.
@@ -327,6 +397,8 @@ impl AppState {
                         self.result = Some(Arc::new(result));
                         self.result_kind = Some(kind);
                         self.result_generation += 1;
+                        self.cleaned = None;
+                        return self.update_dust();
                     }
                     Err(ScanError::Cancelled) => self.status = "Scan cancelled".into(),
                     Err(e) => {
@@ -335,6 +407,39 @@ impl AppState {
                     }
                 }
                 None
+            }
+            Event::DustRemoved {
+                generation,
+                strength,
+                result,
+            } => {
+                self.activity = Activity::Idle;
+                match result {
+                    Ok(removal) => {
+                        let (w, h) = removal.mask.dimensions();
+                        let share = removal.report.defect_pixels as f64 / (w as f64 * h as f64);
+                        self.status = format!(
+                            "Dust removal: {} px repaired ({:.2}% of the scan)",
+                            removal.report.defect_pixels,
+                            share * 100.0
+                        );
+                        if generation == self.result_generation {
+                            self.cleaned = Some(Cleaned {
+                                generation,
+                                strength,
+                                removal: Arc::new(removal),
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        self.status = "Dust removal failed".into();
+                        self.error = Some(e);
+                        // Don't retry the same thing straight away.
+                        self.dust.enabled = false;
+                    }
+                }
+                // The settings or the result may have changed in the meantime.
+                self.update_dust()
             }
             Event::Saved(result) => {
                 self.activity = Activity::Idle;
@@ -515,6 +620,113 @@ mod tests {
             result: Err(err),
         });
         assert!(state.error.as_deref().unwrap().contains("lamp failure"));
+    }
+
+    /// A final scan with infrared, applied to the state; returns the follow-up command.
+    fn final_ir_scan(state: &mut AppState) -> Option<Command> {
+        state.settings.infrared = true;
+        let Some(Command::Scan { request, kind, .. }) = state.start_scan(ScanKind::Final) else {
+            panic!("expected scan command");
+        };
+        let mut dev = MockBackend.open(&MockBackend::device_info()).unwrap();
+        let result = dev.scan(&request, &mut NoProgress);
+        state.apply(Event::ScanDone { kind, result })
+    }
+
+    /// Run the dust removal `cmd` asks for and apply its outcome.
+    fn removed(state: &mut AppState, cmd: Option<Command>) -> Option<Command> {
+        let Some(Command::RemoveDust {
+            generation,
+            strength,
+            result,
+        }) = cmd
+        else {
+            panic!("expected dust removal, got {cmd:?}");
+        };
+        let params = scan_process::DustParams::for_scan(result.dpi, strength);
+        let removal =
+            scan_process::remove_dust(result.primary(), result.infrared.as_ref().unwrap(), &params);
+        state.apply(Event::DustRemoved {
+            generation,
+            strength,
+            result: removal.map_err(|e| e.to_string()),
+        })
+    }
+
+    #[test]
+    fn infrared_scans_are_cleaned_and_saved_clean() {
+        let mut state = with_mock_open();
+        state.settings.dpi = 150;
+        let cmd = final_ir_scan(&mut state);
+        assert_eq!(state.activity, Activity::RemovingDust);
+        assert!(removed(&mut state, cmd).is_none());
+        assert!(!state.is_busy());
+        let cleaned = state.current_cleaned().expect("cleaned").removal.clone();
+        assert!(cleaned.report.defect_pixels > 0);
+
+        let Some(Command::Save { cleaned: saved, .. }) = state.start_save("x.tif".into()) else {
+            panic!("expected save");
+        };
+        assert!(Arc::ptr_eq(&saved.unwrap(), &cleaned));
+
+        // Turned off, the raw scan is saved again, and nothing is recomputed.
+        state.activity = Activity::Idle;
+        state.dust.enabled = false;
+        assert!(state.update_dust().is_none());
+        let Some(Command::Save { cleaned, .. }) = state.start_save("x.tif".into()) else {
+            panic!("expected save");
+        };
+        assert!(cleaned.is_none());
+        state.activity = Activity::Idle;
+        state.dust.enabled = true;
+        assert!(
+            state.update_dust().is_none(),
+            "the earlier removal still fits"
+        );
+    }
+
+    #[test]
+    fn changing_strength_reruns_and_stale_results_are_dropped() {
+        let mut state = with_mock_open();
+        state.settings.dpi = 150;
+        let first = final_ir_scan(&mut state);
+        // The strength changes while the first removal runs.
+        state.dust.strength = 0.9;
+        assert!(state.update_dust().is_none(), "busy");
+        let second = removed(&mut state, first);
+        assert!(state.current_cleaned().is_none());
+        assert!(matches!(
+            second,
+            Some(Command::RemoveDust { strength, .. }) if strength == 0.9
+        ));
+        assert!(removed(&mut state, second).is_none());
+        assert_eq!(state.current_cleaned().unwrap().strength, 0.9);
+
+        // A removal that finishes after a new scan doesn't apply to it.
+        let generation = state.result_generation;
+        state.result_generation += 1;
+        let removal = state.cleaned.as_ref().unwrap().removal.as_ref().clone();
+        state.dust.enabled = false;
+        state.apply(Event::DustRemoved {
+            generation,
+            strength: 0.9,
+            result: Ok(removal),
+        });
+        assert_eq!(state.cleaned.as_ref().unwrap().generation, generation);
+        state.dust.enabled = true;
+        assert!(state.current_cleaned().is_none());
+    }
+
+    #[test]
+    fn scans_without_infrared_are_not_cleaned() {
+        let mut state = with_mock_open();
+        let Some(Command::Scan { request, kind, .. }) = state.start_scan(ScanKind::Preview) else {
+            panic!("expected scan command");
+        };
+        let mut dev = MockBackend.open(&MockBackend::device_info()).unwrap();
+        let result = dev.scan(&request, &mut NoProgress);
+        assert!(state.apply(Event::ScanDone { kind, result }).is_none());
+        assert!(state.current_cleaned().is_none());
     }
 
     #[test]

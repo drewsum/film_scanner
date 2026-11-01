@@ -227,7 +227,7 @@ impl V500Device {
                         request.bit_depth,
                     ),
                 }),
-                None => infrared = Some(decode::infrared(&raw, session.layout, output)),
+                None => infrared = Some(session.decode_infrared(&raw, &area)),
             }
         }
         progress.progress(1.0);

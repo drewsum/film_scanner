@@ -151,21 +151,22 @@ fn scans_film_infrared() {
     println!("infrared: frame mean {mean:.0}");
     assert!(mean > 30000.0, "infrared frame mean {mean:.0}");
 
-    // The planes line up: the detail (each pixel less its neighbourhood) of both correlates
-    // best within a pixel of no shift.
+    // The planes line up: their dark detail (each pixel less its neighbourhood, where that
+    // is negative), which is mostly dust, correlates best within a pixel of no shift. The
+    // search reaches well past the 6 px a wrong infrared x offset once caused.
     let detail = |at: &dyn Fn(u32, u32) -> f64, x: u32, y: u32| {
         let mut s = 0.0;
-        for dy in 0..5 {
-            for dx in 0..5 {
-                s += at(x + dx - 2, y + dy - 2);
+        for dy in 0..9 {
+            for dx in 0..9 {
+                s += at(x + dx - 4, y + dy - 4);
             }
         }
-        at(x, y) - s / 25.0
+        (at(x, y) - s / 81.0).min(0.0)
     };
     let ir_at = |x: u32, y: u32| f64::from(ir.get_pixel(x, y).0[0]);
     let colour_at = |x: u32, y: u32| f64::from(colour.get_pixel(x, y).0[0]);
-    let best = (-4i32..=4)
-        .flat_map(|dy| (-4i32..=4).map(move |dx| (dx, dy)))
+    let best = (-10i32..=10)
+        .flat_map(|dy| (-10i32..=10).map(move |dx| (dx, dy)))
         .map(|(dx, dy)| {
             let mut c = 0.0;
             for y in (h / 8..h * 7 / 8).step_by(2) {

@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 scan-core.workspace = true
+scan-process.workspace = true
 scan-wia.workspace = true
 scan-epson.workspace = true
 eframe.workspace = true

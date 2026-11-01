@@ -9,6 +9,7 @@ use scan_core::{
     CancelToken, Capabilities, DeviceInfo, DeviceRegistry, ProgressSink, ScanError, ScanRequest,
     ScanResult, ScannerDevice, export,
 };
+use scan_process::{DustParams, DustRemoval};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScanKind {
@@ -34,8 +35,17 @@ pub enum Command {
         request: ScanRequest,
         kind: ScanKind,
     },
+    /// Find and fill dust in the result's primary image, using its infrared channel.
+    RemoveDust {
+        /// The result's generation, handed back with the outcome.
+        generation: u64,
+        strength: f32,
+        result: Arc<ScanResult>,
+    },
     Save {
         result: Arc<ScanResult>,
+        /// Saved in place of the primary pass when present.
+        cleaned: Option<Arc<DustRemoval>>,
         path: PathBuf,
     },
 }
@@ -51,6 +61,11 @@ pub enum Event {
     ScanDone {
         kind: ScanKind,
         result: Result<ScanResult, ScanError>,
+    },
+    DustRemoved {
+        generation: u64,
+        strength: f32,
+        result: Result<DustRemoval, String>,
     },
     Saved(Result<Vec<PathBuf>, String>),
 }
@@ -176,8 +191,33 @@ fn run(
                 };
                 send(Event::ScanDone { kind, result });
             }
-            Command::Save { result, path } => {
-                let saved = export::save_tiff(&result, &path).map_err(|e| e.to_string());
+            Command::RemoveDust {
+                generation,
+                strength,
+                result,
+            } => {
+                let removed = match &result.infrared {
+                    Some(ir) => {
+                        let params = DustParams::for_scan(result.dpi, strength);
+                        scan_process::remove_dust(result.primary(), ir, &params)
+                            .map_err(|e| e.to_string())
+                    }
+                    None => Err("the scan has no infrared channel".into()),
+                };
+                send(Event::DustRemoved {
+                    generation,
+                    strength,
+                    result: removed,
+                });
+            }
+            Command::Save {
+                result,
+                cleaned,
+                path,
+            } => {
+                let primary = cleaned.as_ref().map_or(result.primary(), |c| &c.image);
+                let saved = export::save_tiff_with_primary(&result, primary, &path)
+                    .map_err(|e| e.to_string());
                 send(Event::Saved(saved));
             }
         }
@@ -189,8 +229,8 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use scan_core::ScanSource;
     use scan_core::mock::MockBackend;
+    use scan_core::{NoProgress, ScanSource, ScannerBackend};
 
     fn next(worker: &Worker) -> Event {
         // Skip progress events; wait for the response to the command.
@@ -239,6 +279,7 @@ mod tests {
         let path = dir.path().join("strip.tif");
         worker.send(Command::Save {
             result: Arc::new(result),
+            cleaned: None,
             path: path.clone(),
         });
         let Event::Saved(Ok(paths)) = next(&worker) else {
@@ -246,6 +287,42 @@ mod tests {
         };
         assert_eq!(paths, vec![path.clone()]);
         assert!(path.exists());
+    }
+
+    #[test]
+    fn removes_dust_using_the_infrared_channel() {
+        let mut dev = MockBackend.open(&MockBackend::device_info()).unwrap();
+        let mut request = ScanRequest::new(ScanSource::Transparency, 150);
+        request.infrared = true;
+        let with_ir = Arc::new(dev.scan(&request, &mut NoProgress).unwrap());
+        request.infrared = false;
+        let without = Arc::new(dev.scan(&request, &mut NoProgress).unwrap());
+
+        let worker = Worker::spawn(DeviceRegistry::new(), || {});
+        for (generation, result) in [(7, with_ir), (8, without)] {
+            worker.send(Command::RemoveDust {
+                generation,
+                strength: 0.5,
+                result,
+            });
+        }
+        let Event::DustRemoved {
+            generation: 7,
+            result: Ok(removal),
+            ..
+        } = next(&worker)
+        else {
+            panic!("expected dust removal")
+        };
+        assert!(removal.report.defect_pixels > 0);
+        let Event::DustRemoved {
+            generation: 8,
+            result: Err(_),
+            ..
+        } = next(&worker)
+        else {
+            panic!("expected an error without infrared")
+        };
     }
 
     #[test]
