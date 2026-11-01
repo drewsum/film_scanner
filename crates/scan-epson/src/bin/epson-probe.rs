@@ -11,6 +11,7 @@
 
 use std::process::ExitCode;
 
+#[cfg(any(windows, test))]
 fn parse_hex(s: &str) -> Option<Vec<u8>> {
     let s: String = s
         .chars()
