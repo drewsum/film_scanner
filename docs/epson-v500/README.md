@@ -100,6 +100,10 @@ Captures (in `target/captures`, not committed) are WIA scans made with
 | 01 | WIA preview, 75 dpi | |
 | 02–09 | 75/150/300/600 dpi, 50×50 / 100×50 / 50×100 / offset 20,30 mm, grey | one setting changed at a time |
 | 10 | power-on, then a 75 dpi scan | firmware upload |
+| 11 | SilverFast preview, film holder with two 35 mm negative strips | its own calibration |
+
+SilverFast drives the scanner itself, with the same command set as Epson's driver. Its captures
+are an independent reference: commands both programs send are probably required.
 
 Findings so far:
 
@@ -112,3 +116,12 @@ Findings so far:
 - Final image data is pixel-interleaved 8-bit RGB, wider than requested and with R/G/B line
   skew. The driver crops, resamples and realigns it.
 - Calibration (dark/white reads, shading uploads with `1e 84`) is done by the host.
+- `1e a2` + 1 byte seems to select the light: `00` flatbed, `02` transparency unit, `03` lamp
+  off (used before dark reads).
+- `1e 31` (12 bytes) sets per-channel analog front-end values: three u16 at 0 (offset; SilverFast
+  binary-searches them, `80 → c0 → a0 → 90 → 88 → 8c`, against dark reads), and three bytes at
+  8 (gain, e.g. `22 16 16`).
+- `1e 41` byte 8 is `0x10` for 16-bit-per-channel data (`0x00` for 8-bit). Capture 11's preview
+  is 1,088 px × 3,720 lines of 16-bit LE interleaved RGB at hardware divisor 6 (400 dpi), sent in
+  261,120-byte (40-line) blocks. The x range in `1e 41` is 2× the pixel width at that
+  resolution.
