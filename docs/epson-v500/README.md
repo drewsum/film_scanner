@@ -101,6 +101,7 @@ Captures (in `target/captures`, not committed) are WIA scans made with
 | 02–09 | 75/150/300/600 dpi, 50×50 / 100×50 / 50×100 / offset 20,30 mm, grey | one setting changed at a time |
 | 10 | power-on, then a 75 dpi scan | firmware upload |
 | 11 | SilverFast preview, film holder with two 35 mm negative strips | its own calibration |
+| 12 | SilverFast zoom preview of one frame at 1,600 ppi (48-bit, no multi-exposure) | 1,600 × 2,482 px; `1e 41` bytes 9–10 = `02 03` |
 
 SilverFast drives the scanner itself, with the same command set as Epson's driver. Its captures
 are an independent reference: commands both programs send are probably required.
@@ -112,7 +113,11 @@ Findings so far:
 - The scan area is set by `1e 41` (22 bytes: x start/end and line count as u16 LE, resolution
   divisor of 2400 dpi at byte 10) and `1e 01` (motor steps, u32 LE at 0).
 - `1e 47` starts a data read. Data arrives in blocks, each followed by an 8-byte trailer
-  `02 00 <u32 LE length / 256> 80 00`.
+  `02 <u32 LE block length> 00 80 00`. When the block isn't a multiple of 512 bytes, the
+  trailer shares the last USB transfer with the block's final bytes (e.g. 128 + 8). Don't drop
+  short transfers: `scan_epson::data::BlockAssembler` splits blocks at their trailers.
+- R/G/B line skew: at 1,600 dpi, red leads green by 40 lines and blue trails by 40, i.e. 0.025 in
+  each way.
 - Final image data is pixel-interleaved 8-bit RGB, wider than requested and with R/G/B line
   skew. The driver crops, resamples and realigns it.
 - Calibration (dark/white reads, shading uploads with `1e 84`) is done by the host.

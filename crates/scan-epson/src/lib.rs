@@ -11,6 +11,7 @@
 //! - [`replay`] plays a captured session back to a scanner (the `epson-replay` tool)
 //! - [`firmware`] loads Epson's firmware into a freshly powered scanner (`epson-firmware`)
 
+pub mod data;
 pub mod firmware;
 pub mod pcap;
 pub mod replay;

@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
+use crate::data::BlockAssembler;
 use crate::pcap::{TransferType, UsbPacket};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -164,15 +165,17 @@ pub fn format_log(transfers: &[Transfer], opts: LogOptions) -> String {
     out
 }
 
-/// Concatenate the payload of every IN bulk transfer of at least `threshold` bytes, i.e. the
-/// raw image stream of a scan, for offline decoding.
-pub fn bulk_in_stream(transfers: &[Transfer], threshold: usize) -> Vec<u8> {
-    transfers
-        .iter()
-        .filter(|t| t.direction == Direction::In && t.kind == TransferType::Bulk)
-        .filter(|t| t.data.len() >= threshold)
-        .flat_map(|t| t.data.iter().copied())
-        .collect()
+/// The image data blocks of a session (see [`crate::data`]), trailers removed, in order.
+pub fn data_blocks(transfers: &[Transfer]) -> Vec<Vec<u8>> {
+    let mut blocks = Vec::new();
+    let mut assembler = BlockAssembler::default();
+    for t in transfers.iter().filter(|t| t.kind == TransferType::Bulk) {
+        match t.direction {
+            Direction::Out => assembler.reset(),
+            Direction::In => blocks.extend(assembler.push(&t.data)),
+        }
+    }
+    blocks
 }
 
 #[cfg(test)]
@@ -190,7 +193,12 @@ mod tests {
         for _ in 0..3 {
             records.push(build::bulk(true, 0x81, &[0xaa; 1024]));
         }
-        records.push(build::bulk(true, 0x81, &[0x06]));
+        // Block trailer for 3072 bytes.
+        records.push(build::bulk(
+            true,
+            0x81,
+            &[0x02, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x80, 0x00],
+        ));
         let mut other = build::bulk(false, 0x02, &[0; 4]);
         other.device = 9;
         records.push(other);
@@ -207,7 +215,9 @@ mod tests {
         assert_eq!(t[0].data, [0x1b, 0x40]);
         assert_eq!(t[1].direction, Direction::In);
         assert_eq!(t[1].data, [0x06]);
-        assert_eq!(bulk_in_stream(&t, 512).len(), 3072);
+        let blocks = data_blocks(&t);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0], vec![0xaa; 3072]);
     }
 
     #[test]

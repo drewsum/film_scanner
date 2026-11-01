@@ -6,6 +6,7 @@
 
 use scan_core::ScanError;
 
+use crate::data::BlockAssembler;
 use crate::pcap::TransferType;
 use crate::trace::{Direction, Transfer};
 use crate::transport::Transport;
@@ -24,7 +25,7 @@ pub struct ReplayReport {
     pub writes: usize,
     pub reads: usize,
     pub mismatches: Vec<Mismatch>,
-    /// Concatenated payload of IN transfers of at least the data threshold.
+    /// Image data: every data block read, trailers removed.
     pub data: Vec<u8>,
     /// The transfer the replay stopped at, and why.
     pub error: Option<(usize, ScanError)>,
@@ -68,6 +69,7 @@ pub fn replay(
         .filter(|(_, t)| t.kind == TransferType::Bulk)
         .collect();
     let mut report = ReplayReport::default();
+    let mut blocks = BlockAssembler::default();
     let mut i = 0;
     while i < bulk.len() {
         let (index, t) = bulk[i];
@@ -81,7 +83,14 @@ pub fn replay(
                 i += 1;
                 poll(t, r, transport, poll_delay, &mut report)
             }
-            _ => replay_one(index, t, transport, data_threshold, &mut report),
+            _ => replay_one(
+                index,
+                t,
+                transport,
+                data_threshold,
+                &mut blocks,
+                &mut report,
+            ),
         };
         if let Err(e) = result {
             report.error = Some((index, e));
@@ -123,10 +132,12 @@ fn replay_one(
     t: &Transfer,
     transport: &mut dyn Transport,
     data_threshold: usize,
+    blocks: &mut BlockAssembler,
     report: &mut ReplayReport,
 ) -> Result<(), ScanError> {
     match t.direction {
         Direction::Out => {
+            blocks.reset();
             transport.write(&t.data)?;
             report.writes += 1;
         }
@@ -135,15 +146,15 @@ fn replay_one(
             let n = transport.read(&mut buf)?;
             buf.truncate(n);
             report.reads += 1;
-            if t.data.len() >= data_threshold {
-                if n < t.data.len() {
-                    // Keep reading so later transfers stay in step.
-                    let mut rest = vec![0u8; t.data.len() - n];
-                    transport.read_exact(&mut rest)?;
-                    buf.extend_from_slice(&rest);
-                }
-                report.data.extend_from_slice(&buf);
-            } else if buf != t.data {
+            if t.data.len() >= data_threshold && n < t.data.len() {
+                // Keep reading so later transfers stay in step.
+                let mut rest = vec![0u8; t.data.len() - n];
+                transport.read_exact(&mut rest)?;
+                buf.extend_from_slice(&rest);
+            }
+            if let Some(block) = blocks.push(&buf) {
+                report.data.extend_from_slice(&block);
+            } else if t.data.len() < data_threshold && buf != t.data {
                 report.mismatches.push(Mismatch {
                     index,
                     expected: t.data.clone(),
@@ -159,6 +170,9 @@ fn replay_one(
 mod tests {
     use super::*;
     use crate::transport::{Exchange, ScriptedTransport};
+
+    /// Trailer of a 4-byte data block.
+    const TRAILER_4: [u8; 8] = [0x02, 4, 0, 0, 0, 0x00, 0x80, 0x00];
 
     fn t(direction: Direction, data: &[u8]) -> Transfer {
         Transfer {
@@ -182,11 +196,11 @@ mod tests {
             t(Direction::In, &[0x64]),
             t(Direction::Out, &[0x1e, 0x47]),
             t(Direction::In, &[7; 4]),
-            t(Direction::In, &[0x02, 0x00]),
+            t(Direction::In, &TRAILER_4),
         ];
         let mut dev = ScriptedTransport::new([
             Exchange::new(&[0x1e, 0x53], &[&[0x65]]),
-            Exchange::new(&[0x1e, 0x47], &[&[9, 9], &[9, 9], &[0x02, 0x00]]),
+            Exchange::new(&[0x1e, 0x47], &[&[9, 9], &[9, 9], &TRAILER_4]),
         ]);
         let report = replay(&capture, &mut dev, 4, std::time::Duration::ZERO);
         assert!(report.error.is_none());

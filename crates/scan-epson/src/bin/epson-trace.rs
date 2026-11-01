@@ -78,12 +78,17 @@ fn main() -> ExitCode {
     );
     print!("{}", trace::format_log(&transfers, opts));
     if let Some(out) = dump {
-        let stream = trace::bulk_in_stream(&transfers, opts.data_threshold);
+        let blocks = trace::data_blocks(&transfers);
+        let stream = blocks.concat();
         if let Err(e) = std::fs::write(&out, &stream) {
             eprintln!("{out}: {e}");
             return ExitCode::FAILURE;
         }
-        eprintln!("wrote {} bytes of bulk IN data to {out}", stream.len());
+        eprintln!(
+            "wrote {} bytes of image data ({} blocks) to {out}",
+            stream.len(),
+            blocks.len()
+        );
     }
     ExitCode::SUCCESS
 }
