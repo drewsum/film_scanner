@@ -100,10 +100,51 @@ Captures (in `target/captures`, not committed) are WIA scans made with
 | 01 | WIA preview, 75 dpi | |
 | 02–09 | 75/150/300/600 dpi, 50×50 / 100×50 / 50×100 / offset 20,30 mm, grey | one setting changed at a time |
 | 10 | power-on, then a 75 dpi scan | firmware upload |
+| 15–23 | 50/100/200/240/400/800/1,200 dpi and y offsets 30 and 150 mm | WIA offers only flatbed, 8-bit, ≤ 1,200 dpi |
 | 11 | SilverFast preview, film holder with two 35 mm negative strips | its own calibration |
 | 12 | SilverFast zoom preview of one frame at 1,600 ppi (48-bit, no multi-exposure) | 1,600 × 2,482 px; `1e 41` bytes 9–10 = `02 03` |
 | 13a | as 12, a second run | |
 | 13 | as 12 with iSRD (infrared dust removal) | separate IR pass, below |
+
+### Scan parameters
+
+From the final read of each capture (WIA flatbed 50–1,200 dpi in captures 02–09 and 15–23;
+SilverFast film in 11–14). Sequence for one read:
+
+```text
+1e 22 <12>   1e 41 <22>   1e 42 <18>   1e 43 <12>   [1e 84 tables]   1e 01 <12>   1e 47 → data
+```
+
+**`1e 41`, scan geometry and mode (22 bytes)**
+
+| Bytes | Meaning | Evidence |
+|---|---|---|
+| 0–1, 2–3 | x start, x end (u16 LE) | units below |
+| 4–5 | line count (u16 LE) | equals the lines received |
+| 8 | horizontal subsampling / mode: `b1` → ÷8/3, `a1` → ÷4/3, `10` → ÷2, `00`/`01` → ÷1 | units per pixel |
+| 9, 10 | resolution: **hardware dpi = 2400 × b9 / b10** | `01 0c` 200, `01 06` 400, `01 03` 800, `02 03` 1600, `01 01` 2400 |
+| 11 | `82`/`83` for image reads, `40` shading, `00` dark | open: the low bit |
+| 15 | varies 0x10–0x60 between otherwise equal scans | open |
+| 16 | `2e` in captures 02–09, `00` from 15 on | open; maybe lamp/state |
+| 18 | varies with resolution and area (`1c`, `12`, `38`, `44`, …) | open; maybe lines per block |
+
+x units are pixels at max(hardware dpi, 533⅓) per inch; for the flatbed, x = 0 mm is about 143
+units at 533⅓/in (0.27 in from the edge). The driver asks for more width than requested and
+crops. It downsamples to the requested dpi from the next hardware resolution up.
+
+**`1e 01`, motor move (12 bytes):** u32 LE steps at 0, at 2,400 steps per inch. Sent with `1e 05`
+it moves the carriage: the vertical offset is a move of about `2400 × y_in − 307` steps (minimum
+194) before the scan (y = 0, 30, 150 mm → 194, 2,526, 13,854). Just before `1e 47` it is the scan
+length (≈ 2400 / hardware dpi × lines + lead-in). Bytes 4 and 6–10 vary with resolution (speed
+or step mode; open).
+
+**`1e 22` (12 bytes):** u16 at 0 grows with resolution (3,840 at 200/400 dpi, 5,376 at 800,
+10,848 at 1,600 on the flatbed). SilverFast's film scans leave it 0 and set u16 at 6 instead.
+Probably exposure time per lamp; open.
+
+**Calibration-derived, per scan:** `1e 31` (analog offset/gain), `1e 42` (18 bytes; per-channel
+u16 pairs that change from run to run), `1e 43` (12 bytes, usually `00 80 …` or `84 7d 77 7e df 7f`)
+and the `1e 84` table uploads (gamma and shading).
 
 ### Infrared (capture 13)
 
