@@ -3,7 +3,9 @@
 //! The transparency source simulates a holder with two vertical 35mm strips of six colour
 //! negative frames each: an orange-masked film base, clear sprocket holes, an opaque holder
 //! around the strips, and a handful of dust specks that show up in both the visible and the
-//! infrared channel (as on a real scanner, where film dyes are transparent to infrared).
+//! infrared channel (as on a real scanner, where film dyes are nearly transparent to infrared).
+//! As with some real films, the cyan dye absorbs a little infrared, so frame detail shows
+//! faintly in the infrared channel too.
 
 use image::{DynamicImage, ImageBuffer, Luma, Rgb};
 
@@ -30,6 +32,13 @@ pub const FIRST_FRAME_Y_MM: f32 = 3.0;
 pub const FILM_BASE: [f32; 3] = [0.85, 0.55, 0.33];
 const HOLDER: f32 = 0.002;
 const FILM_IR: f32 = 0.9;
+/// Fraction of the infrared that the densest cyan dye absorbs.
+pub const CYAN_IR_CROSSTALK: f32 = 0.2;
+
+/// Centres and radii (x, y, r) in millimetres of the dust specks on a scan of `area`.
+pub fn dust_specks(area: ScanArea) -> Vec<(f32, f32, f32)> {
+    Dust::generate(area).specks
+}
 
 /// Rectangle (x, y, w, h) in millimetres of frame `index` (0..12) on the holder.
 pub fn frame_rect_mm(index: usize) -> (f32, f32, f32, f32) {
@@ -344,7 +353,12 @@ fn render_infrared(
             let base = match region_at(x, y) {
                 Region::Holder => HOLDER,
                 Region::SprocketHole => 1.0,
-                Region::FilmBase | Region::Frame { .. } => FILM_IR,
+                Region::FilmBase => FILM_IR,
+                Region::Frame { .. } => {
+                    // Cyan dye density follows how much red the negative blocks.
+                    let cyan = 1.0 - transmittance_transparency(x, y)[0] / FILM_BASE[0];
+                    FILM_IR * (1.0 - CYAN_IR_CROSSTALK * cyan)
+                }
             };
             let v = base * dust.factor(x, y);
             img.put_pixel(px, py, Luma([(v * 65535.0).round() as u16]));

@@ -12,6 +12,16 @@ use crate::{ScanError, ScanResult};
 /// become `<stem>_ev+1.0.tif` etc., and an infrared channel becomes `<stem>_ir.tif`.
 /// Returns every path written.
 pub fn save_tiff(result: &ScanResult, path: &Path) -> Result<Vec<PathBuf>, ScanError> {
+    save_tiff_with_primary(result, result.primary(), path)
+}
+
+/// Like [`save_tiff`], with `primary` (e.g. the dust-cleaned image) written in place of the
+/// first pass. The other passes and the infrared channel are saved as scanned.
+pub fn save_tiff_with_primary(
+    result: &ScanResult,
+    primary_image: &DynamicImage,
+    path: &Path,
+) -> Result<Vec<PathBuf>, ScanError> {
     let primary = path.with_extension("tif");
     let stem = primary
         .file_stem()
@@ -22,12 +32,12 @@ pub fn save_tiff(result: &ScanResult, path: &Path) -> Result<Vec<PathBuf>, ScanE
 
     let mut written = Vec::new();
     for (i, pass) in result.passes.iter().enumerate() {
-        let target = if i == 0 {
-            primary.clone()
+        let (target, image) = if i == 0 {
+            (primary.clone(), primary_image)
         } else {
-            sibling(&format!("ev{:+.1}", pass.exposure.ev))
+            (sibling(&format!("ev{:+.1}", pass.exposure.ev)), &pass.image)
         };
-        pass.image.save_with_format(&target, ImageFormat::Tiff)?;
+        image.save_with_format(&target, ImageFormat::Tiff)?;
         written.push(target);
     }
     if let Some(ir) = &result.infrared {
@@ -65,5 +75,22 @@ mod tests {
         assert_eq!((back.width(), back.height()), result.dimensions());
         let ir = image::open(&written[2]).unwrap();
         assert!(matches!(ir, DynamicImage::ImageLuma16(_)));
+    }
+
+    #[test]
+    fn a_replacement_primary_is_written_first() {
+        let mut dev = MockBackend.open(&MockBackend::device_info()).unwrap();
+        let mut req = ScanRequest::new(ScanSource::Transparency, 75);
+        req.infrared = true;
+        let result = dev.scan(&req, &mut NoProgress).unwrap();
+        let (w, h) = result.dimensions();
+        let cleaned = DynamicImage::new_rgb16(w, h);
+
+        let dir = tempfile::tempdir().unwrap();
+        let written =
+            save_tiff_with_primary(&result, &cleaned, &dir.path().join("clean.tif")).unwrap();
+        assert_eq!(written.len(), 2);
+        assert_eq!(image::open(&written[0]).unwrap(), cleaned);
+        assert!(written[1].ends_with("clean_ir.tif"));
     }
 }

@@ -27,6 +27,40 @@ The goal is one GUI that covers the whole workflow:
 The Epson V500's WIA driver only exposes the flatbed at up to 1200 dpi in 8-bit colour, with
 no transparency unit and no infrared. Full film support for that scanner needs a native backend.
 
+## Dust and scratch removal
+
+Film scans with the infrared channel turned on can have their dust and scratches removed, as
+Digital ICE and SilverFast iSRD do. The infrared is also saved as `<name>_ir.tif`. The
+code is in `crates/scan-process`.
+
+Film dyes are nearly transparent to infrared, so dust, hairs and scratches show as dark
+specks on an otherwise flat infrared image. The defect mask is built like this:
+
+1. Areas that are mostly dark in infrared over a few millimetres are taken for the film
+   holder and skipped.
+2. Each pixel is compared with the mean infrared within about 0.4 mm of it, leaving out
+   pixels that are themselves dark. A pixel more than a threshold darker is a defect. The
+   *Strength* slider sets the threshold, from 35% darker (0) to 10% darker (1).
+3. The cyan dye of some films absorbs a little infrared, so frame detail shows faintly. A line
+   fitted to infrared against the red channel, leaving out outliers such as dust, measures how
+   much. The infrared is corrected by that much before step 2.
+4. The mask is grown by a pixel or two, to cover the soft edges of each defect.
+
+Masked pixels are then filled from their surroundings, working inwards from the edge of each
+defect, and smoothed. *Show repaired areas in red* displays the mask. *Save as TIFF* saves
+the cleaned image while removal is on; the infrared and any extra exposures are saved as
+scanned.
+
+Known limits:
+
+- Silver-based black-and-white film and Kodachrome block infrared, so their infrared shows
+  the image itself. Turn removal off for them.
+- Repairs are smooth, without grain. That's invisible on dust specks, but may show on large
+  defects.
+- Defects right at the edge of the film strip, next to the holder, are not detected.
+- Scratches into the emulsion that don't block infrared aren't found: infrared only shows
+  what blocks light, such as dust, hairs and scratches on the film base.
+
 ## Building
 
 Requires Rust 1.95+ (`rustup` recommended). On Windows, the MSVC toolchain and the Visual
@@ -78,6 +112,8 @@ cargo test -p scan-wia -- --ignored --nocapture
 
 - `crates/scan-core`: backend-agnostic scanner traits and types (capabilities, scan
   requests with IR and multi-exposure passes), the mock backend, and TIFF export
+- `crates/scan-process`: processing of scans, independent of the scanner: infrared dust
+  and scratch removal
 - `crates/scan-wia`: Windows WIA backend
 - `crates/app`: the `film-scanner` egui application
 

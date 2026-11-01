@@ -19,10 +19,11 @@
 
 use std::time::Duration;
 
-use scan_core::{MM_PER_INCH, NoProgress, ProgressSink, ScanArea, ScanError};
+use scan_core::image::Luma;
+use scan_core::{Gray16Image, MM_PER_INCH, NoProgress, ProgressSink, ScanArea, ScanError};
 
 use crate::calibration::{self, Shading};
-use crate::decode::Resample;
+use crate::decode::{self, Resample};
 use crate::geometry::{STEPS_PER_INCH, skew_lines};
 use crate::protocol::Protocol;
 use crate::session::{
@@ -68,10 +69,18 @@ const FIRST_MOVE: u32 = 932;
 /// The infrared LED sits this far along the lamp unit from the visible lamp: SilverFast's
 /// infrared pass moves the lamp alone this much first.
 const IR_LAMP_MOVE: u32 = 535;
-/// The infrared plane lands this far right of the colour one (in 1/2,400 in, measured on a
-/// V500: 6 px at 800 dpi, 12 at 1,600), so its read starts this much earlier. SilverFast seems
-/// to measure it each session (capture 38 starts its read 8 px earlier at 800 dpi).
-const IR_X_SHIFT: u32 = 18;
+/// The infrared plane comes out this much wider than the colour one, about the point
+/// [`IR_CENTRE_MM`] across the film area: the lens seems to magnify the infrared a little
+/// more. Measured on a V500 from the dust on frames in both strips at 1,600 dpi (to within a
+/// pixel), and 800 dpi agrees. A fixed offset can't line the planes up: at 1,600 dpi a frame
+/// in the left strip is 13 px off, one in the right strip 5 px the other way, and each frame
+/// 12 px wider in infrared. [`FilmSession::align_infrared`] undoes it.
+const IR_STRETCH: f64 = 0.0079;
+const IR_CENTRE_MM: f64 = 39.2;
+/// The infrared read reaches this many pixels (at hardware resolution) past the colour one
+/// on each side, so the stretch can be undone right to the area's edges: it moves pixels at
+/// most 20 px at 1,600 dpi, at the far edges of the film area.
+const IR_MARGIN: u32 = 32;
 /// The read that finds the window: 150 lines at 200 dpi of the gap between the strips.
 const WINDOW_READ: (u16, u16, u16) = (0x0c8f, 0x0e0f, 150);
 const WINDOW_READ_STEPS: u32 = 1920;
@@ -524,8 +533,9 @@ impl FilmSession {
         let light = Light::new(&mode, infrared);
         let mut plan = FilmPlan::new(area, dpi, &mode, light.lead)?;
         if infrared {
-            let shift = (IR_X_SHIFT * mode.units_per_inch / STEPS_PER_INCH as u32) as u16;
-            plan.x_units = (plan.x_units.0 - shift, plan.x_units.1 - shift);
+            let margin = (IR_MARGIN * mode.units_per_inch / mode.hw_dpi) as u16;
+            plan.x_units = (plan.x_units.0 - margin, plan.x_units.1 + margin);
+            plan.read_width += 2 * IR_MARGIN;
         }
         Ok(Self {
             mode,
@@ -537,6 +547,40 @@ impl FilmSession {
             plan,
             exposure_scale: 1.0,
             light,
+        })
+    }
+
+    /// Decode this infrared session's read onto the colour pass's pixels, undoing the
+    /// infrared's stretch ([`IR_STRETCH`]) with linear interpolation.
+    pub fn decode_infrared(&self, raw: &[u8], area: &ScanArea) -> Gray16Image {
+        let out = self.plan.output;
+        let scale = f64::from(out.hw_dpi) / f64::from(out.dpi);
+        let wide = decode::infrared(
+            raw,
+            self.layout,
+            Resample {
+                width: (f64::from(self.plan.read_width) / scale) as u32,
+                ..out
+            },
+        );
+        Self::align_infrared(&wide, f64::from(IR_MARGIN) / scale, area.x_mm, out)
+    }
+
+    /// The `out`-sized plane from `wide`, an infrared plane whose column `margin` is the
+    /// area's left edge at `x_mm` across the film area.
+    fn align_infrared(wide: &Gray16Image, margin: f64, x_mm: f32, out: Resample) -> Gray16Image {
+        let px_per_mm = f64::from(out.dpi) / f64::from(MM_PER_INCH);
+        let left = f64::from(x_mm) * px_per_mm;
+        let centre = IR_CENTRE_MM * px_per_mm;
+        let last = f64::from(wide.width().saturating_sub(1));
+        Gray16Image::from_fn(out.width, out.height, |x, y| {
+            // Where the colour pixel's centre lands in the infrared.
+            let film_x = left + f64::from(x) + 0.5;
+            let src = (margin + f64::from(x) + IR_STRETCH * (film_x - centre)).clamp(0.0, last);
+            let (x0, t) = (src.floor() as u32, src.fract());
+            let x1 = (x0 + 1).min(wide.width() - 1);
+            let (a, b) = (wide.get_pixel(x0, y).0[0], wide.get_pixel(x1, y).0[0]);
+            Luma([(f64::from(a) * (1.0 - t) + f64::from(b) * t).round() as u16])
         })
     }
 
@@ -1303,16 +1347,46 @@ mod tests {
     }
 
     #[test]
+    fn infrared_alignment_undoes_the_stretch() {
+        // A wide plane whose values are their own column, ×10.
+        let wide = Gray16Image::from_fn(1700, 2, |x, _| Luma([(x * 10) as u16]));
+        let out = Resample {
+            dpi: 1600,
+            hw_dpi: 1600,
+            width: 1600,
+            height: 2,
+        };
+        let px_per_mm = 1600.0 / f64::from(MM_PER_INCH);
+        // A frame in the left strip: its infrared lands left of the colour, increasingly so
+        // further from the centre.
+        let aligned = FilmSession::align_infrared(&wide, 32.0, 3.0, out);
+        let at = |x: u32| f64::from(aligned.get_pixel(x, 0).0[0]) / 10.0 - 32.0 - f64::from(x);
+        for x in [0, 800, 1599] {
+            let film_x = 3.0 * px_per_mm + f64::from(x) + 0.5;
+            let expected = IR_STRETCH * (film_x - IR_CENTRE_MM * px_per_mm);
+            assert!(
+                (at(x) - expected).abs() < 0.1,
+                "x {x}: {} vs {expected}",
+                at(x)
+            );
+        }
+        assert!(at(0) < -12.0 && at(1599) > at(0) + 12.0);
+    }
+
+    #[test]
     fn infrared_pass_on_simulator() {
         let a = area(5.0, 40.0, 24.0, 36.0);
         for dpi in [800, 1600] {
             let session = FilmSession::infrared(&a, dpi).unwrap();
-            // The same read as the colour pass, moved with the steady motor's lead.
+            // The same read as the colour pass, moved with the steady motor's lead, and wider.
             let colour = FilmSession::new(&a, dpi).unwrap();
-            let shift = (dpi / 800 * 6) as u16;
+            let margin = (IR_MARGIN * session.mode.units_per_inch / session.mode.hw_dpi) as u16;
             let (x0, x1) = colour.plan.x_units;
-            assert_eq!(session.plan.x_units, (x0 - shift, x1 - shift));
-            assert_eq!(session.data_len(), colour.data_len());
+            assert_eq!(session.plan.x_units, (x0 - margin, x1 + margin));
+            assert_eq!(
+                session.plan.read_width,
+                colour.plan.read_width + 2 * IR_MARGIN
+            );
             let mut sim = SimulatedScanner::default();
             let data = session.run(&mut sim, Duration::ZERO).unwrap();
             assert_eq!(data.len(), session.data_len());

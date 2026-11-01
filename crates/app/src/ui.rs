@@ -1,11 +1,13 @@
 //! egui front end: workflow stepper, scan controls, image view and status bar.
 
+use std::sync::Arc;
+
 use eframe::egui::{self, Align, Layout, RichText};
 use scan_core::mock::MockBackend;
 use scan_core::{BitDepth, ColorMode, DeviceRegistry};
 
 use crate::state::{Activity, AppState, ViewChannel, WorkflowStep};
-use crate::view::ImageView;
+use crate::view::{self, ImageView};
 use crate::worker::{ScanKind, Worker};
 
 /// All backends compiled into this build, real hardware first.
@@ -21,6 +23,8 @@ pub struct ScannerApp {
     state: AppState,
     worker: Worker,
     view: ImageView,
+    /// The dust strength slider, applied when it is let go.
+    dust_strength: f32,
 }
 
 impl ScannerApp {
@@ -30,6 +34,7 @@ impl ScannerApp {
         let mut state = AppState::default();
         worker.send(state.refresh_devices());
         Self {
+            dust_strength: state.dust.strength,
             state,
             worker,
             view: ImageView::default(),
@@ -242,6 +247,11 @@ impl ScannerApp {
                 ""
             }
         ));
+        if result.infrared.is_some() {
+            self.dust_controls(ui, busy);
+        } else if self.state.source_caps().is_some_and(|s| s.infrared) {
+            ui.label(RichText::new("Scan with Infrared on to remove dust.").weak());
+        }
         if ui
             .add_enabled(!busy, egui::Button::new("Save as TIFF..."))
             .clicked()
@@ -250,6 +260,41 @@ impl ScannerApp {
                 .set_file_name("scan.tif")
                 .save_file()
             && let Some(cmd) = self.state.start_save(path)
+        {
+            self.worker.send(cmd);
+        }
+    }
+
+    fn dust_controls(&mut self, ui: &mut egui::Ui, busy: bool) {
+        ui.add_space(4.0);
+        let before = self.state.dust;
+        ui.add_enabled_ui(!busy, |ui| {
+            let dust = &mut self.state.dust;
+            ui.checkbox(&mut dust.enabled, "Remove dust and scratches")
+                .on_hover_text(
+                    "Finds defects in the infrared channel and fills them in. Not for \
+                     black-and-white film or Kodachrome, which block infrared.",
+                );
+            ui.add_enabled_ui(dust.enabled, |ui| {
+                let slider = ui
+                    .add(egui::Slider::new(&mut self.dust_strength, 0.0..=1.0).text("Strength"))
+                    .on_hover_text("Higher also repairs fainter defects");
+                if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
+                    dust.strength = self.dust_strength;
+                }
+                ui.checkbox(&mut dust.show_mask, "Show repaired areas in red");
+            });
+        });
+        if let Some(cleaned) = self.state.current_cleaned() {
+            let report = cleaned.removal.report;
+            ui.label(format!("{} px repaired", report.defect_pixels))
+                .on_hover_text(format!(
+                    "Film infrared level {:.2}, cyan dye crosstalk {:.2}",
+                    report.film_level, report.crosstalk
+                ));
+        }
+        if self.state.dust != before
+            && let Some(cmd) = self.state.update_dust()
         {
             self.worker.send(cmd);
         }
@@ -289,12 +334,22 @@ impl ScannerApp {
                 ui.label(RichText::new("Scroll to zoom, drag to pan, double-click to fit").weak());
             });
         });
-        self.view.show(
-            ui,
-            &result,
-            self.state.result_generation,
-            self.state.view_channel,
-        );
+        let channel = self.state.view_channel;
+        let cleaned = self.state.current_cleaned().map(|c| c.removal.clone());
+        let show_mask = self.state.dust.show_mask;
+        // Which view of the result: the channel, and which dust removal with or without its
+        // mask (told apart by its address while it is alive).
+        let variant = match (channel, &cleaned) {
+            (ViewChannel::Infrared, _) => 1,
+            (ViewChannel::Visible, None) => 0,
+            (ViewChannel::Visible, Some(c)) => {
+                ((Arc::as_ptr(c) as usize as u64) << 2) | (u64::from(show_mask) << 1)
+            }
+        };
+        self.view
+            .show(ui, self.state.result_generation, variant, || {
+                view::render(&result, channel, cleaned.as_deref(), show_mask)
+            });
     }
 }
 

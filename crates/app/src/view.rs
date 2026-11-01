@@ -4,12 +4,48 @@ use eframe::egui::{
     self, Color32, ColorImage, Pos2, Rect, Sense, TextureHandle, TextureOptions, Vec2,
 };
 use scan_core::ScanResult;
-use scan_core::image::DynamicImage;
+use scan_core::image::{DynamicImage, GrayImage};
+use scan_process::DustRemoval;
 
 use crate::state::ViewChannel;
 
 /// Longest side of the texture uploaded for display; full-resolution data stays in the result.
 pub const MAX_TEXTURE_SIDE: u32 = 4096;
+/// Repaired defects, when the mask is shown.
+const MASK_COLOUR: Color32 = Color32::from_rgb(255, 40, 40);
+
+/// The image to display: a channel of `result`, or the dust-cleaned visible image, with the
+/// repaired pixels marked when `show_mask` is set.
+pub fn render(
+    result: &ScanResult,
+    channel: ViewChannel,
+    cleaned: Option<&DustRemoval>,
+    show_mask: bool,
+) -> ColorImage {
+    match (channel, &result.infrared) {
+        (ViewChannel::Infrared, Some(ir)) => {
+            to_color_image(&DynamicImage::ImageLuma16(ir.clone()), MAX_TEXTURE_SIDE)
+        }
+        _ => {
+            let img = cleaned.map_or(result.primary(), |c| &c.image);
+            let mut color = to_color_image(img, MAX_TEXTURE_SIDE);
+            if let Some(c) = cleaned.filter(|_| show_mask) {
+                overlay_mask(&mut color, &c.mask);
+            }
+            color
+        }
+    }
+}
+
+/// Mark every texel of `image` that covers a set pixel of `mask`, which may be larger.
+pub fn overlay_mask(image: &mut ColorImage, mask: &GrayImage) {
+    let [w, h] = image.size;
+    let (mw, mh) = (mask.width() as usize, mask.height() as usize);
+    for (i, _) in mask.as_raw().iter().enumerate().filter(|&(_, &m)| m != 0) {
+        let (x, y) = (i % mw, i / mw);
+        image.pixels[(y * h / mh) * w + x * w / mw] = MASK_COLOUR;
+    }
+}
 
 /// Downscale (if needed) and convert any 8/16-bit image to an 8-bit RGBA texture image.
 pub fn to_color_image(img: &DynamicImage, max_side: u32) -> ColorImage {
@@ -28,7 +64,8 @@ pub fn to_color_image(img: &DynamicImage, max_side: u32) -> ColorImage {
 #[derive(Default)]
 pub struct ImageView {
     texture: Option<TextureHandle>,
-    shown: Option<(u64, ViewChannel)>,
+    /// The result generation and variant on the texture.
+    shown: Option<(u64, u64)>,
     /// Zoom relative to fit-to-window.
     zoom: f32,
     /// Pan offset of the image centre from the view centre, in points.
@@ -44,22 +81,14 @@ impl ImageView {
     fn update_texture(
         &mut self,
         ctx: &egui::Context,
-        result: &ScanResult,
         generation: u64,
-        channel: ViewChannel,
+        variant: u64,
+        image: impl FnOnce() -> ColorImage,
     ) {
-        if self.shown == Some((generation, channel)) {
+        if self.shown == Some((generation, variant)) {
             return;
         }
-        let ir;
-        let img = match (channel, &result.infrared) {
-            (ViewChannel::Infrared, Some(gray)) => {
-                ir = DynamicImage::ImageLuma16(gray.clone());
-                &ir
-            }
-            _ => result.primary(),
-        };
-        let image = to_color_image(img, MAX_TEXTURE_SIDE);
+        let image = image();
         match &mut self.texture {
             Some(tex) => tex.set(image, TextureOptions::LINEAR),
             None => self.texture = Some(ctx.load_texture("scan", image, TextureOptions::LINEAR)),
@@ -67,17 +96,20 @@ impl ImageView {
         if self.shown.map(|(g, _)| g) != Some(generation) {
             self.reset();
         }
-        self.shown = Some((generation, channel));
+        self.shown = Some((generation, variant));
     }
 
+    /// Show the image of result `generation`, calling `image` for it only when `generation`
+    /// or `variant` (which view of the result it is) changed. A new generation also resets
+    /// the zoom.
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
-        result: &ScanResult,
         generation: u64,
-        channel: ViewChannel,
+        variant: u64,
+        image: impl FnOnce() -> ColorImage,
     ) {
-        self.update_texture(ui.ctx(), result, generation, channel);
+        self.update_texture(ui.ctx(), generation, variant, image);
         let Some((tex_id, tex_size)) = self.texture.as_ref().map(|t| (t.id(), t.size_vec2()))
         else {
             return;
@@ -128,6 +160,17 @@ mod tests {
         let color = to_color_image(&DynamicImage::ImageRgb16(img), 200);
         assert_eq!(color.size, [200, 50]);
         assert_eq!(color.pixels[0], Color32::from_rgb(255, 0, 0));
+    }
+
+    #[test]
+    fn mask_overlay_marks_downscaled_defects() {
+        let mut color = ColorImage::filled([4, 2], Color32::BLACK);
+        let mut mask = GrayImage::new(40, 20);
+        mask.put_pixel(39, 0, scan_core::image::Luma([255]));
+        mask.put_pixel(12, 15, scan_core::image::Luma([255]));
+        overlay_mask(&mut color, &mask);
+        let marked: Vec<_> = (0..8).filter(|&i| color.pixels[i] == MASK_COLOUR).collect();
+        assert_eq!(marked, [3, 5]);
     }
 
     #[test]

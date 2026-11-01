@@ -1189,6 +1189,7 @@ dependencies = [
  "rfd",
  "scan-core",
  "scan-epson",
+ "scan-process",
  "scan-wia",
  "tempfile",
  "winresource",
@@ -3028,6 +3029,14 @@ dependencies = [
  "log",
  "scan-core",
  "windows",
+]
+
+[[package]]
+name = "scan-process"
+version = "0.1.0"
+dependencies = [
+ "scan-core",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
