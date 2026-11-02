@@ -15,6 +15,7 @@ pub fn default_registry() -> DeviceRegistry {
     let mut registry = DeviceRegistry::new();
     scan_epson::register(&mut registry);
     scan_wia::register(&mut registry);
+    scan_sane::register(&mut registry);
     registry.register(MockBackend);
     registry
 }
