@@ -16,7 +16,7 @@ pub const STEPS_PER_INCH: f64 = 2400.0;
 const LOW_RES_UNITS_PER_INCH: f64 = 1600.0 / 3.0;
 /// Width of the bed (8.5 in).
 const BED_WIDTH_INCH: f64 = 8.5;
-/// Distance between the CCD's colour rows.
+/// Distance between the CCD's color rows.
 const ROW_PITCH_INCH: f64 = 0.025;
 
 /// Hardware resolutions, as (dpi, multiplier, divisor) for `1e 41` bytes 9 and 10.
@@ -96,7 +96,7 @@ pub struct FlatbedPlan {
     /// Output size at `dpi`.
     pub width: u32,
     pub height: u32,
-    /// Lines to read at `hw_dpi`, including the colour-skew margin.
+    /// Lines to read at `hw_dpi`, including the color-skew margin.
     pub lines: u32,
     pub move_steps: u32,
     pub move_profile: MoveProfile,

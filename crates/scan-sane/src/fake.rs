@@ -20,7 +20,7 @@ pub fn expected_pixel(x: u32, y: u32, c: usize, depth: u32) -> u16 {
 
 pub struct Fake {
     pub sources: Vec<String>,
-    /// Send colour as separate red, green and blue frames.
+    /// Send color as separate red, green and blue frames.
     pub three_pass: bool,
     /// Report -1 lines, as drivers that don't know the length do.
     pub unknown_lines: bool,
@@ -219,7 +219,7 @@ impl Driver for Fake {
                 "Color" if self.three_pass => vec![Frame::Blue, Frame::Green, Frame::Red],
                 "Color" => vec![Frame::Rgb],
                 "Gray" => vec![Frame::Gray],
-                _ => return Err(ScanError::Backend("fake scans colour or grey".into())),
+                _ => return Err(ScanError::Backend("fake scans color or grey".into())),
             };
         }
         // Frames are popped from the end: red, green, then blue.

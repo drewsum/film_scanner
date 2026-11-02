@@ -7,7 +7,7 @@
 //!    scan. Its two long edges are then found every millimetre and fitted with lines, which
 //!    give the strip's exact angle (the deskew) and middle.
 //! 2. **Film base.** The strip is sampled straight along its length. The unexposed film
-//!    between the perforations and the frames (the rebate) gives the colour of the bare film
+//!    between the perforations and the frames (the rebate) gives the color of the bare film
 //!    base, which is also what lies between frames.
 //! 3. **Frames.** A camera advances the film by a nearly fixed distance (38 mm, eight
 //!    perforations, on 35 mm film), so a row of frames at one spacing is fitted to the whole
@@ -1072,6 +1072,93 @@ fn fit_spacing(rows: &Profile, e0: f32, e1: f32, format: &Format) -> Spacing {
             gap: 0.0,
         }
     })
+}
+
+/// `frame` cut out of `image` like [`crop_frame`] (or, for `None`, the whole scan), at most
+/// `max_side` pixels on its longer side, for previewing. Returns it with its scale: its
+/// pixels per pixel of the full-resolution cut. Only the part of the scan around the frame
+/// is scaled down (with a proper filter), and then cut.
+pub fn preview_frame(
+    image: &DynamicImage,
+    dpi: u32,
+    area: ScanArea,
+    frame: Option<&FrameRect>,
+    max_side: u32,
+) -> (DynamicImage, f32) {
+    let px_per_mm = dpi as f32 / MM_PER_INCH;
+    let Some(frame) = frame else {
+        let long = image.width().max(image.height()).max(1);
+        if long <= max_side {
+            return (image.clone(), 1.0);
+        }
+        let small = image.thumbnail(max_side, max_side);
+        return (small.clone(), small.width() as f32 / image.width() as f32);
+    };
+    let long = frame.width_mm.max(frame.height_mm) * px_per_mm;
+    let scale = max_side as f32 / long;
+    if scale >= 1.0 {
+        return (crop_frame(image, dpi, area, frame), 1.0);
+    }
+    // A whole number of dots per inch, which `crop_frame` takes.
+    let small_dpi = ((dpi as f32 * scale).floor() as u32).max(1);
+    let s = small_dpi as f32 / dpi as f32;
+    let corners = frame.corners();
+    let bound = |f: fn(f32, f32) -> f32, axis: fn(&(f32, f32)) -> f32, start: f32| {
+        corners.iter().map(axis).fold(start, f)
+    };
+    let (w, h) = (image.width(), image.height());
+    let to_px = |mm: f32, origin: f32| ((mm - origin) * px_per_mm).floor().max(0.0) as u32;
+    let x0 = to_px(bound(f32::min, |c| c.0, f32::MAX), area.x_mm).min(w);
+    let y0 = to_px(bound(f32::min, |c| c.1, f32::MAX), area.y_mm).min(h);
+    let x1 = (to_px(bound(f32::max, |c| c.0, f32::MIN), area.x_mm) + 2).min(w);
+    let y1 = (to_px(bound(f32::max, |c| c.1, f32::MIN), area.y_mm) + 2).min(h);
+    if x1 <= x0 || y1 <= y0 {
+        return (crop_frame(image, dpi, area, frame), 1.0);
+    }
+    let (bw, bh) = (x1 - x0, y1 - y0);
+    let (tw, th) = (
+        ((bw as f32 * s).round() as u32).max(1),
+        ((bh as f32 * s).round() as u32).max(1),
+    );
+    let part = scaled_part(image, x0, y0, bw, bh, tw, th);
+    let part_area = ScanArea {
+        x_mm: area.x_mm + x0 as f32 / px_per_mm,
+        y_mm: area.y_mm + y0 as f32 / px_per_mm,
+        width_mm: tw as f32 / (small_dpi as f32 / MM_PER_INCH),
+        height_mm: th as f32 / (small_dpi as f32 / MM_PER_INCH),
+    };
+    (crop_frame(&part, small_dpi, part_area, frame), s)
+}
+
+/// The `w` × `h` part of `image` at (x, y), scaled to `tw` × `th`, keeping its pixel type.
+fn scaled_part(
+    image: &DynamicImage,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    tw: u32,
+    th: u32,
+) -> DynamicImage {
+    use scan_core::image::{GenericImageView, imageops};
+    match image {
+        DynamicImage::ImageRgb16(b) => {
+            DynamicImage::ImageRgb16(imageops::thumbnail(&*b.view(x, y, w, h), tw, th))
+        }
+        DynamicImage::ImageRgb8(b) => {
+            DynamicImage::ImageRgb8(imageops::thumbnail(&*b.view(x, y, w, h), tw, th))
+        }
+        DynamicImage::ImageLuma16(b) => {
+            DynamicImage::ImageLuma16(imageops::thumbnail(&*b.view(x, y, w, h), tw, th))
+        }
+        DynamicImage::ImageLuma8(b) => {
+            DynamicImage::ImageLuma8(imageops::thumbnail(&*b.view(x, y, w, h), tw, th))
+        }
+        other => {
+            let b = other.to_rgb16();
+            DynamicImage::ImageRgb16(imageops::thumbnail(&*b.view(x, y, w, h), tw, th))
+        }
+    }
 }
 
 /// Cut `frame` out of `image`, a scan of `area` at `dpi`, straightened: the result is

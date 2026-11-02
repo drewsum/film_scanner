@@ -44,7 +44,7 @@ pub(crate) const MOVE: [u8; 2] = [0x1e, 0x05];
 
 const LAMP_OFF: u8 = 0x00;
 const FLATBED_LAMP: u8 = 0x01;
-/// `1e 11` for a flatbed colour pass.
+/// `1e 11` for a flatbed color pass.
 const FLATBED_PASS: u8 = 0x04;
 /// The starting analog offsets the driver sends before the scanner calibrates its own.
 const INITIAL_OFFSETS: [u8; 12] = [0x80, 0x00, 0x80, 0x00, 0x80, 0x00, 0, 0, 0, 0, 0, 0];

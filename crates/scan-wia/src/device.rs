@@ -104,7 +104,7 @@ fn source_capabilities(source: ScanSource, props: &Props) -> Result<SourceCapabi
         }
     }
 
-    // Depth constraints depend on the data type, so query them in colour mode. Drivers with a
+    // Depth constraints depend on the data type, so query them in color mode. Drivers with a
     // fixed depth report no constraint; fall back to the current value then.
     if color_modes.contains(&ColorMode::Color) {
         let _ = props.write_i32(WIA_IPA_DATATYPE, WIA_DATA_COLOR as i32);

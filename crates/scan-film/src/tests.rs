@@ -40,7 +40,7 @@ fn extracted_curves_agree_with_kodaks_exposure_check() {
 }
 
 #[test]
-fn layers_peak_where_their_colours_are() {
+fn layers_peak_where_their_colors_are() {
     for stock in stock::all() {
         let sheet = stock.sheet;
         let peak = |c: usize| {
@@ -115,7 +115,7 @@ fn negatives_invert_to_the_scene() {
 
 #[test]
 fn greys_print_grey_through_any_base() {
-    // Every stock, with two scanners' worth of base colour and level: the base is divided
+    // Every stock, with two scanners' worth of base color and level: the base is divided
     // out.
     let bases = [[0.56, 0.22, 0.10], [0.9, 0.7, 0.4]];
     for (model, base) in stock::all()
@@ -140,7 +140,7 @@ fn greys_print_grey_through_any_base() {
 }
 
 #[test]
-fn printing_moves_exposure_and_colour() {
+fn printing_moves_exposure_and_color() {
     let model = model();
     let base = [0.5, 0.2, 0.1];
     let card = scanned(model, base, [GREY; 3]);
@@ -176,7 +176,7 @@ fn colorimetric_matrix_keeps_white_and_is_plausible() {
     for row in m {
         assert!((row.iter().sum::<f64>() - 1.0).abs() < 0.01, "{m:?}");
     }
-    // Each layer feeds its own colour most.
+    // Each layer feeds its own color most.
     for (i, row) in m.iter().enumerate() {
         for (j, &v) in row.iter().enumerate() {
             if i != j {

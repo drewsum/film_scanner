@@ -1,6 +1,6 @@
 [package]
 name = "scan-film"
-description = "Film stock profiles for film_scanner, built from manufacturers' datasheets, and the inversion of colour negatives"
+description = "Film stock profiles for film_scanner, built from manufacturers' datasheets, and the inversion of color negatives"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

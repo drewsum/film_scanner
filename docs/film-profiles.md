@@ -1,17 +1,17 @@
 # Film-stock profiles
 
-How film_scanner turns a scan of a colour negative into a positive, what a film-stock profile
+How film_scanner turns a scan of a color negative into a positive, what a film-stock profile
 is made of, and how to add one. The code is in `crates/scan-film`; the image-level parts are in
 `crates/scan-process/src/negative.rs`.
 
 The rule for every profile: **its numbers come from the manufacturer's published data, read
 exactly, and every assumption is written down in the stock's module.** Nothing is tuned by eye.
 
-## What a colour negative is
+## What a color negative is
 
-A colour negative has three layers, sensitive to red, green and blue light. Each forms a dye
+A color negative has three layers, sensitive to red, green and blue light. Each forms a dye
 in proportion to the log of its exposure: the red-sensitive layer cyan dye, the green magenta,
-the blue yellow. Unexposed film is not clear: the base, fog and the **orange mask** (coloured
+the blue yellow. Unexposed film is not clear: the base, fog and the **orange mask** (colored
 couplers that correct the dyes' unwanted absorptions) give it a minimum density, D-min,
 densest in blue.
 
@@ -20,10 +20,10 @@ A manufacturer's technical datasheet describes all of this with three sets of cu
 | Curves | What they say | What we use them for |
 |---|---|---|
 | **Characteristic** (density vs. log exposure, one per layer, Status M) | How much dye each layer forms for each exposure: toe, straight line (gamma ≈ 0.55–0.65), shoulder. **Log H ref** marks a normally exposed grey card. | Run backwards, they turn the negative's densities back into scene light. This is the heart of the profile. |
-| **Spectral sensitivity** (log sensitivity vs. wavelength, per layer) | Which colours of light each layer records. | The *Colorimetric* rendering: a 3 × 3 matrix fitted from them (see below). |
-| **Spectral dye density** (D-min and a midscale neutral) | The colour of the mask and of the dyes. | Kept for calibrating scanners to Status M later. |
+| **Spectral sensitivity** (log sensitivity vs. wavelength, per layer) | Which colors of light each layer records. | The *Colorimetric* rendering: a 3 × 3 matrix fitted from them (see below). |
+| **Spectral dye density** (D-min and a midscale neutral) | The color of the mask and of the dyes. | Kept for calibrating scanners to Status M later. |
 
-**Status M** is the densitometry made to see a negative the way colour print paper does, one
+**Status M** is the densitometry made to see a negative the way color print paper does, one
 dye per channel. The characteristic curves are measured in it, so they say what a print would
 see.
 
@@ -35,31 +35,31 @@ see.
    instead, and the app says it is an estimate. The base is never taken from the datasheet:
    it varies with processing and with the scanner.
 2. **Density above base.** For each channel, `d = log10(base / light)`. This removes the
-   orange mask and the scanner's own colour balance in one step.
+   orange mask and the scanner's own color balance in one step.
 3. **Back through the film.** `d` plus the datasheet's D-min is a Status M density on the
    layer's characteristic curve, which gives the log exposure that made it. Relative to Log H
    ref that is scene light `e`, with a grey card at 0.18. Each layer has its own curve and
    gamma, which is what keeps greys grey from the shadows to the highlights. Without this,
-   simply inverting and stretching each channel gives colour casts that change with
+   simply inverting and stretching each channel gives color casts that change with
    brightness (crossover).
    - The curves are made strictly increasing: a dip just above D-min (the blue curve of many
      negatives has one, from the masking couplers) is held level, and every part of the curve
      climbs at least `MIN_GAMMA` (0.05). The toe is very flat, and inverting it exactly would
      multiply scanner noise without bound; this caps the gain at 20×.
    - Past the ends of the plotted curve it continues with the end's own slope.
-4. **Printing.** Exposure and colour balance are offsets in stops on each layer's scene light,
+4. **Printing.** Exposure and color balance are offsets in stops on each layer's scene light,
    like a photofinisher's printer lights. *Auto* sets them as a printer does ("integrate to
    grey"): each frame's average log exposure is taken as grey; the roll gets the **median**
    of the frames' corrections, so one frame of lawn or sea doesn't tint the rest. The
    exposure brings the typical frame's log average to a grey card.
-5. **Colour.**
+5. **Color.**
    - *Print* (default): each layer drives its own channel, as when the negative is printed
-     on colour paper, which sees one dye per layer. This is the film's own colour, as its maker
+     on color paper, which sees one dye per layer. This is the film's own color, as its maker
      designed it to print.
    - *Colorimetric*: a 3 × 3 matrix from layer exposures to linear sRGB, fitted by least
      squares (with white held to white) over 186 smooth surface spectra of every hue lit by
      daylight. Each surface's layer exposures come from the datasheet's spectral
-     sensitivities, and its target colour from the CIE 1931 observer, adapted to D65 with
+     sensitivities, and its target color from the CIE 1931 observer, adapted to D65 with
      Bradford. The film's chemistry already boosts saturation (interimage effects), so this
      can look more saturated than a print.
 6. **Tone.** Display light `e^p / (e^p + k^p)`, with `k` set so a grey card stays 0.18; `p` is
@@ -137,11 +137,11 @@ hash say exactly which file to fetch.
   Calibrating each scanner's channels to Status M with a step wedge or IT8 target, which
   would measure this properly, is a follow-up.
 
-To check a stock on real film: save an uninverted 16-bit scan (untick *Invert colour
+To check a stock on real film: save an uninverted 16-bit scan (untick *Invert color
 negative*, then *Save as TIFF*) and run
 `cargo run --release -p scan-process --example negative_report -- SCAN.tif 400 1.8 STOCK_ID`.
 It prints the film base against D-min, each frame's densities above base against the
-stock's grey card and white, each frame's colour offsets, and how much they change with
+stock's grey card and white, each frame's color offsets, and how much they change with
 level (crossover).
 - **Print paper isn't modelled:** the tone curve is print-like, not a particular paper's.
-- **Colour negative only:** black-and-white and slide film need their own models.
+- **Color negative only:** black-and-white and slide film need their own models.

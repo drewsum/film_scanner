@@ -14,7 +14,7 @@ use crate::state::ViewChannel;
 /// Longest side of the texture uploaded for display; full-resolution data stays in the result.
 pub const MAX_TEXTURE_SIDE: u32 = 4096;
 /// Repaired defects, when the mask is shown.
-const MASK_COLOUR: Color32 = Color32::from_rgb(255, 40, 40);
+const MASK_COLOR: Color32 = Color32::from_rgb(255, 40, 40);
 
 /// The image to display: a channel of `result`, or `visible` (the processed image, at most
 /// [`MAX_TEXTURE_SIDE`] on a side: see [`thumbnail`]) as it is or turned positive by
@@ -63,7 +63,7 @@ pub fn overlay_mask(image: &mut ColorImage, mask: &GrayImage) {
     let (mw, mh) = (mask.width() as usize, mask.height() as usize);
     for (i, _) in mask.as_raw().iter().enumerate().filter(|&(_, &m)| m != 0) {
         let (x, y) = (i % mw, i / mw);
-        image.pixels[(y * h / mh) * w + x * w / mw] = MASK_COLOUR;
+        image.pixels[(y * h / mh) * w + x * w / mw] = MASK_COLOR;
     }
 }
 
@@ -255,7 +255,7 @@ mod tests {
         mask.put_pixel(39, 0, scan_core::image::Luma([255]));
         mask.put_pixel(12, 15, scan_core::image::Luma([255]));
         overlay_mask(&mut color, &mask);
-        let marked: Vec<_> = (0..8).filter(|&i| color.pixels[i] == MASK_COLOUR).collect();
+        let marked: Vec<_> = (0..8).filter(|&i| color.pixels[i] == MASK_COLOR).collect();
         assert_eq!(marked, [3, 5]);
     }
 

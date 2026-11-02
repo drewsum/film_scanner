@@ -1,4 +1,4 @@
-//! Inverting scans of colour negatives with a film's profile (see the `scan-film` crate),
+//! Inverting scans of color negatives with a film's profile (see the `scan-film` crate),
 //! image by image.
 //!
 //! [`invert`] turns a scan into a positive through an [`Inverter`]. The film base it needs
@@ -59,19 +59,19 @@ pub fn invert(image: &DynamicImage, gamma: f32, inverter: &Inverter) -> Rgb16Ima
 }
 
 /// Linear light (0–1 of full scale) of every 16-bit value.
-fn decode_table(gamma: f32) -> Vec<f32> {
+pub(crate) fn decode_table(gamma: f32) -> Vec<f32> {
     let gamma = if gamma > 0.0 { gamma } else { 1.0 };
     (0..=65535u32)
         .map(|v| (v as f32 / 65535.0).powf(gamma))
         .collect()
 }
 
-fn to_u16(v: f32) -> u16 {
+pub(crate) fn to_u16(v: f32) -> u16 {
     (v.clamp(0.0, 1.0) * 65535.0).round() as u16
 }
 
 /// Run `f` over matching row bands of `src` and `dst` (RGB samples) on every core.
-fn in_parallel(src: &[u16], dst: &mut [u16], f: impl Fn(&[u16], &mut [u16]) + Sync) {
+pub(crate) fn in_parallel(src: &[u16], dst: &mut [u16], f: impl Fn(&[u16], &mut [u16]) + Sync) {
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     // Whole pixels per band, and not so small that threads cost more than they save.
     let band = (src.len().div_ceil(threads * 3) * 3).max(3 * 65536);
@@ -165,7 +165,7 @@ pub fn estimate_base(image: &DynamicImage, gamma: f32) -> Option<[f32; 3]> {
 }
 
 /// The pixel at (x, y) as 16-bit RGB, without converting the whole image.
-fn pixel16(image: &DynamicImage, x: u32, y: u32) -> [u16; 3] {
+pub(crate) fn pixel16(image: &DynamicImage, x: u32, y: u32) -> [u16; 3] {
     let wide = |v: u8| u16::from(v) * 257;
     match image {
         DynamicImage::ImageRgb16(i) => i.get_pixel(x, y).0,
@@ -187,7 +187,7 @@ mod tests {
     const GAMMA: f32 = 1.8;
 
     /// A scan, gamma-encoded, of a strip of negative: scene light rising from left to right
-    /// in steps, with a colour cast per row band.
+    /// in steps, with a color cast per row band.
     fn negative(
         model: &FilmModel,
         base: [f32; 3],

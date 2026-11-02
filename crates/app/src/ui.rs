@@ -11,6 +11,7 @@ use scan_film::render::CONTRAST_RANGE;
 use scan_film::{Printing, Rendering};
 
 use crate::crop::{BedView, CropEditor};
+use crate::edit::Editor;
 use crate::state::{self, Activity, AppState, EXTRA_EV, ViewChannel, WorkflowStep};
 use crate::view::{self, ImageView};
 use crate::worker::{ScanKind, Worker};
@@ -35,6 +36,7 @@ pub struct ScannerApp {
     worker: Worker,
     view: ImageView,
     crop_editor: CropEditor,
+    editor: Editor,
     /// The middle of the image view on the bed, in millimetres, as last shown.
     view_centre: Option<(f32, f32)>,
     /// The dust strength slider, applied when it is let go.
@@ -68,6 +70,7 @@ impl ScannerApp {
             worker,
             view: ImageView::default(),
             crop_editor: CropEditor::default(),
+            editor: Editor::default(),
             view_centre: None,
             thumbnail: None,
         }
@@ -202,9 +205,9 @@ impl ScannerApp {
                         });
                     ui.end_row();
 
-                    ui.label("Colour");
+                    ui.label("Color");
                     let mode_label = |m: ColorMode| match m {
-                        ColorMode::Color => "Colour",
+                        ColorMode::Color => "Color",
                         ColorMode::Gray => "Greyscale",
                     };
                     egui::ComboBox::from_id_salt("mode")
@@ -303,8 +306,13 @@ impl ScannerApp {
         } else if self.state.source_caps().is_some_and(|s| s.infrared) {
             ui.label(RichText::new("Scan with Infrared on to remove dust.").weak());
         }
+        self.save_scan_button(ui, busy);
+    }
+
+    fn save_scan_button(&mut self, ui: &mut egui::Ui, busy: bool) {
         if ui
             .add_enabled(!busy, egui::Button::new("Save as TIFF..."))
+            .on_hover_text("Saves the whole scan, with the Adjust step's whole-scan edits")
             .clicked()
             && let Some(path) = rfd::FileDialog::new()
                 .add_filter("TIFF image", &["tif", "tiff"])
@@ -409,6 +417,19 @@ impl ScannerApp {
                     .unwrap_or((a.x_mm + a.width_mm / 2.0, a.y_mm + a.height_mm / 2.0));
                 self.state.add_frame(x, y);
             }
+            if ui
+                .add_enabled(
+                    self.state.crop.frames.len() > 1,
+                    egui::Button::selectable(self.state.crop.reversed, "Reverse order"),
+                )
+                .on_hover_text(
+                    "Numbers the frames from the other end of the film, for cameras that wind \
+                     it the other way. Kept for later scans; each frame keeps its edits.",
+                )
+                .clicked()
+            {
+                self.state.reverse_frames();
+            }
         });
 
         let crop = &self.state.crop;
@@ -506,8 +527,8 @@ impl ScannerApp {
         if ui
             .add_enabled(can_save, egui::Button::new("Save frames as TIFF..."))
             .on_hover_text(format!(
-                "Saves each frame straightened{}, turned like the view, as its own 16-bit \
-                 file: name_01.tif, name_02.tif, ...",
+                "Saves each frame straightened{}, with its own edits from the Adjust step, \
+                 turned like the view, as its own 16-bit file: name_01.tif, name_02.tif, ...",
                 if positive { " and inverted" } else { "" }
             ))
             .clicked()
@@ -533,7 +554,7 @@ impl ScannerApp {
             return;
         }
         let invert = &mut self.state.invert;
-        ui.checkbox(&mut invert.enabled, "Invert colour negative")
+        ui.checkbox(&mut invert.enabled, "Invert color negative")
             .on_hover_text("Off shows and saves the scan as it is");
         ui.add_enabled_ui(invert.enabled, |ui| {
             ui.horizontal(|ui| {
@@ -634,12 +655,12 @@ impl ScannerApp {
                 ui.add(egui::Slider::new(&mut printing.contrast, CONTRAST_RANGE).step_by(0.05))
                     .on_hover_text("The print curve's contrast; grey stays grey");
                 ui.end_row();
-                ui.label("Colour");
+                ui.label("Color");
                 ui.horizontal(|ui| {
                     ui.radio_value(&mut printing.rendering, Rendering::Print, "Print")
                         .on_hover_text(
-                            "Each of the film's layers makes its own colour, as when the \
-                             negative is printed on colour paper: the film's own look",
+                            "Each of the film's layers makes its own color, as when the \
+                             negative is printed on color paper: the film's own look",
                         );
                     ui.radio_value(
                         &mut printing.rendering,
@@ -647,7 +668,7 @@ impl ScannerApp {
                         "Colorimetric",
                     )
                     .on_hover_text(
-                        "Mixes the layers towards the scene's colours, from the film's \
+                        "Mixes the layers towards the scene's colors, from the film's \
                          spectral sensitivities. Can look more saturated than a print.",
                     );
                 });
@@ -658,7 +679,7 @@ impl ScannerApp {
             if ui
                 .add_enabled(!busy && has_frames, egui::Button::new("Auto"))
                 .on_hover_text(
-                    "Sets exposure and colour balance from the frames, as a photofinisher's \
+                    "Sets exposure and color balance from the frames, as a photofinisher's \
                      printer does: each frame's average taken as grey, and the roll's \
                      typical frame used, so one frame of lawn or sea doesn't tint the rest",
                 )
@@ -669,7 +690,7 @@ impl ScannerApp {
             }
             if ui
                 .button("Reset")
-                .on_hover_text("No exposure or colour change: the film as its datasheet prints it")
+                .on_hover_text("No exposure or color change: the film as its datasheet prints it")
                 .clicked()
             {
                 self.state.invert.printing = Printing {
@@ -682,6 +703,20 @@ impl ScannerApp {
         ui.add_space(8.0);
         ui.separator();
         self.save_frames_button(ui, busy);
+    }
+
+    fn adjust_controls(&mut self, ui: &mut egui::Ui) {
+        let busy = self.state.is_busy();
+        self.editor.controls(ui, &mut self.state);
+        if self.state.result.is_none() {
+            return;
+        }
+        ui.add_space(8.0);
+        ui.separator();
+        ui.horizontal(|ui| {
+            self.save_frames_button(ui, busy);
+            self.save_scan_button(ui, busy);
+        });
     }
 
     fn placeholder(&self, ui: &mut egui::Ui, step: WorkflowStep) {
@@ -698,6 +733,10 @@ impl ScannerApp {
             });
             return;
         };
+        if self.state.step == WorkflowStep::Adjust {
+            self.editor.central(ui, &mut self.state);
+            return;
+        }
         ui.horizontal(|ui| {
             ui.selectable_value(
                 &mut self.state.view_channel,
@@ -733,16 +772,9 @@ impl ScannerApp {
             });
         });
         let channel = self.state.view_channel;
-        let merged = self.state.current_merged().map(|m| m.merge.clone());
         let cleaned = self.state.current_cleaned().map(|c| c.removal.clone());
         let show_mask = self.state.dust.show_mask;
-        // Which image of the result: the dust removal or merge, told apart by its address
-        // while it is alive, or the primary pass.
-        let image_id = match (&cleaned, &merged) {
-            (Some(c), _) => Arc::as_ptr(c) as usize as u64,
-            (None, Some(m)) => Arc::as_ptr(m) as usize as u64,
-            (None, None) => 0,
-        };
+        let image_id = self.state.processed_id();
         let key = (self.state.result_generation, image_id);
         let visible = match &self.thumbnail {
             Some((k, image)) if *k == key => image.clone(),
@@ -854,6 +886,7 @@ impl eframe::App for ScannerApp {
                         WorkflowStep::Scan => self.scan_controls(ui),
                         WorkflowStep::Crop => self.crop_controls(ui),
                         WorkflowStep::Invert => self.invert_controls(ui),
+                        WorkflowStep::Adjust => self.adjust_controls(ui),
                         step => self.placeholder(ui, step),
                     }
                 });

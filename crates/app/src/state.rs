@@ -9,6 +9,7 @@ use scan_core::{
 
 use scan_core::image::DynamicImage;
 use scan_film::{FilmStock, Inverter, Printing};
+use scan_process::adjust::{self, Adjustments, Levels};
 use scan_process::{DustRemoval, ExposureMerge, FrameDetection, FrameRect};
 
 use crate::worker::{Command, Event, ScanKind};
@@ -51,10 +52,11 @@ impl WorkflowStep {
                 "Automatically detect frames on the strip, remove borders and straighten each frame."
             }
             WorkflowStep::Invert => {
-                "Invert negatives using film-stock profiles, removing the orange mask of colour film."
+                "Invert negatives using film-stock profiles, removing the orange mask of color film."
             }
             WorkflowStep::Adjust => {
-                "Colour correction: white balance, levels, curves and per-channel tweaks."
+                "Edit each frame on its own: color, levels, curves, selective color, grain \
+                 reduction and sharpening."
             }
             WorkflowStep::Export => "Batch export of finished frames with metadata.",
         }
@@ -119,12 +121,24 @@ pub struct Merged {
 }
 
 /// A frame to crop out of the scan.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CropFrame {
     pub rect: FrameRect,
     /// Detected without either end along the strip showing, so placed from the frame
     /// spacing alone: worth checking. Cleared when the frame is edited.
     pub check: bool,
+    /// The frame's own edits, from the Adjust step.
+    pub adjust: Adjustments,
+}
+
+impl CropFrame {
+    pub fn new(rect: FrameRect) -> Self {
+        Self {
+            rect,
+            check: false,
+            adjust: Adjustments::default(),
+        }
+    }
 }
 
 /// The frames on the scan, as detected and edited, in millimetres on the scanner bed: frames
@@ -139,9 +153,12 @@ pub struct Crop {
     pub detected: Option<u64>,
     /// Film strips the last detection found.
     pub strips: usize,
+    /// Number the frames from the other end of the film: for cameras that wind the film
+    /// the other way. Kept for later detections.
+    pub reversed: bool,
 }
 
-/// Inverting film scans of colour negatives with a film stock's profile.
+/// Inverting film scans of color negatives with a film stock's profile.
 #[derive(Clone, Copy, Debug)]
 pub struct InvertSettings {
     /// Show and save film scans as positives.
@@ -157,6 +174,27 @@ impl Default for InvertSettings {
             stock: scan_film::stock::default_stock(),
             printing: Printing::default(),
         }
+    }
+}
+
+/// What inverts the current result: its film stock, film base and the roll's printing.
+/// Each frame is inverted with its own adjustments' exposure and balance added.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Film {
+    pub stock: &'static FilmStock,
+    /// Linear light through the bare film base, per channel.
+    pub base: [f32; 3],
+    pub printing: Printing,
+}
+
+impl Film {
+    /// The inverter for an image with `adjust`.
+    pub fn inverter(&self, adjust: &Adjustments) -> Inverter {
+        Inverter::new(
+            self.stock.model(),
+            self.base,
+            &adjust.printing(&self.printing),
+        )
     }
 }
 
@@ -230,6 +268,10 @@ pub struct AppState {
     pub invert: InvertSettings,
     /// The film base of the current result, once frame detection has looked for it.
     pub film_base: Option<FilmBase>,
+    /// The Adjust step's edits of the whole scan, for saving it (each frame has its own).
+    pub scan_adjust: Adjustments,
+    /// Adjustments copied from a frame, to paste onto others.
+    pub clipboard: Option<Adjustments>,
     /// The device whose capabilities the settings were last fitted to.
     settings_device: Option<DeviceId>,
 }
@@ -257,6 +299,8 @@ impl Default for AppState {
             quarter_turns: 0,
             invert: InvertSettings::default(),
             film_base: None,
+            scan_adjust: Adjustments::default(),
+            clipboard: None,
             settings_device: None,
         }
     }
@@ -438,23 +482,194 @@ impl AppState {
             .filter(|b| b.generation == self.result_generation)
     }
 
-    /// What turns the current result into a positive, if it is a film scan to be inverted
-    /// and its film base is known.
-    pub fn inverter(&self) -> Option<Inverter> {
+    /// Which image [`AppState::processed_image`] is: the dust removal or the merge, told
+    /// apart by its address while it is alive, or 0 for the primary pass. With the result
+    /// generation, a key for caches of it.
+    pub fn processed_id(&self) -> u64 {
+        match (self.current_cleaned(), self.current_merged()) {
+            (Some(c), _) => Arc::as_ptr(&c.removal) as usize as u64,
+            (None, Some(m)) => Arc::as_ptr(&m.merge) as usize as u64,
+            (None, None) => 0,
+        }
+    }
+
+    /// What inverts the current result, if it is a film scan to be inverted and its film
+    /// base is known.
+    pub fn film(&self) -> Option<Film> {
         let result = self.result.as_ref()?;
         if !self.invert.enabled || result.source != ScanSource::Transparency {
             return None;
         }
-        let base = self.current_film_base()?;
-        Some(Inverter::new(
-            self.invert.stock.model(),
-            base.light,
-            &self.invert.printing,
-        ))
+        Some(Film {
+            stock: self.invert.stock,
+            base: self.current_film_base()?.light,
+            printing: self.invert.printing,
+        })
     }
 
-    /// Set the printing's exposure and colour balance the way a photofinisher's printer
-    /// does, from the frames' average colours (see [`scan_film::auto_printing`]).
+    /// What turns the current result into a positive with the roll's printing alone.
+    pub fn inverter(&self) -> Option<Inverter> {
+        self.film().map(|f| f.inverter(&Adjustments::default()))
+    }
+
+    /// The adjustments of frame `target`, or of the whole scan for `None` (or a frame that
+    /// isn't there).
+    pub fn adjustments(&self, target: Option<usize>) -> &Adjustments {
+        match target.and_then(|i| self.crop.frames.get(i)) {
+            Some(frame) => &frame.adjust,
+            None => &self.scan_adjust,
+        }
+    }
+
+    pub fn adjustments_mut(&mut self, target: Option<usize>) -> &mut Adjustments {
+        match target.and_then(|i| self.crop.frames.get_mut(i)) {
+            Some(frame) => &mut frame.adjust,
+            None => &mut self.scan_adjust,
+        }
+    }
+
+    /// Adjust `target` automatically, as SilverFast's auto adjust does:
+    ///
+    /// - **Color.** A frame of a negative gets the printing a photofinisher's printer
+    ///   would give it on its own (its average taken as grey; see
+    ///   [`scan_film::auto_printing`]), as offsets from the roll's. A positive is balanced
+    ///   to grey the same way, in linear light, keeping its exposure. The whole scan of a
+    ///   negative keeps the roll's printing, which the Invert step's Auto sets.
+    /// - **Levels.** Master levels stretch the result to full range (see
+    ///   [`adjust::auto_levels`]), the same for every channel, so the balance is kept.
+    ///
+    /// Everything else is left as it is.
+    pub fn auto_adjust(&mut self, target: Option<usize>) {
+        let (Some(result), Some(image)) = (self.result.clone(), self.processed_image()) else {
+            return;
+        };
+        let rect = target.and_then(|i| self.crop.frames.get(i)).map(|f| f.rect);
+        let film = self.film();
+        let mut adj = self.adjustments(target).clone();
+        let (preview, scale) = scan_process::preview_frame(
+            image,
+            result.dpi,
+            result.area,
+            rect.as_ref(),
+            AUTO_PREVIEW_SIDE,
+        );
+        match (film, rect) {
+            (Some(f), Some(rect)) => {
+                let levels = scan_process::frame_levels(
+                    image,
+                    result.gamma,
+                    result.dpi,
+                    result.area,
+                    &[rect],
+                    f.stock.model(),
+                    f.base,
+                );
+                if let Some(level) = levels.first() {
+                    let p = scan_film::auto_printing(&[*level], &f.printing);
+                    adj.exposure_ev = p.exposure_ev - f.printing.exposure_ev;
+                    adj.balance_ev =
+                        std::array::from_fn(|c| p.balance_ev[c] - f.printing.balance_ev[c]);
+                }
+            }
+            (Some(_), None) => {
+                adj.exposure_ev = 0.0;
+                adj.balance_ev = [0.0; 3];
+            }
+            (None, _) => {
+                let means = adjust::log_means(&preview, result.gamma);
+                adj.exposure_ev = 0.0;
+                adj.balance_ev = adjust::neutralize(means.map(f32::exp2));
+            }
+        }
+        let color = Adjustments {
+            exposure_ev: adj.exposure_ev,
+            balance_ev: adj.balance_ev,
+            ..Adjustments::default()
+        };
+        let inverter = film.map(|f| f.inverter(&color));
+        let positive = adjust::develop(&preview, result.gamma, inverter.as_ref(), &color, scale);
+        adj.levels = [Levels::default(); 4];
+        adj.levels[adjust::MASTER] = adjust::auto_levels(&adjust::histogram(&positive), 0.001);
+        let l = adj.levels[adjust::MASTER];
+        self.status = format!(
+            "Auto: exposure {:+.2} EV, red {:+.2}, green {:+.2}, blue {:+.2}; levels {:.0} to {:.0}",
+            adj.exposure_ev,
+            adj.balance_ev[0],
+            adj.balance_ev[1],
+            adj.balance_ev[2],
+            l.black * 255.0,
+            l.white * 255.0
+        );
+        *self.adjustments_mut(target) = adj;
+    }
+
+    /// Balance `target` so the point where its linear light (through the film, for a
+    /// negative) is `light` comes out neutral: the grey picker.
+    pub fn pick_neutral(&mut self, target: Option<usize>, light: [f32; 3]) {
+        let film = self.film();
+        let adj = self.adjustments_mut(target);
+        let e: [f32; 3] = match film {
+            Some(f) => {
+                let inverter = f.inverter(adj);
+                std::array::from_fn(|c| inverter.scene(c, light[c]))
+            }
+            None => {
+                let g = adj.gains();
+                std::array::from_fn(|c| light[c] * g[c])
+            }
+        };
+        let d = adjust::neutralize(e);
+        for (b, d) in adj.balance_ev.iter_mut().zip(d) {
+            *b += d;
+        }
+        self.status = format!(
+            "Grey picked: red {:+.2}, green {:+.2}, blue {:+.2} EV",
+            d[0], d[1], d[2]
+        );
+    }
+
+    /// Set `target`'s levels so `value` (each channel of the positive, before levels, 0-1)
+    /// becomes white, or black: the white- and black-point pickers. Each channel gets its
+    /// own, so the point also comes out neutral.
+    pub fn pick_level(&mut self, target: Option<usize>, value: [f32; 3], white: bool) {
+        let adj = self.adjustments_mut(target);
+        for (l, v) in adj.levels[1..].iter_mut().zip(value) {
+            if white {
+                l.white = v.clamp(l.black + 0.02, 1.0);
+            } else {
+                l.black = v.clamp(0.0, l.white - 0.02);
+            }
+        }
+    }
+
+    /// Copy `target`'s adjustments.
+    pub fn copy_adjustments(&mut self, target: Option<usize>) {
+        self.clipboard = Some(self.adjustments(target).clone());
+    }
+
+    /// Paste the copied adjustments onto `target`, all but its orientation.
+    pub fn paste_adjustments(&mut self, target: Option<usize>) {
+        if let Some(copied) = self.clipboard.clone() {
+            paste(self.adjustments_mut(target), copied);
+        }
+    }
+
+    /// Paste the copied adjustments onto every frame, all but their orientation.
+    pub fn paste_to_all_frames(&mut self) {
+        if let Some(copied) = &self.clipboard {
+            for frame in &mut self.crop.frames {
+                paste(&mut frame.adjust, copied.clone());
+            }
+        }
+    }
+
+    /// Undo every edit of `target` but its orientation.
+    pub fn reset_adjustments(&mut self, target: Option<usize>) {
+        paste(self.adjustments_mut(target), Adjustments::default());
+    }
+
+    /// Set the printing's exposure and color balance the way a photofinisher's printer
+    /// does, from the frames' average colors (see [`scan_film::auto_printing`]).
     pub fn auto_printing(&mut self) {
         let (Some(result), Some(base), Some(image)) = (
             self.result.clone(),
@@ -526,14 +741,14 @@ impl AppState {
         let result = self.result.clone()?;
         let merged = self.current_merged().map(|m| m.merge.clone());
         let cleaned = self.current_cleaned().map(|c| c.removal.clone());
-        let invert = self.inverter().map(Arc::new);
         self.activity = Activity::Saving;
         self.status = format!("Saving {}...", path.display());
         Some(Command::Save {
             result,
             merged,
             cleaned,
-            invert,
+            film: self.film(),
+            adjust: Box::new(self.scan_adjust.clone()),
             quarter_turns: self.quarter_turns,
             path,
         })
@@ -547,15 +762,19 @@ impl AppState {
         let result = self.result.clone()?;
         let merged = self.current_merged().map(|m| m.merge.clone());
         let cleaned = self.current_cleaned().map(|c| c.removal.clone());
-        let invert = self.inverter().map(Arc::new);
         self.activity = Activity::Saving;
         self.status = format!("Saving {} frames...", self.crop.frames.len());
         Some(Command::SaveFrames {
             result,
             merged,
             cleaned,
-            invert,
-            frames: self.crop.frames.iter().map(|f| f.rect).collect(),
+            film: self.film(),
+            frames: self
+                .crop
+                .frames
+                .iter()
+                .map(|f| (f.rect, f.adjust.clone()))
+                .collect(),
             quarter_turns: self.quarter_turns,
             path,
         })
@@ -590,9 +809,20 @@ impl AppState {
         if let Some(frame) = self.crop.frames.get_mut(index)
             && frame.rect != rect
         {
-            *frame = CropFrame { rect, check: false };
+            frame.rect = rect;
+            frame.check = false;
             self.crop.edited = true;
         }
+    }
+
+    /// Number the frames from the other end of the film, now and for later detections. The
+    /// selection and each frame's edits go with their frames.
+    pub fn reverse_frames(&mut self) {
+        let crop = &mut self.crop;
+        crop.reversed = !crop.reversed;
+        crop.frames.reverse();
+        let n = crop.frames.len();
+        crop.selected = crop.selected.filter(|&i| i < n).map(|i| n - 1 - i);
     }
 
     pub fn delete_frame(&mut self, index: usize) {
@@ -635,7 +865,7 @@ impl AppState {
                 }
             }
         };
-        self.crop.frames.push(CropFrame { rect, check: false });
+        self.crop.frames.push(CropFrame::new(rect));
         self.crop.edited = true;
         self.crop.selected = Some(self.crop.frames.len() - 1);
     }
@@ -792,21 +1022,29 @@ impl AppState {
                         measured,
                     });
                     self.crop.detected = Some(generation);
-                    // Frames edited by hand, before or while it ran, are kept.
+                    // Frames edited by hand, before or while it ran, are kept; otherwise each
+                    // new frame keeps the edits of the old one in its place.
                     if !self.crop.edited {
+                        let old = std::mem::take(&mut self.crop.frames);
+                        let mut frames: Vec<CropFrame> = detection
+                            .frames
+                            .iter()
+                            .map(|f| CropFrame {
+                                rect: f.rect,
+                                check: f.placed_by_spacing,
+                                adjust: carried_adjustments(&old, &f.rect),
+                            })
+                            .collect();
+                        if self.crop.reversed {
+                            frames.reverse();
+                        }
                         self.crop = Crop {
-                            frames: detection
-                                .frames
-                                .iter()
-                                .map(|f| CropFrame {
-                                    rect: f.rect,
-                                    check: f.placed_by_spacing,
-                                })
-                                .collect(),
+                            frames,
                             selected: None,
                             edited: false,
                             detected: Some(generation),
                             strips: detection.strips,
+                            reversed: self.crop.reversed,
                         };
                     }
                 }
@@ -825,6 +1063,34 @@ impl AppState {
             }
         }
     }
+}
+
+/// How big a preview [`AppState::auto_adjust`] measures, on its longer side.
+const AUTO_PREVIEW_SIDE: u32 = 1024;
+
+/// `from` pasted onto `to`, keeping `to`'s orientation.
+fn paste(to: &mut Adjustments, from: Adjustments) {
+    *to = Adjustments {
+        quarter_turns: to.quarter_turns,
+        mirror: to.mirror,
+        ..from
+    };
+}
+
+/// The adjustments of the frame of `old` that `rect` replaces: the one whose middle is
+/// nearest `rect`'s, within half its shorter side. A preview's frames and a later scan's
+/// are the same frames found again, a little more exactly.
+fn carried_adjustments(old: &[CropFrame], rect: &FrameRect) -> Adjustments {
+    let reach = rect.width_mm.min(rect.height_mm) / 2.0;
+    old.iter()
+        .map(|f| {
+            let d = (f.rect.cx_mm - rect.cx_mm).hypot(f.rect.cy_mm - rect.cy_mm);
+            (d, f)
+        })
+        .filter(|&(d, _)| d <= reach)
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, f)| f.adjust.clone())
+        .unwrap_or_default()
 }
 
 /// A line on what a frame detection found.
@@ -995,9 +1261,8 @@ mod tests {
             assert!((base.light[c] / want - 1.0).abs() < 0.03, "{base:?}");
         }
         assert!(state.inverter().is_some());
-        let Some(Command::SaveFrames {
-            invert: Some(_), ..
-        }) = state.start_save_frames("f.tif".into())
+        let Some(Command::SaveFrames { film: Some(_), .. }) =
+            state.start_save_frames("f.tif".into())
         else {
             panic!("expected the frames saved inverted");
         };
@@ -1038,7 +1303,7 @@ mod tests {
         state.activity = Activity::Idle;
         // With no frames, a 35 mm frame along the film area's long side.
         state.add_frame(30.0, 50.0);
-        let first = state.crop.frames[0];
+        let first = state.crop.frames[0].clone();
         assert_eq!(
             (first.rect.width_mm, first.rect.height_mm, first.rect.cx_mm),
             (24.0, 36.0, 30.0)
@@ -1482,6 +1747,179 @@ mod tests {
         let result = dev.scan(&request, &mut NoProgress);
         assert!(scan_done(&mut state, kind, result).is_none());
         assert!(state.current_cleaned().is_none());
+    }
+
+    /// A film preview with its frames found.
+    fn film_with_frames() -> AppState {
+        let mut state = with_mock_open();
+        let cmd = preview(&mut state);
+        detected(&mut state, cmd);
+        assert_eq!(state.crop.frames.len(), 12);
+        state
+    }
+
+    #[test]
+    fn each_frame_keeps_its_own_adjustments_through_a_new_scan() {
+        let mut state = film_with_frames();
+        state.adjustments_mut(Some(3)).exposure_ev = 0.7;
+        state.adjustments_mut(Some(3)).quarter_turns = 1;
+        state.adjustments_mut(None).saturation = 0.2;
+        assert_eq!(state.adjustments(Some(4)), &Adjustments::default());
+        assert!(
+            !state.crop.edited,
+            "editing a frame's colors isn't editing the frames"
+        );
+
+        // A new scan of the film finds the frames again, each keeping its edits.
+        let cmd = preview(&mut state);
+        detected(&mut state, cmd);
+        assert_eq!(state.crop.frames.len(), 12);
+        assert_eq!(state.adjustments(Some(3)).exposure_ev, 0.7);
+        assert_eq!(state.adjustments(Some(3)).quarter_turns, 1);
+        assert_eq!(state.adjustments(Some(2)), &Adjustments::default());
+        assert_eq!(state.scan_adjust.saturation, 0.2);
+        // A frame out of range is the whole scan.
+        assert_eq!(state.adjustments(Some(99)).saturation, 0.2);
+
+        // Saving frames saves each with its own.
+        let Some(Command::SaveFrames { frames, film, .. }) =
+            state.start_save_frames("f.tif".into())
+        else {
+            panic!("expected save");
+        };
+        assert!(film.is_some());
+        assert_eq!(frames[3].1.exposure_ev, 0.7);
+        assert_eq!(frames[0].1, Adjustments::default());
+        state.activity = Activity::Idle;
+        let Some(Command::Save { adjust, .. }) = state.start_save("s.tif".into()) else {
+            panic!("expected save");
+        };
+        assert_eq!(adjust.saturation, 0.2);
+    }
+
+    #[test]
+    fn frames_can_be_numbered_from_the_other_end() {
+        let mut state = film_with_frames();
+        let rects: Vec<FrameRect> = state.crop.frames.iter().map(|f| f.rect).collect();
+        state.adjustments_mut(Some(0)).exposure_ev = 0.5;
+        state.crop.selected = Some(1);
+        state.reverse_frames();
+        assert!(state.crop.reversed && !state.crop.edited);
+        assert_eq!(state.crop.frames[0].rect, rects[11]);
+        assert_eq!(
+            state.crop.frames[11].adjust.exposure_ev, 0.5,
+            "edits go with the frame"
+        );
+        assert_eq!(state.crop.selected, Some(10));
+
+        // Later detections come out reversed too, and back the other way when turned off.
+        let cmd = preview(&mut state);
+        detected(&mut state, cmd);
+        assert!(state.crop.reversed);
+        assert_eq!(state.crop.frames[0].rect, rects[11]);
+        assert_eq!(state.crop.frames[11].adjust.exposure_ev, 0.5);
+        state.reverse_frames();
+        let cmd = state.redetect_frames();
+        detected(&mut state, cmd);
+        assert_eq!(state.crop.frames[0].rect, rects[0]);
+    }
+
+    #[test]
+    fn adjustments_copy_paste_and_reset_but_keep_each_frames_turn() {
+        let mut state = film_with_frames();
+        let a = state.adjustments_mut(Some(0));
+        a.contrast = 0.4;
+        a.balance_ev = [0.1, 0.0, -0.1];
+        a.mirror = true;
+        state.adjustments_mut(Some(1)).quarter_turns = 3;
+        state.copy_adjustments(Some(0));
+        state.paste_adjustments(Some(1));
+        let b = state.adjustments(Some(1));
+        assert_eq!((b.contrast, b.quarter_turns, b.mirror), (0.4, 3, false));
+        state.paste_to_all_frames();
+        assert!(state.crop.frames.iter().all(|f| f.adjust.contrast == 0.4));
+        assert_eq!(
+            state.scan_adjust,
+            Adjustments::default(),
+            "the whole scan isn't a frame"
+        );
+        state.reset_adjustments(Some(1));
+        let b = state.adjustments(Some(1));
+        assert_eq!((b.contrast, b.quarter_turns), (0.0, 3));
+        assert!(state.adjustments(Some(0)).mirror);
+    }
+
+    #[test]
+    fn the_grey_picker_neutralises_the_point_in_scene_light() {
+        let mut state = film_with_frames();
+        // Some light through the film: an orange-ish negative's.
+        let light = [0.30, 0.12, 0.03];
+        state.adjustments_mut(Some(2)).exposure_ev = 0.5;
+        state.pick_neutral(Some(2), light);
+        let adj = state.adjustments(Some(2)).clone();
+        assert_eq!(adj.exposure_ev, 0.5, "exposure kept");
+        let inverter = state.film().unwrap().inverter(&adj);
+        let e: Vec<f32> = (0..3).map(|c| inverter.scene(c, light[c])).collect();
+        assert!(
+            (e[0] / e[1] - 1.0).abs() < 1e-3 && (e[1] / e[2] - 1.0).abs() < 1e-3,
+            "{e:?}"
+        );
+        assert!(state.status.starts_with("Grey picked"));
+
+        // On a positive, the same in linear light.
+        state.invert.enabled = false;
+        state.pick_neutral(None, [0.4, 0.2, 0.1]);
+        let g = state.scan_adjust.gains();
+        assert!((0.4 * g[0] - 0.2 * g[1]).abs() < 1e-4 && (0.2 * g[1] - 0.1 * g[2]).abs() < 1e-4);
+    }
+
+    #[test]
+    fn level_pickers_set_each_channels_point() {
+        let mut state = film_with_frames();
+        state.pick_level(Some(0), [0.9, 0.85, 0.8], true);
+        state.pick_level(Some(0), [0.05, 0.1, 0.12], false);
+        let l = &state.adjustments(Some(0)).levels;
+        assert_eq!((l[1].white, l[2].white, l[3].white), (0.9, 0.85, 0.8));
+        assert_eq!((l[1].black, l[3].black), (0.05, 0.12));
+        assert_eq!(l[adjust::MASTER], Levels::default());
+        // Never crossing.
+        state.pick_level(Some(0), [0.01; 3], true);
+        assert!(state.adjustments(Some(0)).levels[1].white >= 0.07 - 1e-6);
+    }
+
+    #[test]
+    fn auto_balances_a_frame_on_its_own_and_stretches_it() {
+        let mut state = film_with_frames();
+        state.auto_adjust(Some(5));
+        assert!(state.status.starts_with("Auto:"), "{}", state.status);
+        let adj = state.adjustments(Some(5)).clone();
+        let l = adj.levels[adjust::MASTER];
+        assert!(l.black < l.white);
+        // The frame's printing is what the roll's Auto would give it alone.
+        let film = state.film().unwrap();
+        let result = state.result.clone().unwrap();
+        let levels = scan_process::frame_levels(
+            state.processed_image().unwrap(),
+            result.gamma,
+            result.dpi,
+            result.area,
+            &[state.crop.frames[5].rect],
+            film.stock.model(),
+            film.base,
+        );
+        let alone = scan_film::auto_printing(&levels, &film.printing);
+        let p = adj.printing(&film.printing);
+        assert!((p.exposure_ev - alone.exposure_ev).abs() < 1e-4);
+        for c in 0..3 {
+            assert!((p.balance_ev[c] - alone.balance_ev[c]).abs() < 1e-4);
+        }
+        // Other frames are left alone.
+        assert_eq!(state.adjustments(Some(4)), &Adjustments::default());
+
+        // The whole scan of a negative keeps the roll's printing.
+        state.adjustments_mut(None).exposure_ev = 1.0;
+        state.auto_adjust(None);
+        assert_eq!(state.scan_adjust.exposure_ev, 0.0);
     }
 
     #[test]

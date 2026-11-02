@@ -2,15 +2,15 @@
 //! film's own curves.
 //!
 //! 1. **Base.** Every channel is divided by the light through the bare film base (measured
-//!    on the same scan), which removes the orange mask and the scanner's own colour: what's
+//!    on the same scan), which removes the orange mask and the scanner's own color: what's
 //!    left is each dye's density above D-min.
 //! 2. **Film.** Each layer's inverse characteristic curve turns its density back into the
 //!    scene light that exposed it ([`FilmModel::exposure`]). This is what keeps a neutral
 //!    neutral through the toe, the straight line and the shoulder: each layer has its own
 //!    gamma and its own curve.
-//! 3. **Printing.** Exposure and colour balance are offsets in log exposure, as a printer's
+//! 3. **Printing.** Exposure and color balance are offsets in log exposure, as a printer's
 //!    lights are.
-//! 4. **Colour.** [`Rendering::Print`] lets each layer drive its own colour, as an optical
+//! 4. **Color.** [`Rendering::Print`] lets each layer drive its own color, as an optical
 //!    print does; [`Rendering::Colorimetric`] mixes them with the matrix fitted from the
 //!    film's spectral sensitivities.
 //! 5. **Tone.** A print-like curve (see [`Tone`]) for display, then sRGB encoding.
@@ -18,15 +18,15 @@
 use crate::model::{FilmModel, GREY};
 use crate::spectral::{self, Mat3};
 
-/// How the film's layers become colour.
+/// How the film's layers become color.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Rendering {
-    /// Each layer drives its own channel, as when the negative is printed on colour paper,
-    /// whose layers see one dye each: the film's own colour, as its maker designed it to
+    /// Each layer drives its own channel, as when the negative is printed on color paper,
+    /// whose layers see one dye each: the film's own color, as its maker designed it to
     /// print.
     #[default]
     Print,
-    /// The layers mixed by [`FilmModel::colorimetric`], towards the scene's colours as the
+    /// The layers mixed by [`FilmModel::colorimetric`], towards the scene's colors as the
     /// CIE observer saw them through the film's spectral sensitivities. The film's
     /// chemistry already boosts saturation (interimage effects), so this can look more
     /// saturated than a print.
@@ -38,7 +38,7 @@ pub enum Rendering {
 pub struct Printing {
     /// Brighter (+) or darker (−), in stops.
     pub exposure_ev: f32,
-    /// Per channel, red, green, blue: more (+) or less (−) of that colour, in stops.
+    /// Per channel, red, green, blue: more (+) or less (−) of that color, in stops.
     pub balance_ev: [f32; 3],
     /// The tone curve's contrast; see [`Tone`].
     pub contrast: f32,
@@ -141,7 +141,7 @@ impl Inverter {
         spectral::srgb_encode(f64::from(self.tone.apply(e))) as f32
     }
 
-    /// The display colour (sRGB encoded, 0–1) of scene light `e`.
+    /// The display color (sRGB encoded, 0–1) of scene light `e`.
     pub fn display(&self, e: [f32; 3]) -> [f32; 3] {
         let e = match &self.matrix {
             Some(m) => std::array::from_fn(|r| (0..3).map(|k| m[r][k] * e[k]).sum()),
@@ -150,7 +150,7 @@ impl Inverter {
         e.map(|v| self.display_channel(v))
     }
 
-    /// The display colour of a pixel whose linear light through the film is `light`.
+    /// The display color of a pixel whose linear light through the film is `light`.
     pub fn pixel(&self, light: [f32; 3]) -> [f32; 3] {
         self.display(std::array::from_fn(|c| self.scene(c, light[c])))
     }
@@ -161,7 +161,7 @@ fn to_f32(m: &Mat3) -> [[f32; 3]; 3] {
 }
 
 /// Printing that balances a roll the way a photofinishing printer does ("integrate to
-/// grey"): each frame's average colour, in log exposure, is taken to be grey, and the roll
+/// grey"): each frame's average color, in log exposure, is taken to be grey, and the roll
 /// gets the median of its frames' corrections, so one frame of green lawn or blue sea
 /// doesn't tint the rest. The exposure brings the roll's typical frame's log-average to a
 /// grey card.

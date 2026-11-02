@@ -1,5 +1,6 @@
 //! Background thread that owns scanner access, so device I/O never blocks the UI.
 
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -10,10 +11,12 @@ use scan_core::{
     CancelToken, Capabilities, DeviceInfo, DeviceRegistry, ProgressSink, ScanError, ScanRequest,
     ScanResult, ScannerDevice, export,
 };
-use scan_film::Inverter;
+use scan_process::adjust::{self, Adjustments};
 use scan_process::{
     DetectParams, DustParams, DustRemoval, ExposureMerge, FrameDetection, FrameRect,
 };
+
+use crate::state::Film;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScanKind {
@@ -66,21 +69,25 @@ pub enum Command {
         merged: Option<Arc<ExposureMerge>>,
         /// Saved in place of the primary pass when present.
         cleaned: Option<Arc<DustRemoval>>,
-        /// Turns the image saved for the primary pass into a positive, when given.
-        invert: Option<Arc<Inverter>>,
+        /// Inverts the image saved for the primary pass, when given.
+        film: Option<Film>,
+        /// The whole scan's edits, applied to the image saved for the primary pass (its
+        /// orientation is not: the other passes and infrared are turned like it).
+        adjust: Box<Adjustments>,
         /// Clockwise, applied to every image saved.
         quarter_turns: u8,
         path: PathBuf,
     },
     /// Save `frames` cut out of the primary image (or of `merged` or `cleaned`, as for
-    /// [`Command::Save`]), straightened, inverted (when `invert` is given) and turned, each
-    /// to a file numbered after `path`.
+    /// [`Command::Save`]), straightened, inverted (when `film` is given) and edited with
+    /// their own adjustments, then turned (`quarter_turns`, then each frame's own), each to
+    /// a file numbered after `path`.
     SaveFrames {
         result: Arc<ScanResult>,
         merged: Option<Arc<ExposureMerge>>,
         cleaned: Option<Arc<DustRemoval>>,
-        invert: Option<Arc<Inverter>>,
-        frames: Vec<FrameRect>,
+        film: Option<Film>,
+        frames: Vec<(FrameRect, Adjustments)>,
         quarter_turns: u8,
         path: PathBuf,
     },
@@ -291,14 +298,14 @@ fn run(
                 result,
                 merged,
                 cleaned,
-                invert,
+                film,
+                adjust,
                 quarter_turns,
                 path,
             } => {
                 let primary = processed(&result, &merged, &cleaned);
-                let positive = invert.map(|inv| positive(primary, result.gamma, &inv));
-                let primary = positive.as_ref().unwrap_or(primary);
-                let saved = export::save_tiff_with_primary(&result, primary, quarter_turns, &path)
+                let primary = developed(primary, result.gamma, film.as_ref(), &adjust);
+                let saved = export::save_tiff_with_primary(&result, &primary, quarter_turns, &path)
                     .map_err(|e| e.to_string());
                 send(Event::Saved(saved));
             }
@@ -306,7 +313,7 @@ fn run(
                 result,
                 merged,
                 cleaned,
-                invert,
+                film,
                 frames,
                 quarter_turns,
                 path,
@@ -315,14 +322,12 @@ fn run(
                 let saved = frames
                     .iter()
                     .enumerate()
-                    .map(|(n, frame)| {
-                        let mut crop =
-                            scan_process::crop_frame(image, result.dpi, result.area, frame);
-                        if let Some(inv) = &invert {
-                            crop = positive(&crop, result.gamma, inv);
-                        }
+                    .map(|(n, (frame, adj))| {
+                        let crop = scan_process::crop_frame(image, result.dpi, result.area, frame);
+                        let crop = developed(&crop, result.gamma, film.as_ref(), adj);
                         let target = export::numbered(&path, n);
-                        export::rotated(&crop, quarter_turns)
+                        let turns = (quarter_turns + adj.quarter_turns) % 4;
+                        adjust::orient(&crop, turns, adj.mirror)
                             .save_with_format(&target, ImageFormat::Tiff)
                             .map(|()| target)
                             .map_err(|e| e.to_string())
@@ -334,9 +339,20 @@ fn run(
     }
 }
 
-/// The positive of `image`, a scan of a negative encoding light with `gamma`.
-fn positive(image: &DynamicImage, gamma: f32, inverter: &Inverter) -> DynamicImage {
-    DynamicImage::ImageRgb16(scan_process::invert(image, gamma, inverter))
+/// `image`, a scan encoding light with `gamma`, inverted with `film` (when given) and
+/// edited with `adjust` (but not turned): as it is, if that changes nothing.
+fn developed<'a>(
+    image: &'a DynamicImage,
+    gamma: f32,
+    film: Option<&Film>,
+    adjust: &Adjustments,
+) -> Cow<'a, DynamicImage> {
+    let inverter = film.map(|f| f.inverter(adjust));
+    if inverter.is_none() && adjust.gains() == [1.0; 3] && !adjust.edits_positive() {
+        return Cow::Borrowed(image);
+    }
+    let positive = adjust::develop(image, gamma, inverter.as_ref(), adjust, 1.0);
+    Cow::Owned(DynamicImage::ImageRgb16(positive))
 }
 
 /// The image to save: the dust-cleaned one, else the merged exposures, else the scan's
@@ -410,7 +426,8 @@ mod tests {
             result: Arc::new(result),
             merged: None,
             cleaned: None,
-            invert: None,
+            film: None,
+            adjust: Box::default(),
             quarter_turns: 0,
             path: path.clone(),
         });
@@ -445,14 +462,28 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let frames: Vec<_> = detection.frames[..2].iter().map(|f| f.rect).collect();
-        let stock = scan_film::stock::default_stock();
-        let inverter = Inverter::new(stock.model(), base, &Default::default());
+        // The second frame is turned back upright by its own adjustments, and edited.
+        let turned = Adjustments {
+            quarter_turns: 3,
+            mirror: true,
+            contrast: 0.3,
+            sharpen: adjust::Sharpen {
+                amount: 0.5,
+                ..Default::default()
+            },
+            ..Adjustments::default()
+        };
+        let film = Film {
+            stock: scan_film::stock::default_stock(),
+            base,
+            printing: Default::default(),
+        };
         worker.send(Command::SaveFrames {
             result,
             merged: None,
             cleaned: None,
-            invert: Some(Arc::new(inverter)),
-            frames: frames.clone(),
+            film: Some(film),
+            frames: vec![(frames[0], Adjustments::default()), (frames[1], turned)],
             quarter_turns: 1,
             path: dir.path().join("roll.tif"),
         });
@@ -470,6 +501,8 @@ mod tests {
         let (w, h) = (frames[0].width_mm, frames[0].height_mm);
         let px = |mm: f32| (mm / scan_core::MM_PER_INCH * 75.0).round() as u32;
         assert_eq!((saved.width(), saved.height()), (px(h), px(w)));
+        let upright = scan_core::image::open(&paths[1]).unwrap();
+        assert_eq!((upright.width(), upright.height()), (px(w), px(h)));
     }
 
     #[test]

@@ -136,8 +136,8 @@ fn scans_film_infrared() {
         .expect("infrared film scan");
     let ir = result.infrared.as_ref().expect("infrared plane");
     assert_eq!(ir.dimensions(), result.dimensions());
-    let colour = result.primary().to_luma16();
-    save(result.primary(), "film-ir-colour");
+    let color = result.primary().to_luma16();
+    save(result.primary(), "film-ir-color");
     save(&DynamicImage::ImageLuma16(ir.clone()), "film-ir");
 
     // Film dyes are nearly transparent to infrared: the frame reads bright.
@@ -164,7 +164,7 @@ fn scans_film_infrared() {
         (at(x, y) - s / 81.0).min(0.0)
     };
     let ir_at = |x: u32, y: u32| f64::from(ir.get_pixel(x, y).0[0]);
-    let colour_at = |x: u32, y: u32| f64::from(colour.get_pixel(x, y).0[0]);
+    let color_at = |x: u32, y: u32| f64::from(color.get_pixel(x, y).0[0]);
     let best = (-10i32..=10)
         .flat_map(|dy| (-10i32..=10).map(move |dx| (dx, dy)))
         .map(|(dx, dy)| {
@@ -172,7 +172,7 @@ fn scans_film_infrared() {
             for y in (h / 8..h * 7 / 8).step_by(2) {
                 for x in (w / 8..w * 3 / 4).step_by(2) {
                     let (sx, sy) = ((x as i32 + dx) as u32, (y as i32 + dy) as u32);
-                    c += detail(&ir_at, sx, sy) * detail(&colour_at, x, y);
+                    c += detail(&ir_at, sx, sy) * detail(&color_at, x, y);
                 }
             }
             ((dx, dy), c)

@@ -101,9 +101,9 @@ fn main() {
     let rects: Vec<_> = detection.frames.iter().map(|f| f.rect).collect();
     let levels = frame_levels(&img, gamma, dpi, area, &rects, model, base);
     // A channel whose densities the scanner scales differently from Status M shows as a
-    // colour offset that changes with the frame's level ("crossover"); offsets that don't
-    // follow the level are the scenes' own colour.
-    println!("\nEach frame at neutral printing: level (mean log10 scene light) and colour offsets");
+    // color offset that changes with the frame's level ("crossover"); offsets that don't
+    // follow the level are the scenes' own color.
+    println!("\nEach frame at neutral printing: level (mean log10 scene light) and color offsets");
     println!("frame   level    red  green   blue");
     for (n, l) in levels.iter().enumerate() {
         let mean = (l[0] + l[1] + l[2]) / 3.0;

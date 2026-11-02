@@ -74,7 +74,7 @@ fn scans_with_the_sane_test_driver() {
             image.color().bits_per_pixel() / image.color().channel_count() as u16,
             bit_depth.bits() as u16
         );
-        // At 16 bits the colour pattern has red, green and blue stripes from left to
+        // At 16 bits the color pattern has red, green and blue stripes from left to
         // right. The driver sends them as blue, green and red frames, so channels put in
         // the wrong order would move the stripes.
         if color_mode == ColorMode::Color && bit_depth == BitDepth::Sixteen {

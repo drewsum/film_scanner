@@ -69,7 +69,7 @@ const FIRST_MOVE: u32 = 932;
 /// The infrared LED sits this far along the lamp unit from the visible lamp: SilverFast's
 /// infrared pass moves the lamp alone this much first.
 const IR_LAMP_MOVE: u32 = 535;
-/// The infrared plane comes out this much wider than the colour one, about the point
+/// The infrared plane comes out this much wider than the color one, about the point
 /// [`IR_CENTRE_MM`] across the film area: the lens seems to magnify the infrared a little
 /// more. Measured on a V500 from the dust on frames in both strips at 1,600 dpi (to within a
 /// pixel), and 800 dpi agrees. A fixed offset can't line the planes up: at 1,600 dpi a frame
@@ -77,7 +77,7 @@ const IR_LAMP_MOVE: u32 = 535;
 /// 12 px wider in infrared. [`FilmSession::align_infrared`] undoes it.
 const IR_STRETCH: f64 = 0.0079;
 const IR_CENTRE_MM: f64 = 39.2;
-/// The infrared read reaches this many pixels (at hardware resolution) past the colour one
+/// The infrared read reaches this many pixels (at hardware resolution) past the color one
 /// on each side, so the stretch can be undone right to the area's edges: it moves pixels at
 /// most 20 px at 1,600 dpi, at the far edges of the film area.
 const IR_MARGIN: u32 = 32;
@@ -240,7 +240,7 @@ const MODES: [Mode; 3] = [
     },
 ];
 
-/// What differs between a colour pass and an infrared one.
+/// What differs between a color pass and an infrared one.
 #[derive(Clone, Copy, Debug)]
 struct Light {
     infrared: bool,
@@ -325,7 +325,7 @@ pub enum Carriage {
 #[derive(Clone, Debug, PartialEq)]
 pub struct FilmPlan {
     pub output: Resample,
-    /// Lines to read, including the colour-skew margin.
+    /// Lines to read, including the color-skew margin.
     pub lines: u32,
     /// x range of the read, and its pixels per line.
     pub x_units: (u16, u16),
@@ -515,13 +515,13 @@ pub struct FilmSession {
 }
 
 impl FilmSession {
-    /// A colour pass.
+    /// A color pass.
     pub fn new(area: &ScanArea, dpi: u32) -> Result<Self, ScanError> {
         Self::with_light(area, dpi, false)
     }
 
     /// An infrared pass of the same area: three channels that all see the infrared, at the
-    /// colour pass's geometry.
+    /// color pass's geometry.
     pub fn infrared(area: &ScanArea, dpi: u32) -> Result<Self, ScanError> {
         Self::with_light(area, dpi, true)
     }
@@ -550,7 +550,7 @@ impl FilmSession {
         })
     }
 
-    /// Decode this infrared session's read onto the colour pass's pixels, undoing the
+    /// Decode this infrared session's read onto the color pass's pixels, undoing the
     /// infrared's stretch ([`IR_STRETCH`]) with linear interpolation.
     pub fn decode_infrared(&self, raw: &[u8], area: &ScanArea) -> Gray16Image {
         let out = self.plan.output;
@@ -574,7 +574,7 @@ impl FilmSession {
         let centre = IR_CENTRE_MM * px_per_mm;
         let last = f64::from(wide.width().saturating_sub(1));
         Gray16Image::from_fn(out.width, out.height, |x, y| {
-            // Where the colour pixel's centre lands in the infrared.
+            // Where the color pixel's centre lands in the infrared.
             let film_x = left + f64::from(x) + 0.5;
             let src = (margin + f64::from(x) + IR_STRETCH * (film_x - centre)).clamp(0.0, last);
             let (x0, t) = (src.floor() as u32, src.fract());
@@ -780,7 +780,7 @@ impl FilmSession {
         });
         log::debug!("calibration window: {back} steps back");
         Self::move_carriage(&mut p, Carriage::Fast(back), true)?;
-        // SilverFast's infrared pass follows a colour pass and leaves these out.
+        // SilverFast's infrared pass follows a color pass and leaves these out.
         if !l.infrared {
             let at = (0x400 + back as u16).to_le_bytes();
             p.command(WINDOW, &[&[at[0], at[1], 0x00, 0x77]])?;
@@ -1332,7 +1332,7 @@ mod tests {
     /// chose next (captures 33 and 38).
     #[test]
     fn solves_gains_like_silverfast() {
-        // Colour, 1,600 dpi: 1c 17 13 read 205.1, 243.6, 229.1; SilverFast balanced G and B
+        // Color, 1,600 dpi: 1c 17 13 read 205.1, 243.6, 229.1; SilverFast balanced G and B
         // down to R in two steps, reaching 1c 0e 0d.
         assert_eq!(
             solve_gains([0x1c, 0x17, 0x13], [205.1, 243.6, 229.1], 1.0, 205.1),
@@ -1357,7 +1357,7 @@ mod tests {
             height: 2,
         };
         let px_per_mm = 1600.0 / f64::from(MM_PER_INCH);
-        // A frame in the left strip: its infrared lands left of the colour, increasingly so
+        // A frame in the left strip: its infrared lands left of the color, increasingly so
         // further from the centre.
         let aligned = FilmSession::align_infrared(&wide, 32.0, 3.0, out);
         let at = |x: u32| f64::from(aligned.get_pixel(x, 0).0[0]) / 10.0 - 32.0 - f64::from(x);
@@ -1378,14 +1378,14 @@ mod tests {
         let a = area(5.0, 40.0, 24.0, 36.0);
         for dpi in [800, 1600] {
             let session = FilmSession::infrared(&a, dpi).unwrap();
-            // The same read as the colour pass, moved with the steady motor's lead, and wider.
-            let colour = FilmSession::new(&a, dpi).unwrap();
+            // The same read as the color pass, moved with the steady motor's lead, and wider.
+            let color = FilmSession::new(&a, dpi).unwrap();
             let margin = (IR_MARGIN * session.mode.units_per_inch / session.mode.hw_dpi) as u16;
-            let (x0, x1) = colour.plan.x_units;
+            let (x0, x1) = color.plan.x_units;
             assert_eq!(session.plan.x_units, (x0 - margin, x1 + margin));
             assert_eq!(
                 session.plan.read_width,
-                colour.plan.read_width + 2 * IR_MARGIN
+                color.plan.read_width + 2 * IR_MARGIN
             );
             let mut sim = SimulatedScanner::default();
             let data = session.run(&mut sim, Duration::ZERO).unwrap();
@@ -1407,9 +1407,8 @@ mod tests {
             assert_eq!(motor[4..], STEADY_SCAN_MOTOR);
         }
         let ir = FilmSession::infrared(&a, 800).unwrap();
-        let colour = FilmSession::new(&a, 800).unwrap();
-        let (Carriage::Fast(i), Carriage::Fast(c)) = (ir.plan.carriage, colour.plan.carriage)
-        else {
+        let color = FilmSession::new(&a, 800).unwrap();
+        let (Carriage::Fast(i), Carriage::Fast(c)) = (ir.plan.carriage, color.plan.carriage) else {
             panic!("slow move");
         };
         assert_eq!(i - c, 256);

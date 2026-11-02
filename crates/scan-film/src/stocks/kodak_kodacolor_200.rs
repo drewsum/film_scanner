@@ -1,4 +1,4 @@
-//! Kodak Kodacolor 200: ISO 200 daylight colour negative film for C-41, sold by Eastman
+//! Kodak Kodacolor 200: ISO 200 daylight color negative film for C-41, sold by Eastman
 //! Kodak since October 2025 (35 mm; edge print `KODAK 200-8`).
 //!
 //! # Where the data comes from
@@ -17,7 +17,7 @@
 //!   response, which the inversion runs backwards. They agree with the sheet's own check of
 //!   exposure: a grey card at Log H ref reads 0.95 in red (Kodak: 0.85 to 1.05), the lightest
 //!   step of a paper grey scale 1.31 (Kodak: 1.25 to 1.45).
-//! - **Spectral sensitivities**: what colours each layer records; the colorimetric
+//! - **Spectral sensitivities**: what colors each layer records; the colorimetric
 //!   rendering is fitted from them.
 //! - **Spectral dye densities** of D-min and a midscale neutral: kept for scanner
 //!   calibration (not used by the inversion yet).
@@ -34,7 +34,7 @@
 //! Reviewers who shot Kodacolor 200 against ColorPlus found them nearly identical, with
 //! Kodacolor perhaps a little cooler, and describe its warmth as "like Gold 200, but not so
 //! much". So against these Gold 200 curves, real Kodacolor may print slightly cooler: a
-//! difference of film, not of the model, and what the colour balance is for.
+//! difference of film, not of the model, and what the color balance is for.
 //!
 //! # Measured on a real roll
 //!
@@ -44,15 +44,15 @@
 //! - **Film base** density 0.264 / 0.461 / 0.976 against the sheet's D-min of 0.251 / 0.657
 //!   / 0.991. Red and blue agree to 0.015. Green reads 0.2 lower: the scanner's green
 //!   channel sees the orange mask, whose density falls steeply across green, differently
-//!   from Status M. The base is divided out, so this doesn't shift colours by itself.
+//!   from Status M. The base is divided out, so this doesn't shift colors by itself.
 //! - **The roll is underexposed**, not read low by the scanner: the thinnest 1% of nearly
 //!   every frame is at the bare base (unexposed shadows), frame medians are 0.13–0.42 above
 //!   base where a normally exposed grey card is 0.67–0.75, and the two daylight frames are
 //!   the densest. Auto exposure gives +2.6 EV.
 //! - **Neutral balance** from the profile alone is close: Auto's roll correction is red
-//!   +0.08, green +0.08, blue −0.16 EV. Frames' colour offsets drift by about 0.1 stop with
+//!   +0.08, green +0.08, blue −0.16 EV. Frames' color offsets drift by about 0.1 stop with
 //!   their level across the roll (blue up in the darkest), within what the scenes'
-//!   own colour explains; no scanner correction is applied without a target to measure it.
+//!   own color explains; no scanner correction is applied without a target to measure it.
 
 use std::sync::OnceLock;
 
@@ -67,7 +67,7 @@ pub const KODAK_KODACOLOR_200: FilmStock = FilmStock {
     manufacturer: "Kodak",
     name: "Kodacolor 200",
     iso: 200,
-    kind: FilmKind::ColourNegative,
+    kind: FilmKind::ColorNegative,
     sheet: &kodak_e7022::SHEET,
     provenance: "Kodak publishes no datasheet for Kodacolor 200, which is reported to be \
                  ColorPlus 200 renamed (no datasheet either). Its profile uses the curves \

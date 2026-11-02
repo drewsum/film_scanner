@@ -59,7 +59,7 @@ impl Spectrum {
     }
 }
 
-/// What a film manufacturer's technical datasheet tells about a colour negative film.
+/// What a film manufacturer's technical datasheet tells about a color negative film.
 #[derive(Clone, Copy, Debug)]
 pub struct Datasheet {
     /// The film the sheet is for, as titled.
@@ -72,7 +72,7 @@ pub struct Datasheet {
     /// characteristic curves put a properly exposed midtone.
     pub log_h_ref: f32,
     /// Status M density against log exposure (lux-seconds) to daylight, per channel. Status
-    /// M is the densitometry made to see a negative as colour print paper does.
+    /// M is the densitometry made to see a negative as color print paper does.
     pub characteristic: [Curve; 3],
     /// Log spectral sensitivity of the red-, green- and blue-sensitive layers: the log of
     /// the reciprocal of the exposure (erg/cm²) that gives a density 0.2 above D-min.
