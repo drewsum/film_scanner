@@ -12,8 +12,8 @@ The goal is one GUI that covers the whole workflow:
 4. **Adjust**: colour correction: white balance, levels, curves
 5. **Export**: batch export with metadata
 
-> **Status:** early development. Scanning and cropping work; Invert, Adjust and Export are
-> placeholders. See the [roadmap issue](https://github.com/drewsum/film_scanner/issues/1).
+> **Status:** early development. Scanning, cropping and inverting colour negatives work;
+> Adjust and Export are placeholders. See the [roadmap issue](https://github.com/drewsum/film_scanner/issues/1).
 
 ## Scanner support
 
@@ -144,6 +144,32 @@ goes in the holder the same way each time.
 Not yet covered: mounted slides, uncut slide film, medium format and half-frame. Their frames
 can be added by hand.
 
+## Inverting negatives: film-stock profiles
+
+The **Invert** step turns colour negatives into positives with a profile of the film stock,
+like SilverFast's NegaFix. Profiles are built from the manufacturer's published data: each
+layer's characteristic curve, read exactly from the vector graphics of the datasheet's PDF, is
+run backwards to recover the light that exposed it. That is what keeps greys grey from the
+shadows to the highlights, without auto-levels. The orange mask is removed by dividing out
+the bare film base, which frame detection measures on every film scan.
+
+| Film stock | Data |
+|---|---|
+| Kodak Kodacolor 200 | No datasheet exists (it is reported to be ColorPlus 200 renamed, which has none either); uses Kodak Gold 200's, E-7022 |
+| Kodak Gold 100 | Its own datasheet, E-7022 (2007 edition) |
+| Kodak Gold 200 | Its own datasheet, E-7022 (2016) |
+
+The step has the film stock, exposure and colour balance in stops (like a photofinisher's
+printer), contrast, and *Print* or *Colorimetric* colour. *Auto* balances the roll as a
+printer does: each frame's average is taken as grey, and the roll gets the median of the
+frames' corrections. The view, *Save as TIFF* and *Save frames as TIFF* all give positives
+(16-bit sRGB) while *Invert colour negative* is on.
+
+How profiles work, and how to add a stock, is in
+[docs/film-profiles.md](docs/film-profiles.md). `cargo run -p scan-film --example profile`
+prints a profile, and `cargo run --release -p scan-process --example negative_report --
+SCAN.tif` measures a saved (uninverted) film scan against it.
+
 ## Building
 
 Requires Rust 1.95+ (`rustup` recommended). On Windows, the MSVC toolchain and the Visual
@@ -195,8 +221,12 @@ cargo test -p scan-wia -- --ignored --nocapture
 
 - `crates/scan-core`: backend-agnostic scanner traits and types (capabilities, scan
   requests with IR and multi-exposure passes), the mock backend, and TIFF export
+- `crates/scan-film`: film-stock profiles from manufacturers' datasheets, and the model that
+  inverts negatives with them (no dependencies)
 - `crates/scan-process`: processing of scans, independent of the scanner: multi-exposure
-  merging, infrared dust and scratch removal, and frame detection and cropping
+  merging, infrared dust and scratch removal, frame detection and cropping, and inverting
+  negatives image by image
+- `tools/film-curves`: reads a datasheet's curves out of its PDF into `scan-film`'s tables
 - `crates/scan-wia`: Windows WIA backend
 - `crates/scan-epson`: native USB backend for the Epson Perfection V500 (Windows)
 - `crates/scan-sane`: SANE backend (Linux, macOS)

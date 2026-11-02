@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/scan-core", "crates/scan-process", "crates/scan-wia", "crates/scan-epson", "crates/scan-sane", "crates/app"]
+members = ["crates/scan-core", "crates/scan-film", "crates/scan-process", "crates/scan-wia", "crates/scan-epson", "crates/scan-sane", "crates/app"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,7 @@ rust-version = "1.95"
 
 [workspace.dependencies]
 scan-core = { path = "crates/scan-core" }
+scan-film = { path = "crates/scan-film" }
 scan-process = { path = "crates/scan-process" }
 scan-wia = { path = "crates/scan-wia" }
 scan-epson = { path = "crates/scan-epson" }

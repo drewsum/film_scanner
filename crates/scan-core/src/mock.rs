@@ -4,6 +4,8 @@
 //! negative frames each: an orange-masked film base, clear sprocket holes, an opaque holder
 //! around the strips, and a handful of dust specks that show up in both the visible and the
 //! infrared channel (as on a real scanner, where film dyes are nearly transparent to infrared).
+//! The frames are exposed on Kodak Kodacolor 200, through its datasheet curves, so they
+//! invert back to their scenes with its profile.
 //! As with some real films, the cyan dye absorbs a little infrared, so frame detail shows
 //! faintly in the infrared channel too.
 
@@ -30,6 +32,8 @@ pub const FIRST_FRAME_Y_MM: f32 = 3.0;
 
 /// Transmittance of the orange mask of unexposed colour negative film base (R, G, B).
 pub const FILM_BASE: [f32; 3] = [0.85, 0.55, 0.33];
+/// The film the frames are shot on.
+pub const FILM: scan_film::FilmStock = scan_film::stocks::KODAK_KODACOLOR_200;
 const HOLDER: f32 = 0.002;
 const FILM_IR: f32 = 0.9;
 /// Fraction of the infrared that the densest cyan dye absorbs.
@@ -243,8 +247,10 @@ fn region_at(x: f32, y: f32) -> Region {
     Region::Holder
 }
 
-/// Scene colour (0..1 per channel) of the positive image in frame `index`.
-fn scene(index: usize, u: f32, v: f32) -> [f32; 3] {
+/// Scene colour (0..1 per channel, 1 a white surface) of the positive image in frame
+/// `index`, at (`u`, `v`) across and down it (0..1). The frame is lit so that a surface of
+/// `s` exposes the film to scene light `0.9 * s`: a white surface reflects 90%.
+pub fn frame_scene(index: usize, u: f32, v: f32) -> [f32; 3] {
     let hue = index as f32 / 12.0;
     let (cu, cv) = (0.5 + 0.2 * (hue * std::f32::consts::TAU).cos(), 0.5);
     let d = ((u - cu).powi(2) + (v - cv).powi(2)).sqrt();
@@ -263,8 +269,10 @@ fn transmittance_transparency(x: f32, y: f32) -> [f32; 3] {
         Region::SprocketHole => [1.0; 3],
         Region::FilmBase => FILM_BASE,
         Region::Frame { index, u, v } => {
-            let s = scene(index, u, v);
-            std::array::from_fn(|c| FILM_BASE[c] * (0.05 + 0.95 * (1.0 - s[c])))
+            // A white surface reflects 90%; a grey card (18%) is exposed normally.
+            let e = frame_scene(index, u, v).map(|s| 0.9 * s);
+            let density = FILM.model().negative(e);
+            std::array::from_fn(|c| FILM_BASE[c] * 10f32.powf(-density[c]))
         }
     }
 }

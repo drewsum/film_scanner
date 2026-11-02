@@ -6,7 +6,8 @@ use eframe::egui::{
 };
 use scan_core::ScanResult;
 use scan_core::image::{DynamicImage, GrayImage};
-use scan_process::{DustRemoval, ExposureMerge};
+use scan_film::Inverter;
+use scan_process::DustRemoval;
 
 use crate::state::ViewChannel;
 
@@ -15,32 +16,44 @@ pub const MAX_TEXTURE_SIDE: u32 = 4096;
 /// Repaired defects, when the mask is shown.
 const MASK_COLOUR: Color32 = Color32::from_rgb(255, 40, 40);
 
-/// The image to display: a channel of `result`, or the visible image dust-cleaned or with its
-/// exposures merged (the cleaned one is of the merge when both are given), with the repaired
-/// pixels marked when `show_mask` is set.
+/// The image to display: a channel of `result`, or `visible` (the processed image, at most
+/// [`MAX_TEXTURE_SIDE`] on a side: see [`thumbnail`]) as it is or turned positive by
+/// `positive`, with the pixels `cleaned` repaired marked when `show_mask` is set.
 pub fn render(
     result: &ScanResult,
     channel: ViewChannel,
-    merged: Option<&ExposureMerge>,
+    visible: &DynamicImage,
     cleaned: Option<&DustRemoval>,
     show_mask: bool,
+    positive: Option<&Inverter>,
 ) -> ColorImage {
     match (channel, &result.infrared) {
         (ViewChannel::Infrared, Some(ir)) => {
             to_color_image(&DynamicImage::ImageLuma16(ir.clone()), MAX_TEXTURE_SIDE)
         }
         _ => {
-            let img = match (cleaned, merged) {
-                (Some(c), _) => &c.image,
-                (None, Some(m)) => &m.image,
-                (None, None) => result.primary(),
+            let mut color = match positive {
+                Some(inverter) => {
+                    let image = scan_process::invert(visible, result.gamma, inverter);
+                    to_color_image(&DynamicImage::ImageRgb16(image), MAX_TEXTURE_SIDE)
+                }
+                None => to_color_image(visible, MAX_TEXTURE_SIDE),
             };
-            let mut color = to_color_image(img, MAX_TEXTURE_SIDE);
             if let Some(c) = cleaned.filter(|_| show_mask) {
                 overlay_mask(&mut color, &c.mask);
             }
             color
         }
+    }
+}
+
+/// `image` scaled down (if needed) to fit a texture, keeping its bit depth: what the view
+/// works from, so a change of inversion doesn't go through the whole scan.
+pub fn thumbnail(image: &DynamicImage) -> DynamicImage {
+    if image.width() > MAX_TEXTURE_SIDE || image.height() > MAX_TEXTURE_SIDE {
+        image.thumbnail(MAX_TEXTURE_SIDE, MAX_TEXTURE_SIDE)
+    } else {
+        image.clone()
     }
 }
 

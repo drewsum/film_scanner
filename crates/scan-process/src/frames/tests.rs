@@ -211,6 +211,11 @@ fn twelve_frames_on_two_strips() {
             .all(|f| f.edges_seen == 4 && !f.placed_by_spacing),
         "{found:#?}"
     );
+    // The bare film between the frames and perforations, measured for inverting.
+    let base = found.base.unwrap();
+    for c in 0..3 {
+        assert!((base[c] / BASE[c] - 1.0).abs() < 0.02, "{base:?}");
+    }
 }
 
 #[test]

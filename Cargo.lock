@@ -1214,6 +1214,7 @@ dependencies = [
  "rfd",
  "scan-core",
  "scan-epson",
+ "scan-film",
  "scan-process",
  "scan-sane",
  "scan-wia",
@@ -3056,6 +3057,7 @@ version = "0.1.0"
 dependencies = [
  "image",
  "log",
+ "scan-film",
  "tempfile",
  "thiserror 2.0.21",
 ]
@@ -3072,10 +3074,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "scan-film"
+version = "0.1.0"
+
+[[package]]
 name = "scan-process"
 version = "0.1.0"
 dependencies = [
  "scan-core",
+ "scan-film",
  "thiserror 2.0.21",
 ]
 
