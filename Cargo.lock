@@ -1190,6 +1190,7 @@ dependencies = [
  "scan-core",
  "scan-epson",
  "scan-process",
+ "scan-sane",
  "scan-wia",
  "tempfile",
  "winresource",
@@ -3037,6 +3038,15 @@ version = "0.1.0"
 dependencies = [
  "scan-core",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "scan-sane"
+version = "0.1.0"
+dependencies = [
+ "libloading",
+ "log",
+ "scan-core",
 ]
 
 [[package]]

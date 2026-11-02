@@ -21,11 +21,31 @@ The goal is one GUI that covers the whole workflow:
 |---------|----------|--------|
 | WIA (Windows Image Acquisition) | Windows | Flatbed scanning. Tested with an Epson Perfection V500 |
 | Mock "Virtual Film Scanner" | All | Synthetic film strips with an IR channel, for development |
-| SANE | Linux/macOS | Planned |
-| Native Epson ESC/I over USB | All | Planned, needed for the V500's film adapter, 48-bit and IR |
+| Native Epson V500 over USB | Windows | Flatbed and film, up to 6400 dpi, 16-bit, infrared and multi-exposure |
+| SANE | Linux/macOS | Flatbed and film with any SANE driver (see below). Tested with SANE's simulated scanner |
 
 The Epson V500's WIA driver only exposes the flatbed at up to 1200 dpi in 8-bit colour, with
-no transparency unit and no infrared. Full film support for that scanner needs a native backend.
+no transparency unit and no infrared, hence the native backend.
+
+## SANE (Linux and macOS)
+
+[SANE](http://www.sane-project.org/) drives most flatbed scanners on Linux, and on macOS
+through Homebrew or MacPorts. Install it, check your scanner shows up in `scanimage -L`, and
+it appears in the app's device list:
+
+```sh
+sudo apt-get install libsane1 sane-utils   # Debian/Ubuntu
+brew install sane-backends                  # macOS
+```
+
+`libsane` is loaded when the app starts, so it isn't needed to build, and without it the app
+simply lists no SANE scanners. Set `FILM_SCANNER_LIBSANE` to a path to load it from
+somewhere unusual.
+
+The backend reads SANE's standard options: the source (flatbed, or a transparency unit or
+film adapter, by name; document feeders are skipped), colour mode, bit depth, resolution and
+scan area. SANE has no standard options for infrared or exposure, so SANE scans are a single
+pass without infrared. The code is in `crates/scan-sane`.
 
 ## Multi-exposure
 
@@ -139,6 +159,8 @@ cargo test -p scan-wia -- --ignored --nocapture
 - `crates/scan-process`: processing of scans, independent of the scanner: multi-exposure
   merging and infrared dust and scratch removal
 - `crates/scan-wia`: Windows WIA backend
+- `crates/scan-epson`: native USB backend for the Epson Perfection V500 (Windows)
+- `crates/scan-sane`: SANE backend (Linux, macOS)
 - `crates/app`: the `film-scanner` egui application
 
 ## License

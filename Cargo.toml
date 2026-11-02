@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/scan-core", "crates/scan-process", "crates/scan-wia", "crates/scan-epson", "crates/app"]
+members = ["crates/scan-core", "crates/scan-process", "crates/scan-wia", "crates/scan-epson", "crates/scan-sane", "crates/app"]
 
 [workspace.package]
 version = "0.1.0"
@@ -14,12 +14,14 @@ scan-core = { path = "crates/scan-core" }
 scan-process = { path = "crates/scan-process" }
 scan-wia = { path = "crates/scan-wia" }
 scan-epson = { path = "crates/scan-epson" }
+scan-sane = { path = "crates/scan-sane" }
 image = { version = "0.25", default-features = false, features = ["tiff", "bmp", "png"] }
 thiserror = "2"
 log = "0.4"
 env_logger = "0.11"
 eframe = "0.37"
 rfd = "0.17"
+libloading = "0.8"
 tempfile = "3"
 windows = "0.62"
 windows-core = "0.62"
