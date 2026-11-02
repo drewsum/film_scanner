@@ -18,6 +18,7 @@ use crate::decode;
 use crate::film::{self, FilmSession};
 use crate::session::FlatbedSession;
 use crate::system::WiaPause;
+use crate::tables;
 use crate::transport::Transport;
 
 pub const BACKEND_NAME: &str = "epson";
@@ -174,6 +175,7 @@ impl ScannerDevice for V500Device {
                 image,
             }],
             infrared: None,
+            gamma: tables::GAMMA as f32,
         })
     }
 }
@@ -237,6 +239,7 @@ impl V500Device {
             area,
             passes,
             infrared,
+            gamma: tables::GAMMA as f32,
         })
     }
 }

@@ -27,6 +27,30 @@ The goal is one GUI that covers the whole workflow:
 The Epson V500's WIA driver only exposes the flatbed at up to 1200 dpi in 8-bit colour, with
 no transparency unit and no infrared. Full film support for that scanner needs a native backend.
 
+## Multi-exposure
+
+*Extra +1 EV pass* in the Scan panel scans film twice, the second time a stop brighter, and
+merges the two, as SilverFast's Multi-Exposure does. Little light gets through the densest
+parts of a frame (a negative's highlights, a slide's shadows), so the scanner's noise covers
+them; the brighter pass lifts them clear of it but clips the thin parts. The code is in
+`crates/scan-process/src/hdr.rs`.
+
+The merge works in linear light (the scan's tone curve is undone first):
+
+1. Each pass is a separate scan, so the brighter one may land a little off. The shift whose
+   gradients correlate best with the first pass's is found, to a fraction of a pixel, leaving
+   out edges near clipping.
+2. The brighter pass's gain is measured per channel, with a line fitted to its values against
+   the first pass's where neither is noisy or clipped. It is rarely exactly 2x.
+3. Where the brighter pass is well short of clipping, it replaces the first, scaled back by its
+   gain. Its weight fades out smoothly as it nears clipping, the same for all channels of a
+   pixel, so there is no seam and no colour shift.
+
+The Result panel shows the measured exposure and how much of the image came from the brighter
+pass; *Merge exposures* turns the merge off to compare. Dust removal and *Save as TIFF* use the
+merged image while it is on; the brighter pass is also saved as scanned, as
+`<name>_ev+1.0.tif`.
+
 ## Dust and scratch removal
 
 Film scans with the infrared channel turned on can have their dust and scratches removed, as
@@ -112,8 +136,8 @@ cargo test -p scan-wia -- --ignored --nocapture
 
 - `crates/scan-core`: backend-agnostic scanner traits and types (capabilities, scan
   requests with IR and multi-exposure passes), the mock backend, and TIFF export
-- `crates/scan-process`: processing of scans, independent of the scanner: infrared dust
-  and scratch removal
+- `crates/scan-process`: processing of scans, independent of the scanner: multi-exposure
+  merging and infrared dust and scratch removal
 - `crates/scan-wia`: Windows WIA backend
 - `crates/app`: the `film-scanner` egui application
 

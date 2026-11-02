@@ -313,6 +313,8 @@ impl ScannerDevice for WiaDevice {
                 image,
             }],
             infrared: None,
+            // WIA drivers deliver display-ready (roughly sRGB) data.
+            gamma: 2.2,
         })
     }
 }

@@ -6,7 +6,7 @@ use eframe::egui::{self, Align, Layout, RichText};
 use scan_core::mock::MockBackend;
 use scan_core::{BitDepth, ColorMode, DeviceRegistry};
 
-use crate::state::{Activity, AppState, ViewChannel, WorkflowStep};
+use crate::state::{self, Activity, AppState, EXTRA_EV, ViewChannel, WorkflowStep};
 use crate::view::{self, ImageView};
 use crate::worker::{ScanKind, Worker};
 
@@ -192,6 +192,22 @@ impl ScannerApp {
                     .on_disabled_hover_text("Not supported by this scanner/source");
                     ui.end_row();
 
+                    ui.label("Exposures");
+                    ui.add_enabled(
+                        src.max_exposure_passes >= 2,
+                        egui::Checkbox::new(
+                            &mut s.multi_exposure,
+                            format!("Extra {EXTRA_EV:+} EV pass"),
+                        ),
+                    )
+                    .on_hover_text(
+                        "Scans again, brighter, and merges the two: less noise in the densest \
+                         film (a negative's highlights, a slide's shadows). Takes about twice \
+                         as long. Not used for previews.",
+                    )
+                    .on_disabled_hover_text("Not supported by this scanner/source");
+                    ui.end_row();
+
                     let (w, h) = src.max_area.pixel_size(s.dpi);
                     let bytes = w as u64
                         * h as u64
@@ -247,6 +263,9 @@ impl ScannerApp {
                 ""
             }
         ));
+        if result.passes.len() > 1 {
+            self.merge_controls(ui, busy);
+        }
         if result.infrared.is_some() {
             self.dust_controls(ui, busy);
         } else if self.state.source_caps().is_some_and(|s| s.infrared) {
@@ -260,6 +279,37 @@ impl ScannerApp {
                 .set_file_name("scan.tif")
                 .save_file()
             && let Some(cmd) = self.state.start_save(path)
+        {
+            self.worker.send(cmd);
+        }
+    }
+
+    fn merge_controls(&mut self, ui: &mut egui::Ui, busy: bool) {
+        ui.add_space(4.0);
+        let before = self.state.merge_exposures;
+        ui.add_enabled(
+            !busy,
+            egui::Checkbox::new(&mut self.state.merge_exposures, "Merge exposures"),
+        )
+        .on_hover_text("Off shows and saves the normal exposure alone, to compare");
+        if let Some(merged) = self.state.current_merged() {
+            let details: Vec<String> = merged
+                .merge
+                .passes
+                .iter()
+                .map(|p| {
+                    format!(
+                        "{:+.1} EV pass: gains {:.2} / {:.2} / {:.2}, shifted {:.2}, {:.2} px",
+                        p.ev, p.gain[0], p.gain[1], p.gain[2], p.shift.0, p.shift.1
+                    )
+                })
+                .collect();
+            let summary = state::merge_summary(&merged.merge);
+            ui.label(summary.trim_start_matches("Exposures merged: "))
+                .on_hover_text(details.join("\n"));
+        }
+        if self.state.merge_exposures != before
+            && let Some(cmd) = self.state.update_processing()
         {
             self.worker.send(cmd);
         }
@@ -294,7 +344,7 @@ impl ScannerApp {
                 ));
         }
         if self.state.dust != before
-            && let Some(cmd) = self.state.update_dust()
+            && let Some(cmd) = self.state.update_processing()
         {
             self.worker.send(cmd);
         }
@@ -335,20 +385,28 @@ impl ScannerApp {
             });
         });
         let channel = self.state.view_channel;
+        let merged = self.state.current_merged().map(|m| m.merge.clone());
         let cleaned = self.state.current_cleaned().map(|c| c.removal.clone());
         let show_mask = self.state.dust.show_mask;
-        // Which view of the result: the channel, and which dust removal with or without its
-        // mask (told apart by its address while it is alive).
-        let variant = match (channel, &cleaned) {
-            (ViewChannel::Infrared, _) => 1,
-            (ViewChannel::Visible, None) => 0,
-            (ViewChannel::Visible, Some(c)) => {
+        // Which view of the result: the channel, and which dust removal (with or without its
+        // mask) or merge, told apart by its address while it is alive.
+        let variant = match (channel, &cleaned, &merged) {
+            (ViewChannel::Infrared, ..) => 1,
+            (ViewChannel::Visible, Some(c), _) => {
                 ((Arc::as_ptr(c) as usize as u64) << 2) | (u64::from(show_mask) << 1)
             }
+            (ViewChannel::Visible, None, Some(m)) => (Arc::as_ptr(m) as usize as u64) << 2,
+            (ViewChannel::Visible, None, None) => 0,
         };
         self.view
             .show(ui, self.state.result_generation, variant, || {
-                view::render(&result, channel, cleaned.as_deref(), show_mask)
+                view::render(
+                    &result,
+                    channel,
+                    merged.as_deref(),
+                    cleaned.as_deref(),
+                    show_mask,
+                )
             });
     }
 }

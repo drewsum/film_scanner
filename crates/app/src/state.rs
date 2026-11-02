@@ -3,11 +3,11 @@
 use std::sync::Arc;
 
 use scan_core::{
-    BitDepth, Capabilities, ColorMode, DeviceId, DeviceInfo, ScanError, ScanRequest, ScanResult,
-    ScanSource, SourceCapabilities,
+    BitDepth, Capabilities, ColorMode, DeviceId, DeviceInfo, Exposure, ScanError, ScanRequest,
+    ScanResult, ScanSource, SourceCapabilities,
 };
 
-use scan_process::DustRemoval;
+use scan_process::{DustRemoval, ExposureMerge};
 
 use crate::worker::{Command, Event, ScanKind};
 
@@ -73,6 +73,7 @@ pub enum Activity {
     ListingDevices,
     OpeningDevice,
     Scanning { kind: ScanKind, progress: f32 },
+    MergingExposures,
     RemovingDust,
     Saving,
 }
@@ -102,7 +103,16 @@ impl Default for DustSettings {
 pub struct Cleaned {
     pub generation: u64,
     pub strength: f32,
+    /// Whether it cleaned the merged exposures rather than the primary pass.
+    pub merged: bool,
     pub removal: Arc<DustRemoval>,
+}
+
+/// The merged exposure passes of the result with some generation.
+#[derive(Clone, Debug)]
+pub struct Merged {
+    pub generation: u64,
+    pub merge: Arc<ExposureMerge>,
 }
 
 /// User-chosen scan settings, kept valid for the selected device and source.
@@ -113,6 +123,8 @@ pub struct ScanSettings {
     pub bit_depth: BitDepth,
     pub color_mode: ColorMode,
     pub infrared: bool,
+    /// Scan a second pass [`EXTRA_EV`] brighter, to merge with the first.
+    pub multi_exposure: bool,
 }
 
 impl Default for ScanSettings {
@@ -123,12 +135,16 @@ impl Default for ScanSettings {
             bit_depth: BitDepth::Sixteen,
             color_mode: ColorMode::Color,
             infrared: false,
+            multi_exposure: false,
         }
     }
 }
 
 /// Resolution used for preview scans (the lowest supported at or above this).
 pub const PREVIEW_DPI: u32 = 75;
+/// How much brighter a multi-exposure scan's second pass is, in stops: as much as the V500
+/// takes, and enough to lift the densest film well clear of the noise.
+pub const EXTRA_EV: f32 = 1.0;
 
 pub struct AppState {
     pub step: WorkflowStep,
@@ -144,6 +160,10 @@ pub struct AppState {
     /// Incremented whenever `result` changes, so views can refresh cached textures.
     pub result_generation: u64,
     pub view_channel: ViewChannel,
+    /// Show, clean and save the result's exposure passes merged, when it has several.
+    pub merge_exposures: bool,
+    /// The latest merge; see [`AppState::current_merged`].
+    pub merged: Option<Merged>,
     pub dust: DustSettings,
     /// The latest dust removal; see [`AppState::current_cleaned`].
     pub cleaned: Option<Cleaned>,
@@ -166,6 +186,8 @@ impl Default for AppState {
             result_kind: None,
             result_generation: 0,
             view_channel: ViewChannel::Visible,
+            merge_exposures: true,
+            merged: None,
             dust: DustSettings::default(),
             cleaned: None,
             settings_device: None,
@@ -242,6 +264,7 @@ impl AppState {
             s.color_mode = src.color_modes.first().copied().unwrap_or(ColorMode::Color);
         }
         s.infrared &= src.infrared;
+        s.multi_exposure &= src.max_exposure_passes >= 2;
     }
 
     /// The request for a preview or final scan with the current settings.
@@ -251,6 +274,9 @@ impl AppState {
         req.bit_depth = self.settings.bit_depth;
         req.color_mode = self.settings.color_mode;
         req.infrared = self.settings.infrared;
+        if self.settings.multi_exposure {
+            req.exposures = vec![Exposure::default(), Exposure { ev: EXTRA_EV }];
+        }
         if kind == ScanKind::Preview {
             req.dpi = src.preview_resolution(PREVIEW_DPI).unwrap_or(req.dpi);
             req.bit_depth = src
@@ -260,6 +286,7 @@ impl AppState {
                 .min()
                 .unwrap_or(req.bit_depth);
             req.infrared = false;
+            req.exposures.clear();
         }
         req.validate(self.capabilities.as_ref().unwrap())
             .map_err(|e| e.to_string())?;
@@ -292,24 +319,49 @@ impl AppState {
         }
     }
 
+    /// The merge of the current result's exposures, if it has several, merging is on and it
+    /// is done.
+    pub fn current_merged(&self) -> Option<&Merged> {
+        self.merged
+            .as_ref()
+            .filter(|m| self.merge_exposures && m.generation == self.result_generation)
+    }
+
+    /// Whether the current result's exposures are to be merged but aren't yet.
+    fn merge_pending(&self) -> bool {
+        self.merge_exposures
+            && self.result.as_ref().is_some_and(|r| r.passes.len() > 1)
+            && self.current_merged().is_none()
+    }
+
     /// The dust removal of the current result with the current settings, if it is done.
     pub fn current_cleaned(&self) -> Option<&Cleaned> {
         self.cleaned.as_ref().filter(|c| {
             self.dust.enabled
                 && c.generation == self.result_generation
                 && c.strength == self.dust.strength
+                && c.merged == self.current_merged().is_some()
+                && !self.merge_pending()
         })
     }
 
-    /// Start dust removal if it is enabled and the result has infrared but no up-to-date
-    /// removal yet. Call after the result or the dust settings change.
-    pub fn update_dust(&mut self) -> Option<Command> {
+    /// Start the next processing step the current result needs with the current settings:
+    /// merging its exposures, then removing dust from the merge (or the primary pass). Call
+    /// after the result or the settings change.
+    pub fn update_processing(&mut self) -> Option<Command> {
         let result = self.result.clone()?;
-        if !self.dust.enabled
-            || result.infrared.is_none()
-            || self.is_busy()
-            || self.current_cleaned().is_some()
-        {
+        if self.is_busy() {
+            return None;
+        }
+        if self.merge_pending() {
+            self.activity = Activity::MergingExposures;
+            self.status = "Merging exposures...".into();
+            return Some(Command::MergeExposures {
+                generation: self.result_generation,
+                result,
+            });
+        }
+        if !self.dust.enabled || result.infrared.is_none() || self.current_cleaned().is_some() {
             return None;
         }
         self.activity = Activity::RemovingDust;
@@ -317,17 +369,20 @@ impl AppState {
         Some(Command::RemoveDust {
             generation: self.result_generation,
             strength: self.dust.strength,
+            merged: self.current_merged().map(|m| m.merge.clone()),
             result,
         })
     }
 
     pub fn start_save(&mut self, path: std::path::PathBuf) -> Option<Command> {
         let result = self.result.clone()?;
+        let merged = self.current_merged().map(|m| m.merge.clone());
         let cleaned = self.current_cleaned().map(|c| c.removal.clone());
         self.activity = Activity::Saving;
         self.status = format!("Saving {}...", path.display());
         Some(Command::Save {
             result,
+            merged,
             cleaned,
             path,
         })
@@ -397,8 +452,9 @@ impl AppState {
                         self.result = Some(Arc::new(result));
                         self.result_kind = Some(kind);
                         self.result_generation += 1;
+                        self.merged = None;
                         self.cleaned = None;
-                        return self.update_dust();
+                        return self.update_processing();
                     }
                     Err(ScanError::Cancelled) => self.status = "Scan cancelled".into(),
                     Err(e) => {
@@ -408,9 +464,31 @@ impl AppState {
                 }
                 None
             }
+            Event::ExposuresMerged { generation, result } => {
+                self.activity = Activity::Idle;
+                match result {
+                    Ok(merge) => {
+                        self.status = merge_summary(&merge);
+                        if generation == self.result_generation {
+                            self.merged = Some(Merged {
+                                generation,
+                                merge: Arc::new(merge),
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        self.status = "Merging exposures failed".into();
+                        self.error = Some(e);
+                        // Carry on with the primary pass.
+                        self.merge_exposures = false;
+                    }
+                }
+                self.update_processing()
+            }
             Event::DustRemoved {
                 generation,
                 strength,
+                merged,
                 result,
             } => {
                 self.activity = Activity::Idle;
@@ -427,6 +505,7 @@ impl AppState {
                             self.cleaned = Some(Cleaned {
                                 generation,
                                 strength,
+                                merged,
                                 removal: Arc::new(removal),
                             });
                         }
@@ -439,7 +518,7 @@ impl AppState {
                     }
                 }
                 // The settings or the result may have changed in the meantime.
-                self.update_dust()
+                self.update_processing()
             }
             Event::Saved(result) => {
                 self.activity = Activity::Idle;
@@ -454,6 +533,23 @@ impl AppState {
             }
         }
     }
+}
+
+/// A line on how a merge went: each longer pass's measured exposure and share of the image.
+pub fn merge_summary(merge: &ExposureMerge) -> String {
+    let passes: Vec<String> = merge
+        .passes
+        .iter()
+        .map(|p| {
+            format!(
+                "{:+.1} EV pass measured {:+.2} EV, used for {:.0}%",
+                p.ev,
+                p.measured_ev(),
+                p.share * 100.0
+            )
+        })
+        .collect();
+    format!("Exposures merged: {}", passes.join("; "))
 }
 
 #[cfg(test)]
@@ -638,18 +734,32 @@ mod tests {
         let Some(Command::RemoveDust {
             generation,
             strength,
+            merged,
             result,
         }) = cmd
         else {
             panic!("expected dust removal, got {cmd:?}");
         };
         let params = scan_process::DustParams::for_scan(result.dpi, strength);
-        let removal =
-            scan_process::remove_dust(result.primary(), result.infrared.as_ref().unwrap(), &params);
+        let image = merged.as_ref().map_or(result.primary(), |m| &m.image);
+        let removal = scan_process::remove_dust(image, result.infrared.as_ref().unwrap(), &params);
         state.apply(Event::DustRemoved {
             generation,
             strength,
+            merged: merged.is_some(),
             result: removal.map_err(|e| e.to_string()),
+        })
+    }
+
+    /// Run the merge `cmd` asks for and apply its outcome.
+    fn merged(state: &mut AppState, cmd: Option<Command>) -> Option<Command> {
+        let Some(Command::MergeExposures { generation, result }) = cmd else {
+            panic!("expected a merge, got {cmd:?}");
+        };
+        let merge = scan_process::merge_exposures(&result.passes, result.gamma);
+        state.apply(Event::ExposuresMerged {
+            generation,
+            result: merge.map_err(|e| e.to_string()),
         })
     }
 
@@ -672,7 +782,7 @@ mod tests {
         // Turned off, the raw scan is saved again, and nothing is recomputed.
         state.activity = Activity::Idle;
         state.dust.enabled = false;
-        assert!(state.update_dust().is_none());
+        assert!(state.update_processing().is_none());
         let Some(Command::Save { cleaned, .. }) = state.start_save("x.tif".into()) else {
             panic!("expected save");
         };
@@ -680,7 +790,7 @@ mod tests {
         state.activity = Activity::Idle;
         state.dust.enabled = true;
         assert!(
-            state.update_dust().is_none(),
+            state.update_processing().is_none(),
             "the earlier removal still fits"
         );
     }
@@ -692,7 +802,7 @@ mod tests {
         let first = final_ir_scan(&mut state);
         // The strength changes while the first removal runs.
         state.dust.strength = 0.9;
-        assert!(state.update_dust().is_none(), "busy");
+        assert!(state.update_processing().is_none(), "busy");
         let second = removed(&mut state, first);
         assert!(state.current_cleaned().is_none());
         assert!(matches!(
@@ -710,11 +820,125 @@ mod tests {
         state.apply(Event::DustRemoved {
             generation,
             strength: 0.9,
+            merged: false,
             result: Ok(removal),
         });
         assert_eq!(state.cleaned.as_ref().unwrap().generation, generation);
         state.dust.enabled = true;
         assert!(state.current_cleaned().is_none());
+    }
+
+    /// A final multi-exposure scan with infrared, applied to the state; returns the
+    /// follow-up command.
+    fn final_multi_exposure_scan(state: &mut AppState) -> Option<Command> {
+        state.settings.multi_exposure = true;
+        state.settings.infrared = true;
+        let Some(Command::Scan { request, kind, .. }) = state.start_scan(ScanKind::Final) else {
+            panic!("expected scan command");
+        };
+        assert_eq!(request.exposures.len(), 2);
+        let mut dev = MockBackend.open(&MockBackend::device_info()).unwrap();
+        let result = dev.scan(&request, &mut NoProgress);
+        state.apply(Event::ScanDone { kind, result })
+    }
+
+    #[test]
+    fn multi_exposure_scans_are_merged_then_cleaned() {
+        let mut state = with_mock_open();
+        state.settings.dpi = 150;
+        state.settings.multi_exposure = true;
+        let preview = state.build_request(ScanKind::Preview).unwrap();
+        assert!(preview.exposures.is_empty(), "previews are single pass");
+        let cmd = final_multi_exposure_scan(&mut state);
+        assert_eq!(state.activity, Activity::MergingExposures);
+        assert!(state.current_cleaned().is_none());
+
+        // Dust removal follows the merge, on the merged image.
+        let cmd = merged(&mut state, cmd);
+        let summary = merge_summary(&state.current_merged().unwrap().merge);
+        assert!(
+            summary.starts_with("Exposures merged: +1.0 EV pass measured +1.00 EV"),
+            "{summary}"
+        );
+        assert!(matches!(
+            &cmd,
+            Some(Command::RemoveDust {
+                merged: Some(_),
+                ..
+            })
+        ));
+        assert!(removed(&mut state, cmd).is_none());
+        let merge = state.current_merged().unwrap().merge.clone();
+        let cleaned = state.current_cleaned().unwrap().removal.clone();
+        let Some(Command::Save {
+            merged: Some(m),
+            cleaned: Some(c),
+            ..
+        }) = state.start_save("x.tif".into())
+        else {
+            panic!("expected a save of the merged, cleaned image");
+        };
+        assert!(Arc::ptr_eq(&m, &merge) && Arc::ptr_eq(&c, &cleaned));
+
+        // Without the merge, the primary pass is cleaned instead.
+        state.activity = Activity::Idle;
+        state.merge_exposures = false;
+        assert!(state.current_cleaned().is_none());
+        let cmd = state.update_processing();
+        assert!(matches!(
+            &cmd,
+            Some(Command::RemoveDust { merged: None, .. })
+        ));
+        removed(&mut state, cmd);
+        assert!(!state.current_cleaned().unwrap().merged);
+        // Turned back on, the earlier merge still fits, but its cleaning was replaced.
+        state.merge_exposures = true;
+        assert!(state.current_merged().is_some());
+        assert!(matches!(
+            state.update_processing(),
+            Some(Command::RemoveDust {
+                merged: Some(_),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_failed_merge_falls_back_to_the_primary_pass() {
+        let mut state = with_mock_open();
+        state.settings.dpi = 150;
+        let Some(Command::MergeExposures { generation, .. }) =
+            final_multi_exposure_scan(&mut state)
+        else {
+            panic!("expected a merge");
+        };
+        let cmd = state.apply(Event::ExposuresMerged {
+            generation,
+            result: Err("no overlap".into()),
+        });
+        assert_eq!(state.error.as_deref(), Some("no overlap"));
+        assert!(!state.merge_exposures);
+        assert!(matches!(
+            cmd,
+            Some(Command::RemoveDust { merged: None, .. })
+        ));
+    }
+
+    #[test]
+    fn multi_exposure_needs_a_source_that_takes_two_passes() {
+        let mut state = with_mock_open();
+        state.settings.multi_exposure = true;
+        state.fit_settings();
+        assert!(state.settings.multi_exposure);
+        let source = state.settings.source;
+        let caps = state.capabilities.as_mut().unwrap();
+        caps.sources
+            .iter_mut()
+            .find(|s| s.source == source)
+            .unwrap()
+            .max_exposure_passes = 1;
+        state.fit_settings();
+        assert!(!state.settings.multi_exposure);
     }
 
     #[test]
