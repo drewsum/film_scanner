@@ -12,6 +12,7 @@ use scan_film::{FilmStock, Inverter, Printing};
 use scan_process::adjust::{self, Adjustments, Levels};
 use scan_process::{DustRemoval, ExposureMerge, FrameDetection, FrameRect};
 
+use crate::export::{self, ExportSettings};
 use crate::worker::{Command, Event, ScanKind};
 
 /// The stages of the film scanning workflow, in order.
@@ -58,7 +59,9 @@ impl WorkflowStep {
                 "Edit each frame on its own: color, levels, curves, selective color, grain \
                  reduction and sharpening."
             }
-            WorkflowStep::Export => "Batch export of finished frames with metadata.",
+            WorkflowStep::Export => {
+                "Save the finished frames of the roll into a folder, with the metadata                  film_roll_publisher uploads them to Immich with."
+            }
         }
     }
 }
@@ -272,6 +275,7 @@ pub struct AppState {
     pub scan_adjust: Adjustments,
     /// Adjustments copied from a frame, to paste onto others.
     pub clipboard: Option<Adjustments>,
+    pub export: ExportSettings,
     /// The device whose capabilities the settings were last fitted to.
     settings_device: Option<DeviceId>,
 }
@@ -301,6 +305,7 @@ impl Default for AppState {
             film_base: None,
             scan_adjust: Adjustments::default(),
             clipboard: None,
+            export: ExportSettings::default(),
             settings_device: None,
         }
     }
@@ -756,6 +761,77 @@ impl AppState {
 
     /// Save every frame as its own TIFF, numbered after `path`.
     pub fn start_save_frames(&mut self, path: std::path::PathBuf) -> Option<Command> {
+        let targets = (0..self.crop.frames.len())
+            .map(|n| scan_core::export::numbered(&path, n))
+            .collect();
+        self.save_frames(targets, export::FrameFormat::Tiff, None)
+    }
+
+    /// Why the frames can't be exported with the Export step's settings: nothing stops
+    /// them when empty.
+    pub fn export_problems(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        if self.result.is_none() {
+            problems.push("Scan the film first".into());
+        } else if self.crop.frames.is_empty() {
+            problems.push("Find the frames in the Crop step first".into());
+        }
+        if self.export.folder.is_none() {
+            problems.push("Choose a folder to export to".into());
+        }
+        problems.extend(self.export.prefix_problem());
+        if self.export.write_metadata {
+            problems.extend(self.export.metadata.validate());
+        }
+        problems
+    }
+
+    /// Every file an export would write, the frames' then the metadata's.
+    pub fn export_paths(&self) -> Vec<std::path::PathBuf> {
+        let Some(folder) = &self.export.folder else {
+            return Vec::new();
+        };
+        let count = self.crop.frames.len();
+        let mut paths: Vec<_> = (0..count)
+            .map(|n| self.export.frame_path(folder, n, count))
+            .collect();
+        if self.export.write_metadata {
+            paths.push(folder.join(export::METADATA_FILE));
+        }
+        paths
+    }
+
+    /// Fill in the roll's film from the Invert step's profile, unless it was already filled
+    /// in from that profile (and perhaps edited since). Film not inverted has no profile.
+    pub fn fill_export_film(&mut self) {
+        let stock = self.invert.stock;
+        if self.film().is_some() && self.export.film_from != Some(stock.id) {
+            self.export.metadata.fill_film(stock);
+            self.export.film_from = Some(stock.id);
+        }
+    }
+
+    /// Export every frame into the Export step's folder, with the metadata if asked.
+    pub fn start_export(&mut self) -> Option<Command> {
+        let problems = self.export_problems();
+        if !problems.is_empty() {
+            self.error = Some(problems.join("; "));
+            return None;
+        }
+        let mut targets = self.export_paths();
+        let metadata = self.export.write_metadata.then(|| {
+            let path = targets.pop().expect("the metadata's path");
+            (path, self.export.metadata.to_yaml())
+        });
+        self.save_frames(targets, self.export.format, metadata)
+    }
+
+    fn save_frames(
+        &mut self,
+        targets: Vec<std::path::PathBuf>,
+        format: export::FrameFormat,
+        metadata: Option<(std::path::PathBuf, String)>,
+    ) -> Option<Command> {
         if self.is_busy() || self.crop.frames.is_empty() {
             return None;
         }
@@ -773,10 +849,12 @@ impl AppState {
                 .crop
                 .frames
                 .iter()
-                .map(|f| (f.rect, f.adjust.clone()))
+                .zip(targets)
+                .map(|(f, target)| (f.rect, f.adjust.clone(), target))
                 .collect(),
             quarter_turns: self.quarter_turns,
-            path,
+            format,
+            metadata,
         })
     }
 
@@ -1795,6 +1873,76 @@ mod tests {
             panic!("expected save");
         };
         assert_eq!(adjust.saturation, 0.2);
+    }
+
+    #[test]
+    fn export_saves_every_frame_with_the_publishers_metadata() {
+        let mut state = film_with_frames();
+        assert!(state.export_problems().iter().any(|p| p.contains("folder")));
+        assert!(state.start_export().is_none());
+        assert!(
+            state
+                .error
+                .take()
+                .unwrap()
+                .contains("Roll name is required")
+        );
+
+        state.export.folder = Some("out".into());
+        state.fill_export_film();
+        let stock = state.invert.stock;
+        let meta = &mut state.export.metadata;
+        assert_eq!(
+            (&*meta.manufacturer, &*meta.iso),
+            (stock.manufacturer, "200")
+        );
+        // Filling in again from the same profile keeps what was typed since.
+        meta.stock = "Gold".into();
+        state.fill_export_film();
+        let meta = &mut state.export.metadata;
+        assert_eq!(meta.stock, "Gold");
+        meta.name = "Halloween".into();
+        meta.date_captured = "10/31/2026".into();
+        meta.camera_make = "Nikon".into();
+        meta.camera_model = "FM2".into();
+        assert!(
+            state.export_problems().is_empty(),
+            "{:?}",
+            state.export_problems()
+        );
+
+        let out = std::path::Path::new("out");
+        assert_eq!(state.export_paths().len(), 13);
+        let Some(Command::SaveFrames {
+            frames,
+            format,
+            metadata,
+            ..
+        }) = state.start_export()
+        else {
+            panic!("expected an export");
+        };
+        assert_eq!(format, export::FrameFormat::Jpeg(95));
+        assert_eq!(frames.len(), 12);
+        assert_eq!(frames[11].2, out.join("roll_12.jpg"));
+        let (path, text) = metadata.unwrap();
+        assert_eq!(path, out.join(export::METADATA_FILE));
+        assert!(
+            text.contains(
+                "  name: \"Halloween\"
+"
+            ),
+            "{text}"
+        );
+
+        // Without metadata, nothing about the roll is needed.
+        state.activity = Activity::Idle;
+        state.export.write_metadata = false;
+        state.export.metadata = Default::default();
+        assert_eq!(state.export_paths().len(), 12);
+        let Some(Command::SaveFrames { metadata: None, .. }) = state.start_export() else {
+            panic!("expected an export without metadata");
+        };
     }
 
     #[test]

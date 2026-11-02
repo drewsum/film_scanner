@@ -11,10 +11,11 @@ The goal is one GUI that covers the whole workflow:
 3. **Invert**: turn negatives into positives using film-stock profiles (orange-mask removal)
 4. **Adjust**: edit each frame on its own: color, levels, curves, selective color, grain
    reduction, sharpening
-5. **Export**: batch export with metadata
+5. **Export**: save the roll's frames into a folder, with the metadata
+   [film_roll_publisher](https://github.com/drewsum/film_roll_publisher) uploads them with
 
-> **Status:** early development. Scanning, cropping, inverting color negatives and editing
-> each frame work; Export is a placeholder. See the [roadmap issue](https://github.com/drewsum/film_scanner/issues/1).
+> **Status:** early development. Scanning, cropping, inverting color negatives, editing
+> each frame and exporting the roll work. See the [roadmap issue](https://github.com/drewsum/film_scanner/issues/1).
 
 ## Scanner support
 
@@ -192,6 +193,31 @@ Each frame's edits are kept through a new scan of the same film (they follow the
 detection finds in their place), can be copied to other frames, and are saved with it by
 *Save frames as TIFF*. How it all works is in [docs/editing.md](docs/editing.md).
 
+## Exporting a roll
+
+The **Export** step saves every frame, each with its own edits and turn, into one folder
+as `roll180_01.jpg`, `roll180_02.jpg`, ... in the Crop step's frame order: *File names* sets
+how they start (`roll` by default), and shows the names it will give.
+JPEG (with a quality) and 8-bit PNG are what
+[film_roll_publisher](https://github.com/drewsum/film_roll_publisher) uploads; 16-bit TIFF
+is there for archiving. Files already in the folder are pointed out before they're
+replaced.
+
+Tick *Write metadata.yml for film_roll_publisher* to save the roll's details next to the
+frames, in the publisher's format 0:
+
+- **Roll:** name (the Immich album), description, date captured, date scanned (today by
+  default), public, and GPS.
+- **Film:** filled in from the Invert step's film profile (Kodak, Kodacolor, 200), and
+  editable for film without one; development notes.
+- **Camera:** make, model, lens, f-number, focal length, flash and filters. These are
+  remembered for the next roll, with the folder and format.
+
+The app checks what the publisher checks before writing anything: the required fields,
+MM/DD/YYYY dates, a whole-number ISO, and one f-number and focal length rather than a
+range. Then run `rollpublisher` in the export folder. Uploading from the app itself is
+[issue #23](https://github.com/drewsum/film_scanner/issues/23).
+
 ## Building
 
 Requires Rust 1.95+ (`rustup` recommended). On Windows, the MSVC toolchain and the Visual
@@ -252,7 +278,7 @@ cargo test -p scan-wia -- --ignored --nocapture
 - `crates/scan-wia`: Windows WIA backend
 - `crates/scan-epson`: native USB backend for the Epson Perfection V500 (Windows)
 - `crates/scan-sane`: SANE backend (Linux, macOS)
-- `crates/app`: the `film-scanner` egui application
+- `crates/app`: the `film-scanner` egui application, and the Export step's `metadata.yml`
 
 ## License
 

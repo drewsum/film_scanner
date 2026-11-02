@@ -5,6 +5,7 @@
 
 mod crop;
 mod edit;
+mod export;
 mod state;
 mod ui;
 mod view;

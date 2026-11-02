@@ -1,11 +1,14 @@
 //! Background thread that owns scanner access, so device I/O never blocks the UI.
 
 use std::borrow::Cow;
-use std::path::PathBuf;
+use std::fs::File;
+use std::io::BufWriter;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 
+use scan_core::image::codecs::jpeg::JpegEncoder;
 use scan_core::image::{DynamicImage, ImageFormat};
 use scan_core::{
     CancelToken, Capabilities, DeviceInfo, DeviceRegistry, ProgressSink, ScanError, ScanRequest,
@@ -16,6 +19,7 @@ use scan_process::{
     DetectParams, DustParams, DustRemoval, ExposureMerge, FrameDetection, FrameRect,
 };
 
+use crate::export::FrameFormat;
 use crate::state::Film;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,15 +85,16 @@ pub enum Command {
     /// Save `frames` cut out of the primary image (or of `merged` or `cleaned`, as for
     /// [`Command::Save`]), straightened, inverted (when `film` is given) and edited with
     /// their own adjustments, then turned (`quarter_turns`, then each frame's own), each to
-    /// a file numbered after `path`.
+    /// its own file in `format`. Then write `metadata`'s text to its file, when given.
     SaveFrames {
         result: Arc<ScanResult>,
         merged: Option<Arc<ExposureMerge>>,
         cleaned: Option<Arc<DustRemoval>>,
         film: Option<Film>,
-        frames: Vec<(FrameRect, Adjustments)>,
+        frames: Vec<(FrameRect, Adjustments, PathBuf)>,
         quarter_turns: u8,
-        path: PathBuf,
+        format: FrameFormat,
+        metadata: Option<(PathBuf, String)>,
     },
 }
 
@@ -316,23 +321,31 @@ fn run(
                 film,
                 frames,
                 quarter_turns,
-                path,
+                format,
+                metadata,
             } => {
                 let image = processed(&result, &merged, &cleaned);
                 let saved = frames
-                    .iter()
-                    .enumerate()
-                    .map(|(n, (frame, adj))| {
-                        let crop = scan_process::crop_frame(image, result.dpi, result.area, frame);
-                        let crop = developed(&crop, result.gamma, film.as_ref(), adj);
-                        let target = export::numbered(&path, n);
+                    .into_iter()
+                    .map(|(frame, adj, target)| {
+                        let crop = scan_process::crop_frame(image, result.dpi, result.area, &frame);
+                        let crop = developed(&crop, result.gamma, film.as_ref(), &adj);
                         let turns = (quarter_turns + adj.quarter_turns) % 4;
-                        adjust::orient(&crop, turns, adj.mirror)
-                            .save_with_format(&target, ImageFormat::Tiff)
+                        save_frame(&adjust::orient(&crop, turns, adj.mirror), format, &target)
+                            .map_err(|e| format!("{}: {e}", target.display()))
                             .map(|()| target)
-                            .map_err(|e| e.to_string())
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>, _>>();
+                let saved = saved.and_then(|mut written| match metadata {
+                    None => Ok(written),
+                    Some((path, text)) => match std::fs::write(&path, text) {
+                        Ok(()) => {
+                            written.push(path);
+                            Ok(written)
+                        }
+                        Err(e) => Err(format!("{}: {e}", path.display())),
+                    },
+                });
                 send(Event::Saved(saved));
             }
         }
@@ -353,6 +366,24 @@ fn developed<'a>(
     }
     let positive = adjust::develop(image, gamma, inverter.as_ref(), adjust, 1.0);
     Cow::Owned(DynamicImage::ImageRgb16(positive))
+}
+
+/// Write `image` (16-bit) to `path` in `format`, as 8 bits for JPEG and PNG.
+fn save_frame(
+    image: &DynamicImage,
+    format: FrameFormat,
+    path: &Path,
+) -> Result<(), scan_core::image::ImageError> {
+    match format {
+        FrameFormat::Jpeg(quality) => {
+            let file = BufWriter::new(File::create(path)?);
+            JpegEncoder::new_with_quality(file, quality).encode_image(&image.to_rgb8())
+        }
+        FrameFormat::Png => {
+            DynamicImage::ImageRgb8(image.to_rgb8()).save_with_format(path, ImageFormat::Png)
+        }
+        FrameFormat::Tiff => image.save_with_format(path, ImageFormat::Tiff),
+    }
 }
 
 /// The image to save: the dust-cleaned one, else the merged exposures, else the scan's
@@ -479,13 +510,21 @@ mod tests {
             printing: Default::default(),
         };
         worker.send(Command::SaveFrames {
-            result,
+            result: result.clone(),
             merged: None,
             cleaned: None,
             film: Some(film),
-            frames: vec![(frames[0], Adjustments::default()), (frames[1], turned)],
+            frames: vec![
+                (
+                    frames[0],
+                    Adjustments::default(),
+                    dir.path().join("roll_01.tif"),
+                ),
+                (frames[1], turned, dir.path().join("roll_02.tif")),
+            ],
             quarter_turns: 1,
-            path: dir.path().join("roll.tif"),
+            format: FrameFormat::Tiff,
+            metadata: None,
         });
         let Event::Saved(Ok(paths)) = next(&worker) else {
             panic!("expected frames saved")
@@ -503,6 +542,36 @@ mod tests {
         assert_eq!((saved.width(), saved.height()), (px(h), px(w)));
         let upright = scan_core::image::open(&paths[1]).unwrap();
         assert_eq!((upright.width(), upright.height()), (px(w), px(h)));
+
+        // Exported for the publisher: 8-bit JPEG, then the metadata.
+        let (jpeg, yaml) = (dir.path().join("r_1.jpg"), dir.path().join("metadata.yml"));
+        worker.send(Command::SaveFrames {
+            result,
+            merged: None,
+            cleaned: None,
+            film: Some(film),
+            frames: vec![(frames[0], Adjustments::default(), jpeg.clone())],
+            quarter_turns: 0,
+            format: FrameFormat::Jpeg(90),
+            metadata: Some((
+                yaml.clone(),
+                "format: 0
+"
+                .into(),
+            )),
+        });
+        let Event::Saved(Ok(paths)) = next(&worker) else {
+            panic!("expected the export")
+        };
+        assert_eq!(paths, [jpeg.clone(), yaml.clone()]);
+        let saved = scan_core::image::open(&jpeg).unwrap();
+        assert!(matches!(saved, DynamicImage::ImageRgb8(_)));
+        assert_eq!((saved.width(), saved.height()), (px(w), px(h)));
+        assert_eq!(
+            std::fs::read_to_string(&yaml).unwrap(),
+            "format: 0
+"
+        );
     }
 
     #[test]
