@@ -15,9 +15,9 @@ const TURN_HANDLE: f32 = 24.0;
 /// Frames are no smaller than this, in millimetres.
 const MIN_SIZE_MM: f32 = 2.0;
 
-const FRAME_COLOUR: Color32 = Color32::from_rgb(80, 220, 120);
-const CHECK_COLOUR: Color32 = Color32::from_rgb(255, 190, 40);
-const SELECTED_COLOUR: Color32 = Color32::from_rgb(90, 170, 255);
+const FRAME_COLOR: Color32 = Color32::from_rgb(80, 220, 120);
+const CHECK_COLOR: Color32 = Color32::from_rgb(255, 190, 40);
+const SELECTED_COLOR: Color32 = Color32::from_rgb(90, 170, 255);
 
 /// Where on a frame the pointer holds it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -251,16 +251,16 @@ impl CropEditor {
                 _ => frame.rect,
             };
             let is_selected = selected == Some(i);
-            let colour = if is_selected {
-                SELECTED_COLOUR
+            let color = if is_selected {
+                SELECTED_COLOR
             } else if frame.check {
-                CHECK_COLOUR
+                CHECK_COLOR
             } else {
-                FRAME_COLOUR
+                FRAME_COLOR
             };
             let corners: Vec<Pos2> = rect.corners().iter().map(|&c| view.to_screen(c)).collect();
             let width = if is_selected { 2.5 } else { 1.5 };
-            painter.add(Shape::closed_line(corners, Stroke::new(width, colour)));
+            painter.add(Shape::closed_line(corners, Stroke::new(width, color)));
 
             let centre = view.to_screen((rect.cx_mm, rect.cy_mm));
             let label = if frame.check {
@@ -274,22 +274,22 @@ impl CropEditor {
                 Align2::CENTER_CENTER,
                 label,
                 FontId::proportional(14.0),
-                colour,
+                color,
             );
 
             if is_selected {
                 let (handles, (edge, turn)) = handles(&rect, view);
-                painter.line_segment([edge, turn], Stroke::new(1.5, colour));
+                painter.line_segment([edge, turn], Stroke::new(1.5, color));
                 for (grip, p) in handles {
                     if grip == Grip::Turn {
-                        painter.circle(p, 5.0, Color32::WHITE, Stroke::new(1.5, colour));
+                        painter.circle(p, 5.0, Color32::WHITE, Stroke::new(1.5, color));
                     } else {
                         let square = egui::Rect::from_center_size(p, egui::vec2(8.0, 8.0));
                         painter.rect_filled(square, 1.0, Color32::WHITE);
                         painter.rect_stroke(
                             square,
                             1.0,
-                            Stroke::new(1.5, colour),
+                            Stroke::new(1.5, color),
                             egui::StrokeKind::Middle,
                         );
                     }

@@ -31,7 +31,7 @@ impl From<&FlatbedPlan> for Resample {
     }
 }
 
-/// Decode an 8-bit pixel-interleaved RGB read into the planned image: realign the colour
+/// Decode an 8-bit pixel-interleaved RGB read into the planned image: realign the color
 /// rows, crop to the area and box-filter down to the requested resolution.
 ///
 /// Output row `j` takes blue from raw line `j`, green from `j + skew` and red from
@@ -67,7 +67,7 @@ pub fn rgb16(raw: &[u8], layout: RawLayout, out: Resample) -> Rgb16Image {
     )
 }
 
-/// Decode an infrared read: all three CCD rows see the infrared, so realign them like colour
+/// Decode an infrared read: all three CCD rows see the infrared, so realign them like color
 /// and average them into one linear plane.
 pub fn infrared(raw: &[u8], layout: RawLayout, out: Resample) -> Gray16Image {
     let rgb: Rgb16Image = resample(

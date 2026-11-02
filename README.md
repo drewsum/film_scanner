@@ -9,11 +9,12 @@ The goal is one GUI that covers the whole workflow:
    (dust/scratch removal) and multi-exposure passes
 2. **Crop**: automatically detect frames on a strip, remove borders and straighten them
 3. **Invert**: turn negatives into positives using film-stock profiles (orange-mask removal)
-4. **Adjust**: colour correction: white balance, levels, curves
+4. **Adjust**: edit each frame on its own: color, levels, curves, selective color, grain
+   reduction, sharpening
 5. **Export**: batch export with metadata
 
-> **Status:** early development. Scanning, cropping and inverting colour negatives work;
-> Adjust and Export are placeholders. See the [roadmap issue](https://github.com/drewsum/film_scanner/issues/1).
+> **Status:** early development. Scanning, cropping, inverting color negatives and editing
+> each frame work; Export is a placeholder. See the [roadmap issue](https://github.com/drewsum/film_scanner/issues/1).
 
 ## Scanner support
 
@@ -24,7 +25,7 @@ The goal is one GUI that covers the whole workflow:
 | Native Epson V500 over USB | Windows | Flatbed and film, up to 6400 dpi, 16-bit, infrared and multi-exposure |
 | SANE | Linux/macOS | Flatbed and film with any SANE driver (see below). Tested with SANE's simulated scanner |
 
-The Epson V500's WIA driver only exposes the flatbed at up to 1200 dpi in 8-bit colour, with
+The Epson V500's WIA driver only exposes the flatbed at up to 1200 dpi in 8-bit color, with
 no transparency unit and no infrared, hence the native backend.
 
 ## SANE (Linux and macOS)
@@ -43,7 +44,7 @@ simply lists no SANE scanners. Set `FILM_SCANNER_LIBSANE` to a path to load it f
 somewhere unusual.
 
 The backend reads SANE's standard options: the source (flatbed, or a transparency unit or
-film adapter, by name; document feeders are skipped), colour mode, bit depth, resolution and
+film adapter, by name; document feeders are skipped), color mode, bit depth, resolution and
 scan area. SANE has no standard options for infrared or exposure, so SANE scans are a single
 pass without infrared. The code is in `crates/scan-sane`.
 
@@ -64,7 +65,7 @@ The merge works in linear light (the scan's tone curve is undone first):
    the first pass's where neither is noisy or clipped. It is rarely exactly 2x.
 3. Where the brighter pass is well short of clipping, it replaces the first, scaled back by its
    gain. Its weight fades out smoothly as it nears clipping, the same for all channels of a
-   pixel, so there is no seam and no colour shift.
+   pixel, so there is no seam and no color shift.
 
 The Result panel shows the measured exposure and how much of the image came from the brighter
 pass; *Merge exposures* turns the merge off to compare. Dust removal and *Save as TIFF* use the
@@ -115,7 +116,7 @@ such as the V500's two strips of six:
    bright areas of the scan. Their shape says whether they run down or across the scan. Their
    long edges are found every millimetre and fitted with lines, which give each strip's
    exact angle. That angle straightens its frames.
-2. **Film base.** The bare film between the perforations and the frames gives the colour of
+2. **Film base.** The bare film between the perforations and the frames gives the color of
    unexposed film, which is also what lies between frames.
 3. **Frames.** Cameras advance the film by a nearly fixed distance (38 mm on 35 mm film), so
    a row of frames at one spacing is fitted to the whole strip: the one whose gaps look most
@@ -133,6 +134,9 @@ handle to turn it. The side panel sets the size and angle exactly, and adds or d
 found on a preview fit the full scan of the same film. Once edited, a new scan doesn't
 replace them.
 
+*Reverse order* numbers the frames from the other end of the film, for cameras that wind it
+the other way. It stays on for later scans and detections, and each frame keeps its edits.
+
 *Save frames as TIFF* saves each frame straightened, at the scan's bit depth, as
 `<name>_01.tif`, `<name>_02.tif` and so on. It uses the cleaned and merged image when those
 are on.
@@ -146,7 +150,7 @@ can be added by hand.
 
 ## Inverting negatives: film-stock profiles
 
-The **Invert** step turns colour negatives into positives with a profile of the film stock,
+The **Invert** step turns color negatives into positives with a profile of the film stock,
 like SilverFast's NegaFix. Profiles are built from the manufacturer's published data: each
 layer's characteristic curve, read exactly from the vector graphics of the datasheet's PDF, is
 run backwards to recover the light that exposed it. That is what keeps greys grey from the
@@ -159,16 +163,34 @@ the bare film base, which frame detection measures on every film scan.
 | Kodak Gold 100 | Its own datasheet, E-7022 (2007 edition) |
 | Kodak Gold 200 | Its own datasheet, E-7022 (2016) |
 
-The step has the film stock, exposure and colour balance in stops (like a photofinisher's
-printer), contrast, and *Print* or *Colorimetric* colour. *Auto* balances the roll as a
+The step has the film stock, exposure and color balance in stops (like a photofinisher's
+printer), contrast, and *Print* or *Colorimetric* color. *Auto* balances the roll as a
 printer does: each frame's average is taken as grey, and the roll gets the median of the
 frames' corrections. The view, *Save as TIFF* and *Save frames as TIFF* all give positives
-(16-bit sRGB) while *Invert colour negative* is on.
+(16-bit sRGB) while *Invert color negative* is on.
 
 How profiles work, and how to add a stock, is in
 [docs/film-profiles.md](docs/film-profiles.md). `cargo run -p scan-film --example profile`
 prints a profile, and `cargo run --release -p scan-process --example negative_report --
 SCAN.tif` measures a saved (uninverted) film scan against it.
+
+## Editing frames
+
+The **Adjust** step edits every frame on its own, with the tools SilverFast has for a
+frame: Auto, grey, black and white pickers, histogram and levels, curves, color balance,
+brightness, contrast and saturation, selective color, grain and color noise reduction,
+unsharp masking, and turning and mirroring. Pick a frame (or the whole scan) from the list;
+the view shows it cut out, straightened and developed.
+
+The roll's printing in the Invert step stays the starting point. A frame's exposure and
+color balance are added to it **in the film's scene light, before the print curve**, the
+way a photofinisher corrects each frame's printer lights, so a frame's color correction
+uses the film's profile just like the roll's does. Its *Auto* balances the frame as the
+printer would on its own, then stretches it to full range. The rest edits the positive.
+
+Each frame's edits are kept through a new scan of the same film (they follow the frame
+detection finds in their place), can be copied to other frames, and are saved with it by
+*Save frames as TIFF*. How it all works is in [docs/editing.md](docs/editing.md).
 
 ## Building
 
@@ -224,8 +246,8 @@ cargo test -p scan-wia -- --ignored --nocapture
 - `crates/scan-film`: film-stock profiles from manufacturers' datasheets, and the model that
   inverts negatives with them (no dependencies)
 - `crates/scan-process`: processing of scans, independent of the scanner: multi-exposure
-  merging, infrared dust and scratch removal, frame detection and cropping, and inverting
-  negatives image by image
+  merging, infrared dust and scratch removal, frame detection and cropping, inverting
+  negatives image by image, and editing frames
 - `tools/film-curves`: reads a datasheet's curves out of its PDF into `scan-film`'s tables
 - `crates/scan-wia`: Windows WIA backend
 - `crates/scan-epson`: native USB backend for the Epson Perfection V500 (Windows)

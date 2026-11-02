@@ -70,7 +70,7 @@ struct SourceSetup {
     source: ScanSource,
     /// The `source` option's value, if the driver has one.
     name: Option<String>,
-    /// The `mode` option's value for each colour mode.
+    /// The `mode` option's value for each color mode.
     color: Option<String>,
     gray: Option<String>,
     /// The geometry options' minimum corner, in mm, if the driver takes an area in mm.
@@ -287,7 +287,7 @@ impl SaneDevice {
             if let Some(name) = &name {
                 device.set(names::SOURCE, Value::String(name.clone()))?;
             }
-            // Depths can depend on the mode; colour is the one that matters for film.
+            // Depths can depend on the mode; color is the one that matters for film.
             if let Some(color) = device
                 .options
                 .get(names::MODE)

@@ -108,7 +108,7 @@ Captures (in `target/captures`, not committed) are WIA scans made with
 | 30, 31 | SilverFast, one frame at 400 and 800 ppi | [Film](#film-transparency-unit) |
 | 33 | the same frame at "3,200 ppi" | read at 1,600 dpi; SilverFast scales up |
 | 35, 36 | 1,600 ppi, a frame on the other strip and one further along | x and y positions |
-| 38 | 800 ppi with iSRD | colour pass at 200 dpi hardware, then infrared at 800 |
+| 38 | 800 ppi with iSRD | color pass at 200 dpi hardware, then infrared at 800 |
 | 39 | 400 ppi with multi-exposure | two whole sessions; the second exposes 2× |
 
 ### Scan parameters
@@ -257,7 +257,7 @@ move's step count. On hardware, against WIA's scans of the same areas (mean abso
 at the top of the bed (1 line offset).
 
 In the app, the V500 appears as **EPSON Perfection V500 (epson)** (`scan_epson::EpsonBackend`):
-flatbed, 8- or 16-bit colour, 50–400 dpi, any area of the 215.9 × 297.18 mm bed; and film,
+flatbed, 8- or 16-bit color, 50–400 dpi, any area of the 215.9 × 297.18 mm bed; and film,
 8- or 16-bit, 100–1,600 dpi, with an optional second pass at +1 EV. The app relaunches
 itself elevated once at startup when a V500 is attached (`--no-elevate` skips this). Each scan
 stops `stisvc` and starts it again afterwards, so WIA stays usable between scans. A scanner that
@@ -345,31 +345,31 @@ the normal one in linear terms.
 
 ### Infrared
 
-iSRD (captures 13 and 38) runs a whole second session after the colour one, with the infrared
+iSRD (captures 13 and 38) runs a whole second session after the color one, with the infrared
 LED: lamp `06` for the calibration reads, `05` off for the dark reads and `04` for the image read.
 
-1. Opening as for colour, then `1e 25 02` and a fast move of **535 steps of the lamp alone**
+1. Opening as for color, then `1e 25 02` and a fast move of **535 steps of the lamp alone**
    (`1e 86` goes from `00 00 00 00` to `00 00 17 06`): the LED sits that far along the lamp
    unit from the visible lamp. Without the move the window reads are dark. Then `1e 25 00` and
-   the CCD's 932-step move, and the window read and move back as for colour (no `1e 8a`, no
+   the CCD's 932-step move, and the window read and move back as for color (no `1e 8a`, no
    saturated read).
 2. `1e 11 01` reads at 2,400 x units per inch: a gain search, then a 490-line read during which
    neither unit moves, between lamp and CCD moves that cancel out. SilverFast probably measures
-   the LED's alignment from it: its infrared read starts 8 px earlier than the colour one in
+   the LED's alignment from it: its infrared read starts 8 px earlier than the color one in
    capture 38, and 1 later but 16 wider in capture 13. `scan_epson::film` leaves it out and
    shifts its infrared read by a fixed 18/2,400 in (6 px at 800 dpi). That is measured on this
    V500, and puts the two planes within a pixel of each other in x and 2 px (at 1,600 dpi) in y.
 3. `1e 25 03`, `1e 11 03` (`02` at 1,600 dpi). Exposure `1e 22` is zero throughout: the line
    time `1e 21` sets it (`60 18` at 800 dpi, `a8 21` at 1,600). Gains start at 0 and aim for a
    window mean of about 210 (`0f 16 14` at 800 dpi). The offsets, white and dark reads follow
-   as for colour, with the LED left on for the masked-strip reads.
-4. Flat tone curves, the move (its lead is 494, the colour lead + 256 at 800 dpi) and the
+   as for color, with the LED left on for the masked-strip reads.
+4. Flat tone curves, the move (its lead is 494, the color lead + 256 at 800 dpi) and the
    image read, at one motor speed: `1e 01` mode `7e 00 00 00 00 00 08 00` with a one-entry
    period table (130 at 800 dpi, 359 at 1,600; a line takes period × 16 × steps per line, the
    line time).
 
 The image read is an ordinary 3-channel 16-bit read. All three CCD rows see the infrared, with
-the same line skew as in colour, so `decode::infrared` aligns and averages them into one linear
+the same line skew as in color, so `decode::infrared` aligns and averages them into one linear
 plane. Dust and scratches are sharp dark specks on a bright, low-contrast image (the dyes are
 nearly transparent to infrared). That gives the defect mask for dust removal.
 

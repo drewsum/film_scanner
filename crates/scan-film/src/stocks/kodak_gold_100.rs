@@ -1,4 +1,4 @@
-//! Kodak Gold 100: ISO 100 daylight colour negative film for C-41 (Kodak film code GA),
+//! Kodak Gold 100: ISO 100 daylight color negative film for C-41 (Kodak film code GA),
 //! discontinued; profiled for scanning old negatives.
 //!
 //! # Where the data comes from
@@ -31,7 +31,7 @@ pub const KODAK_GOLD_100: FilmStock = FilmStock {
     manufacturer: "Kodak",
     name: "Gold 100",
     iso: 100,
-    kind: FilmKind::ColourNegative,
+    kind: FilmKind::ColorNegative,
     sheet: &kodak_e7022_2007_gold_100::SHEET,
     provenance: "Kodak's own datasheet for Gold 100 (publication E-7022, 2007 edition, which \
                  covers Gold 100 and 200; the two share its spectral data). Discontinued \

@@ -13,7 +13,7 @@
 //!    rarely exactly 2^EV.
 //! 3. Where it isn't near clipping, it replaces the merge, scaled back by its gain. Its weight
 //!    fades out smoothly as it nears clipping, the same for every channel of a pixel so
-//!    colours don't shift.
+//!    colors don't shift.
 //!
 //! The merge keeps the shortest pass's scale and encoding, at 16 bits.
 
@@ -47,7 +47,7 @@ const CLIPPED: u16 = 62_000;
 pub enum MergeError {
     #[error("a merge needs at least two exposure passes")]
     TooFewPasses,
-    #[error("the exposure passes differ in size or colour")]
+    #[error("the exposure passes differ in size or color")]
     Mismatch,
     #[error(
         "the {ev:+} EV pass shares too few unclipped pixels with the shorter ones to measure \
@@ -94,16 +94,16 @@ pub fn merge_exposures(passes: &[ScanPass], gamma: f32) -> Result<ExposureMerge,
         return Err(MergeError::TooFewPasses);
     }
     let (w, h) = (first.image.width() as usize, first.image.height() as usize);
-    let colour = first.image.color().has_color();
-    let c = if colour { 3 } else { 1 };
+    let color = first.image.color().has_color();
+    let c = if color { 3 } else { 1 };
     if passes.iter().any(|p| {
         (p.image.width() as usize, p.image.height() as usize) != (w, h)
-            || p.image.color().has_color() != colour
+            || p.image.color().has_color() != color
     }) {
         return Err(MergeError::Mismatch);
     }
     let samples = |p: &ScanPass| -> Vec<u16> {
-        if colour {
+        if color {
             p.image.to_rgb16().into_raw()
         } else {
             p.image.to_luma16().into_raw()
@@ -136,7 +136,7 @@ pub fn merge_exposures(passes: &[ScanPass], gamma: f32) -> Result<ExposureMerge,
     }
 
     let (w, h) = (w as u32, h as u32);
-    let image = if colour {
+    let image = if color {
         DynamicImage::ImageRgb16(ImageBuffer::from_raw(w, h, merged).expect("size matches"))
     } else {
         DynamicImage::ImageLuma16(ImageBuffer::from_raw(w, h, merged).expect("size matches"))
@@ -434,7 +434,7 @@ mod tests {
     const GAMMA: f32 = 1.8;
     const W: u32 = 400;
     const H: u32 = 200;
-    /// Per-channel colour of the test scene, like the orange cast of a negative.
+    /// Per-channel color of the test scene, like the orange cast of a negative.
     const TINT: [f32; 3] = [1.0, 0.75, 0.55];
 
     /// A reproducible standard normal sample for `(seed, i)`.
@@ -556,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn no_seam_or_colour_shift() {
+    fn no_seam_or_color_shift() {
         // Bands across the ramp, through the blend (about 250 to 350) and into where only the
         // normal pass is used: none is brighter or darker than the scene beyond noise.
         let merge = merge_exposures(&two_passes(), GAMMA).unwrap();

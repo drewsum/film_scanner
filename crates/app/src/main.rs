@@ -4,6 +4,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod crop;
+mod edit;
 mod state;
 mod ui;
 mod view;

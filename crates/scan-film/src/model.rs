@@ -1,11 +1,11 @@
-//! A colour negative film as its datasheet describes it, run forwards (scene to negative)
+//! A color negative film as its datasheet describes it, run forwards (scene to negative)
 //! and backwards (negative to scene).
 //!
 //! Exposure is measured as `e`, scene-linear light relative to a grey card: a grey card
 //! (18% reflectance) exposed as the film's speed asks for is `e = 0.18`, and lands at the
 //! datasheet's Log H ref. Each layer then turns its log exposure into dye, whose density
 //! the characteristic curves give in Status M: the densitometry that sees a negative as
-//! colour print paper does, one dye per channel.
+//! color print paper does, one dye per channel.
 
 use crate::sheet::{Curve, Datasheet};
 use crate::spectral::{self, Mat3, SAMPLES, wavelengths};
@@ -97,8 +97,8 @@ impl Layer {
     }
 }
 
-/// A colour negative film: its three layers, and how its layers' exposures relate to
-/// colour.
+/// A color negative film: its three layers, and how its layers' exposures relate to
+/// color.
 #[derive(Clone, Debug)]
 pub struct FilmModel {
     layers: [Layer; 3],
@@ -162,7 +162,7 @@ pub fn sensitivities(sheet: &Datasheet) -> [[f64; SAMPLES]; 3] {
 }
 
 /// The 3 × 3 matrix taking a film's layer exposures to linear sRGB, fitted by least
-/// squares over a set of surface colours lit by daylight, with white held to white.
+/// squares over a set of surface colors lit by daylight, with white held to white.
 ///
 /// For each surface the layer exposures come from the datasheet's spectral sensitivities
 /// (normalised so that daylight on a white surface exposes every layer equally, as the
@@ -225,7 +225,7 @@ fn fit_row(samples: &[([f64; 3], [f64; 3])], row: usize, sum: f64) -> [f64; 3] {
     [m0, m1, sum - m0 - m1]
 }
 
-/// Smooth surface reflectances of every hue: Gaussian bumps (saturated colours) and dips
+/// Smooth surface reflectances of every hue: Gaussian bumps (saturated colors) and dips
 /// (their complements, the purples among them) across the spectrum at three widths, edges
 /// rising and falling (yellows, oranges, cyans, blues) at two sharpnesses, and greys.
 pub fn training_surfaces() -> Vec<[f64; SAMPLES]> {

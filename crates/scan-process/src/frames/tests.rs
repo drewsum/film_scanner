@@ -389,3 +389,43 @@ fn crops_are_straightened() {
         DynamicImage::ImageLuma8(_)
     ));
 }
+
+#[test]
+fn previews_are_crops_scaled_down() {
+    // As in `crops_are_straightened`: red and green are 1000 x the pixel centres' x and y.
+    let image: ImageBuffer<Rgb<u16>, _> = ImageBuffer::from_fn(300, 300, |x, y| {
+        Rgb([(x * 100 + 50) as u16, (y * 100 + 50) as u16, 7])
+    });
+    let image = DynamicImage::ImageRgb16(image);
+    let area = ScanArea {
+        x_mm: 5.0,
+        ..ScanArea::full(30.0, 30.0)
+    };
+    let frame = FrameRect {
+        cx_mm: 20.0,
+        cy_mm: 15.0,
+        width_mm: 6.0,
+        height_mm: 4.0,
+        angle_deg: 30.0,
+    };
+    // Half size: 127 dpi, 5 pixels per millimetre.
+    let (preview, scale) = preview_frame(&image, 254, area, Some(&frame), 30);
+    assert_eq!(scale, 0.5);
+    let preview = preview.to_rgb16();
+    assert_eq!(preview.dimensions(), (30, 20));
+    for (i, j) in [(2, 2), (27, 2), (15, 10), (6, 17)] {
+        let (x, y) = frame.from_local((i as f32 + 0.5) / 5.0 - 3.0, (j as f32 + 0.5) / 5.0 - 2.0);
+        let p = preview.get_pixel(i, j).0;
+        assert!(
+            (p[0] as f32 - (x - area.x_mm) * 1000.0).abs() < 120.0,
+            "{p:?} at {x}"
+        );
+        assert!((p[1] as f32 - y * 1000.0).abs() < 120.0, "{p:?} at {y}");
+    }
+    // Small enough already: the crop itself.
+    let (full, scale) = preview_frame(&image, 254, area, Some(&frame), 100);
+    assert_eq!((scale, full.width()), (1.0, 60));
+    // The whole scan.
+    let (whole, scale) = preview_frame(&image, 254, area, None, 150);
+    assert_eq!((scale, whole.width()), (0.5, 150));
+}

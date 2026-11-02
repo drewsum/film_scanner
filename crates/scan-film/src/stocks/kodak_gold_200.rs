@@ -1,4 +1,4 @@
-//! Kodak Gold 200: ISO 200 daylight colour negative film for C-41 (Kodak film code GB).
+//! Kodak Gold 200: ISO 200 daylight color negative film for C-41 (Kodak film code GB).
 //!
 //! # Where the data comes from
 //!
@@ -29,7 +29,7 @@ pub const KODAK_GOLD_200: FilmStock = FilmStock {
     manufacturer: "Kodak",
     name: "Gold 200",
     iso: 200,
-    kind: FilmKind::ColourNegative,
+    kind: FilmKind::ColorNegative,
     sheet: &kodak_e7022::SHEET,
     provenance: "Kodak's own datasheet for Gold 200 (publication E-7022, 2016). The film \
                  base is measured on every scan.",

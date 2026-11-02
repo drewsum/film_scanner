@@ -1,7 +1,7 @@
 //! Decoder for in-memory device-independent bitmaps (`WiaImgFmt_MEMORYBMP`).
 //!
 //! A WIA memory bitmap is a `BITMAPINFOHEADER`, an optional palette and the pixel rows, with
-//! no `BITMAPFILEHEADER`. Unlike BMP files it may carry 48-bit colour, and drivers sometimes
+//! no `BITMAPFILEHEADER`. Unlike BMP files it may carry 48-bit color, and drivers sometimes
 //! leave the height or image size as zero, so we decode it ourselves.
 
 use image::{DynamicImage, ImageBuffer, Luma, Rgb};
@@ -23,7 +23,7 @@ fn bad(msg: impl Into<String>) -> ScanError {
     ScanError::Backend(format!("invalid memory bitmap: {}", msg.into()))
 }
 
-/// Decode a memory bitmap of 8 or 16-bit grey, or 24 or 48-bit colour.
+/// Decode a memory bitmap of 8 or 16-bit grey, or 24 or 48-bit color.
 pub fn decode_memory_bmp(data: &[u8]) -> Result<DynamicImage, ScanError> {
     if data.len() < INFO_HEADER_LEN {
         return Err(bad("truncated header"));

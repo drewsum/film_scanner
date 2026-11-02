@@ -71,7 +71,7 @@ pub fn resolutions(valid: &ValidValues) -> Vec<u32> {
     out
 }
 
-/// Bit depths (per channel) available from a colour `WIA_IPA_DEPTH` constraint
+/// Bit depths (per channel) available from a color `WIA_IPA_DEPTH` constraint
 /// (24 = 8-bit RGB, 48 = 16-bit RGB). Unconstrained properties yield nothing, since the
 /// driver then only supports its current depth.
 pub fn color_bit_depths(valid: &ValidValues) -> Vec<BitDepth> {
@@ -88,7 +88,7 @@ pub fn color_bit_depths(valid: &ValidValues) -> Vec<BitDepth> {
     out
 }
 
-/// WIA bits-per-pixel for a colour or grey scan.
+/// WIA bits-per-pixel for a color or grey scan.
 pub fn wia_depth(bit_depth: BitDepth, color: bool) -> i32 {
     let per_channel = bit_depth.bits() as i32;
     if color { per_channel * 3 } else { per_channel }

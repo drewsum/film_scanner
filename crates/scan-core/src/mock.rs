@@ -1,6 +1,6 @@
 //! A virtual scanner that renders synthetic scans, for CI and hardware-free development.
 //!
-//! The transparency source simulates a holder with two vertical 35mm strips of six colour
+//! The transparency source simulates a holder with two vertical 35mm strips of six color
 //! negative frames each: an orange-masked film base, clear sprocket holes, an opaque holder
 //! around the strips, and a handful of dust specks that show up in both the visible and the
 //! infrared channel (as on a real scanner, where film dyes are nearly transparent to infrared).
@@ -30,7 +30,7 @@ pub const FRAME_GAP_MM: f32 = 2.0;
 pub const FRAMES_PER_STRIP: usize = 6;
 pub const FIRST_FRAME_Y_MM: f32 = 3.0;
 
-/// Transmittance of the orange mask of unexposed colour negative film base (R, G, B).
+/// Transmittance of the orange mask of unexposed color negative film base (R, G, B).
 pub const FILM_BASE: [f32; 3] = [0.85, 0.55, 0.33];
 /// The film the frames are shot on.
 pub const FILM: scan_film::FilmStock = scan_film::stocks::KODAK_KODACOLOR_200;
@@ -247,7 +247,7 @@ fn region_at(x: f32, y: f32) -> Region {
     Region::Holder
 }
 
-/// Scene colour (0..1 per channel, 1 a white surface) of the positive image in frame
+/// Scene color (0..1 per channel, 1 a white surface) of the positive image in frame
 /// `index`, at (`u`, `v`) across and down it (0..1). The frame is lit so that a surface of
 /// `s` exposes the film to scene light `0.9 * s`: a white surface reflects 90%.
 pub fn frame_scene(index: usize, u: f32, v: f32) -> [f32; 3] {

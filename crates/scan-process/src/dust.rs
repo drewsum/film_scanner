@@ -1,6 +1,6 @@
 //! Infrared dust and scratch removal, as in Digital ICE and SilverFast iSRD.
 //!
-//! Film dyes are nearly transparent to infrared, so an infrared scan of colour film is a flat,
+//! Film dyes are nearly transparent to infrared, so an infrared scan of color film is a flat,
 //! bright plane in which dust, hairs and scratches show as dark specks: they block infrared
 //! as well as visible light. [`defect_mask`] finds them:
 //!

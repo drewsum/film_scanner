@@ -11,8 +11,8 @@ use crate::stocks;
 /// What kind of film a stock is, which decides how it is inverted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FilmKind {
-    /// Colour negative film for process C-41, with an orange mask.
-    ColourNegative,
+    /// Color negative film for process C-41, with an orange mask.
+    ColorNegative,
 }
 
 /// A film stock the inversion has a profile for.

@@ -1,4 +1,4 @@
-//! Spectral and colour-space arithmetic: the CIE 1931 observer, daylight, linear sRGB.
+//! Spectral and color-space arithmetic: the CIE 1931 observer, daylight, linear sRGB.
 
 /// A 3 × 3 matrix, rows first.
 pub type Mat3 = [[f64; 3]; 3];
@@ -13,7 +13,7 @@ pub fn wavelengths() -> impl Iterator<Item = f64> {
     (0..SAMPLES).map(|i| START_NM + i as f64 * STEP_NM)
 }
 
-/// The CIE 1931 2° standard observer's colour-matching functions x̄, ȳ, z̄ at `nm`.
+/// The CIE 1931 2° standard observer's color-matching functions x̄, ȳ, z̄ at `nm`.
 ///
 /// This is the multi-lobe analytic fit of Wyman, Sloan and Shirley, "Simple Analytic
 /// Approximations to the CIE XYZ Color Matching Functions", Journal of Computer Graphics
@@ -41,7 +41,7 @@ pub fn black_body(nm: f64, kelvin: f64) -> f64 {
     1.0 / (l.powi(5) * ((C2 / (nm * kelvin)).exp() - 1.0))
 }
 
-/// The light colour film is balanced for and its datasheets expose with: photographic
+/// The light color film is balanced for and its datasheets expose with: photographic
 /// daylight, about 5,500 K. Taken as a black body, which the film's three broad
 /// sensitivities can hardly tell from CIE D55.
 pub const DAYLIGHT_K: f64 = 5500.0;
