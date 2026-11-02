@@ -30,6 +30,15 @@ impl Line {
 /// deviations (but at least `min_spread`) of the last fit. `None` with too few points, or if
 /// their `x` hardly varies.
 pub(crate) fn trimmed_line(points: &[(f64, f64)], min_spread: f64) -> Option<Line> {
+    trimmed_line_of(points, min_spread, MIN_POINTS)
+}
+
+/// [`trimmed_line`] of as few as `min_points` points.
+pub(crate) fn trimmed_line_of(
+    points: &[(f64, f64)],
+    min_spread: f64,
+    min_points: f64,
+) -> Option<Line> {
     let mut line: Option<Line> = None;
     for _ in 0..ROUNDS {
         let near = |&&p: &&(f64, f64)| line.is_none_or(|l| l.keeps(p));
@@ -41,7 +50,7 @@ pub(crate) fn trimmed_line(points: &[(f64, f64)], min_spread: f64) -> Option<Lin
             sxx += x * x;
             sxy += x * y;
         }
-        if n < MIN_POINTS {
+        if n < min_points {
             return None;
         }
         let (mx, my) = (sx / n, sy / n);

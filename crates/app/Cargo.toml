@@ -17,7 +17,7 @@ scan-process.workspace = true
 scan-wia.workspace = true
 scan-epson.workspace = true
 scan-sane.workspace = true
-eframe.workspace = true
+eframe = { workspace = true, features = ["persistence"] }
 rfd.workspace = true
 log.workspace = true
 env_logger.workspace = true

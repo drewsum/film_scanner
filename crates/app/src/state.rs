@@ -7,7 +7,7 @@ use scan_core::{
     ScanResult, ScanSource, SourceCapabilities,
 };
 
-use scan_process::{DustRemoval, ExposureMerge};
+use scan_process::{DustRemoval, ExposureMerge, FrameDetection, FrameRect};
 
 use crate::worker::{Command, Event, ScanKind};
 
@@ -75,6 +75,7 @@ pub enum Activity {
     Scanning { kind: ScanKind, progress: f32 },
     MergingExposures,
     RemovingDust,
+    DetectingFrames,
     Saving,
 }
 
@@ -113,6 +114,29 @@ pub struct Cleaned {
 pub struct Merged {
     pub generation: u64,
     pub merge: Arc<ExposureMerge>,
+}
+
+/// A frame to crop out of the scan.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CropFrame {
+    pub rect: FrameRect,
+    /// Detected without either end along the strip showing, so placed from the frame
+    /// spacing alone: worth checking. Cleared when the frame is edited.
+    pub check: bool,
+}
+
+/// The frames on the scan, as detected and edited, in millimetres on the scanner bed: frames
+/// found on a preview stay put on a later scan of the same film.
+#[derive(Clone, Debug, Default)]
+pub struct Crop {
+    pub frames: Vec<CropFrame>,
+    pub selected: Option<usize>,
+    /// The frames were changed by hand, so a new scan doesn't replace them with a detection.
+    pub edited: bool,
+    /// The result generation the frames were last detected on.
+    pub detected: Option<u64>,
+    /// Film strips the last detection found.
+    pub strips: usize,
 }
 
 /// User-chosen scan settings, kept valid for the selected device and source.
@@ -167,6 +191,9 @@ pub struct AppState {
     pub dust: DustSettings,
     /// The latest dust removal; see [`AppState::current_cleaned`].
     pub cleaned: Option<Cleaned>,
+    pub crop: Crop,
+    /// How the scan is turned for viewing and saving, in quarter turns clockwise.
+    pub quarter_turns: u8,
     /// The device whose capabilities the settings were last fitted to.
     settings_device: Option<DeviceId>,
 }
@@ -190,6 +217,8 @@ impl Default for AppState {
             merged: None,
             dust: DustSettings::default(),
             cleaned: None,
+            crop: Crop::default(),
+            quarter_turns: 0,
             settings_device: None,
         }
     }
@@ -345,13 +374,26 @@ impl AppState {
         })
     }
 
+    /// Whether frames are to be detected on the current result: on film scans, unless the
+    /// frames were edited.
+    fn detection_pending(&self) -> bool {
+        self.result.as_ref().is_some_and(|r| {
+            r.source == ScanSource::Transparency
+                && !self.crop.edited
+                && self.crop.detected != Some(self.result_generation)
+        })
+    }
+
     /// Start the next processing step the current result needs with the current settings:
-    /// merging its exposures, then removing dust from the merge (or the primary pass). Call
-    /// after the result or the settings change.
+    /// detecting its frames, merging its exposures, then removing dust from the merge (or
+    /// the primary pass). Call after the result or the settings change.
     pub fn update_processing(&mut self) -> Option<Command> {
         let result = self.result.clone()?;
         if self.is_busy() {
             return None;
+        }
+        if self.detection_pending() {
+            return self.detect(result);
         }
         if self.merge_pending() {
             self.activity = Activity::MergingExposures;
@@ -384,8 +426,108 @@ impl AppState {
             result,
             merged,
             cleaned,
+            quarter_turns: self.quarter_turns,
             path,
         })
+    }
+
+    /// Save every frame as its own TIFF, numbered after `path`.
+    pub fn start_save_frames(&mut self, path: std::path::PathBuf) -> Option<Command> {
+        if self.is_busy() || self.crop.frames.is_empty() {
+            return None;
+        }
+        let result = self.result.clone()?;
+        let merged = self.current_merged().map(|m| m.merge.clone());
+        let cleaned = self.current_cleaned().map(|c| c.removal.clone());
+        self.activity = Activity::Saving;
+        self.status = format!("Saving {} frames...", self.crop.frames.len());
+        Some(Command::SaveFrames {
+            result,
+            merged,
+            cleaned,
+            frames: self.crop.frames.iter().map(|f| f.rect).collect(),
+            quarter_turns: self.quarter_turns,
+            path,
+        })
+    }
+
+    /// Turn the scan a quarter clockwise, or anticlockwise.
+    pub fn turn(&mut self, clockwise: bool) {
+        self.quarter_turns = (self.quarter_turns + if clockwise { 1 } else { 3 }) % 4;
+    }
+
+    fn detect(&mut self, result: Arc<ScanResult>) -> Option<Command> {
+        self.activity = Activity::DetectingFrames;
+        self.status = "Finding frames...".into();
+        Some(Command::DetectFrames {
+            generation: self.result_generation,
+            result,
+        })
+    }
+
+    /// Detect the frames again, replacing any edits.
+    pub fn redetect_frames(&mut self) -> Option<Command> {
+        let result = self.result.clone()?;
+        if self.is_busy() {
+            return None;
+        }
+        self.crop.edited = false;
+        self.detect(result)
+    }
+
+    /// Replace frame `index`'s rectangle, by hand.
+    pub fn edit_frame(&mut self, index: usize, rect: FrameRect) {
+        if let Some(frame) = self.crop.frames.get_mut(index)
+            && frame.rect != rect
+        {
+            *frame = CropFrame { rect, check: false };
+            self.crop.edited = true;
+        }
+    }
+
+    pub fn delete_frame(&mut self, index: usize) {
+        if index < self.crop.frames.len() {
+            self.crop.frames.remove(index);
+            self.crop.edited = true;
+            self.crop.selected = None;
+        }
+    }
+
+    /// Add a frame centred on (x, y) mm and select it. It is shaped like the selected frame,
+    /// or the first, or else is a 35 mm frame along the scan's long side.
+    pub fn add_frame(&mut self, x_mm: f32, y_mm: f32) {
+        let Some(area) = self.result.as_ref().map(|r| r.area) else {
+            return;
+        };
+        let like = self
+            .crop
+            .selected
+            .and_then(|i| self.crop.frames.get(i))
+            .or(self.crop.frames.first());
+        let rect = match like {
+            Some(f) => FrameRect {
+                cx_mm: x_mm,
+                cy_mm: y_mm,
+                ..f.rect
+            },
+            None => {
+                let (w, h) = if area.height_mm >= area.width_mm {
+                    (24.0, 36.0)
+                } else {
+                    (36.0, 24.0)
+                };
+                FrameRect {
+                    cx_mm: x_mm,
+                    cy_mm: y_mm,
+                    width_mm: w,
+                    height_mm: h,
+                    angle_deg: 0.0,
+                }
+            }
+        };
+        self.crop.frames.push(CropFrame { rect, check: false });
+        self.crop.edited = true;
+        self.crop.selected = Some(self.crop.frames.len() - 1);
     }
 
     /// Apply a worker event, returning a follow-up command if one is needed.
@@ -454,6 +596,7 @@ impl AppState {
                         self.result_generation += 1;
                         self.merged = None;
                         self.cleaned = None;
+                        self.crop.selected = None;
                         return self.update_processing();
                     }
                     Err(ScanError::Cancelled) => self.status = "Scan cancelled".into(),
@@ -520,6 +663,31 @@ impl AppState {
                 // The settings or the result may have changed in the meantime.
                 self.update_processing()
             }
+            Event::FramesDetected {
+                generation,
+                detection,
+            } => {
+                self.activity = Activity::Idle;
+                self.status = detection_summary(&detection);
+                // Frames edited while it ran are kept.
+                if generation == self.result_generation && !self.crop.edited {
+                    self.crop = Crop {
+                        frames: detection
+                            .frames
+                            .iter()
+                            .map(|f| CropFrame {
+                                rect: f.rect,
+                                check: f.placed_by_spacing,
+                            })
+                            .collect(),
+                        selected: None,
+                        edited: false,
+                        detected: Some(generation),
+                        strips: detection.strips,
+                    };
+                }
+                self.update_processing()
+            }
             Event::Saved(result) => {
                 self.activity = Activity::Idle;
                 match result {
@@ -533,6 +701,25 @@ impl AppState {
             }
         }
     }
+}
+
+/// A line on what a frame detection found.
+pub fn detection_summary(detection: &FrameDetection) -> String {
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    let mut line = match (detection.frames.len(), detection.strips) {
+        (_, 0) => "No film strips found: add frames by hand".to_owned(),
+        (0, _) => "No frames found on the film: add them by hand".to_owned(),
+        (f, s) => format!("Found {f} frame{} on {s} strip{}", plural(f), plural(s)),
+    };
+    let check = detection
+        .frames
+        .iter()
+        .filter(|f| f.placed_by_spacing)
+        .count();
+    if check > 0 {
+        line += &format!(", {check} placed by their spacing: check them");
+    }
+    line
 }
 
 /// A line on how a merge went: each longer pass's measured exposure and share of the image.
@@ -557,6 +744,167 @@ mod tests {
     use super::*;
     use scan_core::mock::MockBackend;
     use scan_core::{NoProgress, ScannerBackend};
+
+    /// Apply a finished scan, and the frame detection it starts on film; returns the command
+    /// after that.
+    fn scan_done(
+        state: &mut AppState,
+        kind: ScanKind,
+        result: Result<ScanResult, ScanError>,
+    ) -> Option<Command> {
+        let cmd = state.apply(Event::ScanDone { kind, result });
+        detected(state, cmd)
+    }
+
+    /// Run the frame detection `cmd` asks for, if it is one, and apply its outcome.
+    fn detected(state: &mut AppState, cmd: Option<Command>) -> Option<Command> {
+        let Some(Command::DetectFrames { generation, result }) = cmd else {
+            return cmd;
+        };
+        let detection = scan_process::detect_frames(
+            result.primary(),
+            result.gamma,
+            result.dpi,
+            result.area,
+            &Default::default(),
+        );
+        state.apply(Event::FramesDetected {
+            generation,
+            detection,
+        })
+    }
+
+    /// A preview scan, applied; returns the command that follows it.
+    fn preview(state: &mut AppState) -> Option<Command> {
+        let Some(Command::Scan { request, kind, .. }) = state.start_scan(ScanKind::Preview) else {
+            panic!("expected scan command");
+        };
+        let mut dev = MockBackend.open(&MockBackend::device_info()).unwrap();
+        let result = dev.scan(&request, &mut NoProgress);
+        state.apply(Event::ScanDone { kind, result })
+    }
+
+    #[test]
+    fn film_scans_find_their_frames() {
+        let mut state = with_mock_open();
+        let cmd = preview(&mut state);
+        assert!(matches!(
+            cmd,
+            Some(Command::DetectFrames { generation: 1, .. })
+        ));
+        assert_eq!(state.activity, Activity::DetectingFrames);
+        assert!(detected(&mut state, cmd).is_none());
+        assert!(!state.is_busy());
+        assert_eq!(state.crop.frames.len(), 12);
+        assert_eq!((state.crop.detected, state.crop.strips), (Some(1), 2));
+        assert_eq!(state.status, "Found 12 frames on 2 strips");
+        assert!(state.crop.frames.iter().all(|f| !f.check));
+
+        // A detection of an earlier scan is dropped.
+        preview(&mut state);
+        state.apply(Event::FramesDetected {
+            generation: 1,
+            detection: FrameDetection::default(),
+        });
+        assert_eq!(state.crop.frames.len(), 12);
+        assert_eq!(state.crop.detected, Some(1));
+    }
+
+    #[test]
+    fn flatbed_scans_are_not_searched_for_frames() {
+        let mut state = with_mock_open();
+        state.settings.source = ScanSource::Flatbed;
+        state.fit_settings();
+        assert!(preview(&mut state).is_none());
+        assert!(state.crop.frames.is_empty());
+        // Asked to, it looks.
+        assert!(matches!(
+            state.redetect_frames(),
+            Some(Command::DetectFrames { .. })
+        ));
+    }
+
+    #[test]
+    fn edited_frames_survive_new_scans_until_detected_again() {
+        let mut state = with_mock_open();
+        let cmd = preview(&mut state);
+        detected(&mut state, cmd);
+        let mut rect = state.crop.frames[3].rect;
+        rect.angle_deg = 1.5;
+        state.edit_frame(3, rect);
+        state.delete_frame(11);
+        assert!(state.crop.edited);
+        assert_eq!(state.crop.frames.len(), 11);
+
+        // The frames are on the bed, so they fit the new scan as they are.
+        assert!(preview(&mut state).is_none());
+        assert_eq!(state.crop.frames.len(), 11);
+        assert_eq!(state.crop.frames[3].rect.angle_deg, 1.5);
+
+        let cmd = state.redetect_frames();
+        assert!(!state.crop.edited);
+        detected(&mut state, cmd);
+        assert_eq!(state.crop.frames.len(), 12);
+        assert!(state.crop.frames[3].rect.angle_deg.abs() < 0.1);
+    }
+
+    #[test]
+    fn frames_are_added_like_the_others() {
+        let mut state = with_mock_open();
+        preview(&mut state);
+        state.activity = Activity::Idle;
+        // With no frames, a 35 mm frame along the film area's long side.
+        state.add_frame(30.0, 50.0);
+        let first = state.crop.frames[0];
+        assert_eq!(
+            (first.rect.width_mm, first.rect.height_mm, first.rect.cx_mm),
+            (24.0, 36.0, 30.0)
+        );
+        assert_eq!(state.crop.selected, Some(0));
+        assert!(state.crop.edited);
+
+        let mut turned = first.rect;
+        turned.width_mm = 30.0;
+        turned.angle_deg = 90.0;
+        state.edit_frame(0, turned);
+        state.add_frame(60.0, 100.0);
+        let second = state.crop.frames[1].rect;
+        assert_eq!((second.width_mm, second.angle_deg), (30.0, 90.0));
+        assert_eq!((second.cx_mm, second.cy_mm), (60.0, 100.0));
+        assert_eq!(state.crop.selected, Some(1));
+        state.delete_frame(0);
+        assert_eq!(state.crop.frames.len(), 1);
+        assert_eq!(state.crop.selected, None);
+    }
+
+    #[test]
+    fn frames_and_scans_are_saved_turned() {
+        let mut state = with_mock_open();
+        assert!(state.start_save_frames("f.tif".into()).is_none(), "no scan");
+        let cmd = preview(&mut state);
+        detected(&mut state, cmd);
+        state.turn(false);
+        assert_eq!(state.quarter_turns, 3);
+        state.turn(true);
+        state.turn(true);
+        assert_eq!(state.quarter_turns, 1);
+
+        let Some(Command::SaveFrames {
+            frames,
+            quarter_turns,
+            ..
+        }) = state.start_save_frames("f.tif".into())
+        else {
+            panic!("expected the frames saved");
+        };
+        assert_eq!((frames.len(), quarter_turns), (12, 1));
+        assert!(state.start_save_frames("f.tif".into()).is_none(), "busy");
+        state.activity = Activity::Idle;
+        let Some(Command::Save { quarter_turns, .. }) = state.start_save("s.tif".into()) else {
+            panic!("expected a save");
+        };
+        assert_eq!(quarter_turns, 1);
+    }
 
     fn with_mock_open() -> AppState {
         let mut state = AppState::default();
@@ -691,7 +1039,7 @@ mod tests {
 
         let mut dev = MockBackend.open(&MockBackend::device_info()).unwrap();
         let result = dev.scan(&request, &mut NoProgress);
-        state.apply(Event::ScanDone { kind, result });
+        scan_done(&mut state, kind, result);
         assert!(!state.is_busy());
         assert_eq!(state.result_generation, 1);
         assert_eq!(state.result_kind, Some(ScanKind::Preview));
@@ -726,7 +1074,7 @@ mod tests {
         };
         let mut dev = MockBackend.open(&MockBackend::device_info()).unwrap();
         let result = dev.scan(&request, &mut NoProgress);
-        state.apply(Event::ScanDone { kind, result })
+        scan_done(state, kind, result)
     }
 
     /// Run the dust removal `cmd` asks for and apply its outcome.
@@ -839,7 +1187,7 @@ mod tests {
         assert_eq!(request.exposures.len(), 2);
         let mut dev = MockBackend.open(&MockBackend::device_info()).unwrap();
         let result = dev.scan(&request, &mut NoProgress);
-        state.apply(Event::ScanDone { kind, result })
+        scan_done(state, kind, result)
     }
 
     #[test]
@@ -949,7 +1297,7 @@ mod tests {
         };
         let mut dev = MockBackend.open(&MockBackend::device_info()).unwrap();
         let result = dev.scan(&request, &mut NoProgress);
-        assert!(state.apply(Event::ScanDone { kind, result }).is_none());
+        assert!(scan_done(&mut state, kind, result).is_none());
         assert!(state.current_cleaned().is_none());
     }
 

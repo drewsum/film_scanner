@@ -1,5 +1,6 @@
 //! Zoomable, pannable display of a scan result.
 
+use eframe::egui::epaint::{Mesh, Vertex};
 use eframe::egui::{
     self, Color32, ColorImage, Pos2, Rect, Sense, TextureHandle, TextureOptions, Vec2,
 };
@@ -67,11 +68,45 @@ pub fn to_color_image(img: &DynamicImage, max_side: u32) -> ColorImage {
     ColorImage::from_rgba_unmultiplied(size, rgba.as_raw())
 }
 
+/// Where the image is on screen, turned: maps between the screen and the unturned image's
+/// own coordinates, as fractions (0–1) of its width and height.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Placement {
+    /// The turned image's rectangle on screen.
+    pub rect: Rect,
+    /// Clockwise.
+    pub quarter_turns: u8,
+}
+
+impl Placement {
+    pub fn to_screen(self, p: Pos2) -> Pos2 {
+        let r = match self.quarter_turns % 4 {
+            0 => p,
+            1 => Pos2::new(1.0 - p.y, p.x),
+            2 => Pos2::new(1.0 - p.x, 1.0 - p.y),
+            _ => Pos2::new(p.y, 1.0 - p.x),
+        };
+        self.rect.min + r.to_vec2() * self.rect.size()
+    }
+
+    pub fn to_image(self, s: Pos2) -> Pos2 {
+        let r = ((s - self.rect.min) / self.rect.size()).to_pos2();
+        match self.quarter_turns % 4 {
+            0 => r,
+            1 => Pos2::new(r.y, 1.0 - r.x),
+            2 => Pos2::new(1.0 - r.x, 1.0 - r.y),
+            _ => Pos2::new(1.0 - r.y, r.x),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct ImageView {
     texture: Option<TextureHandle>,
     /// The result generation and variant on the texture.
     shown: Option<(u64, u64)>,
+    /// The quarter turns last shown.
+    turns: u8,
     /// Zoom relative to fit-to-window.
     zoom: f32,
     /// Pan offset of the image centre from the view centre, in points.
@@ -105,33 +140,41 @@ impl ImageView {
         self.shown = Some((generation, variant));
     }
 
-    /// Show the image of result `generation`, calling `image` for it only when `generation`
-    /// or `variant` (which view of the result it is) changed. A new generation also resets
-    /// the zoom.
+    /// Show the image of result `generation` turned `quarter_turns` clockwise, calling
+    /// `image` for it only when `generation` or `variant` (which view of the result it is)
+    /// changed. A new generation or turn also resets the zoom.
+    ///
+    /// `overlay` then draws over the image and handles the pointer; when it returns true it
+    /// took the pointer, and a drag doesn't pan.
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
         generation: u64,
         variant: u64,
+        quarter_turns: u8,
         image: impl FnOnce() -> ColorImage,
+        overlay: impl FnOnce(&egui::Ui, &egui::Response, &Placement) -> bool,
     ) {
         self.update_texture(ui.ctx(), generation, variant, image);
         let Some((tex_id, tex_size)) = self.texture.as_ref().map(|t| (t.id(), t.size_vec2()))
         else {
             return;
         };
-        if self.zoom <= 0.0 {
+        if self.zoom <= 0.0 || self.turns != quarter_turns {
             self.reset();
+            self.turns = quarter_turns;
         }
+        let tex_size = if quarter_turns % 2 == 1 {
+            Vec2::new(tex_size.y, tex_size.x)
+        } else {
+            tex_size
+        };
 
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         let fit = (rect.width() / tex_size.x).min(rect.height() / tex_size.y);
 
         if response.double_clicked() {
             self.reset();
-        }
-        if response.dragged() {
-            self.offset += response.drag_delta();
         }
         if let Some(pointer) = response.hover_pos() {
             let (scroll, pinch) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
@@ -146,11 +189,35 @@ impl ImageView {
         }
 
         let size = tex_size * fit * self.zoom;
-        let image_rect = Rect::from_center_size(rect.center() + self.offset, size);
+        let placement = Placement {
+            rect: Rect::from_center_size(rect.center() + self.offset, size),
+            quarter_turns,
+        };
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, ui.visuals().extreme_bg_color);
-        let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
-        painter.image(tex_id, image_rect, uv, Color32::WHITE);
+        // Each corner of the turned image shows the texture corner that turned there.
+        let mut mesh = Mesh::with_texture(tex_id);
+        let r = placement.rect;
+        for corner in [
+            r.left_top(),
+            r.right_top(),
+            r.right_bottom(),
+            r.left_bottom(),
+        ] {
+            mesh.vertices.push(Vertex {
+                pos: corner,
+                uv: placement.to_image(corner),
+                color: Color32::WHITE,
+            });
+        }
+        mesh.add_triangle(0, 1, 2);
+        mesh.add_triangle(0, 2, 3);
+        painter.add(mesh);
+
+        let took_pointer = overlay(ui, &response, &placement);
+        if response.dragged() && !took_pointer {
+            self.offset += response.drag_delta();
+        }
     }
 }
 
@@ -177,6 +244,27 @@ mod tests {
         overlay_mask(&mut color, &mask);
         let marked: Vec<_> = (0..8).filter(|&i| color.pixels[i] == MASK_COLOUR).collect();
         assert_eq!(marked, [3, 5]);
+    }
+
+    #[test]
+    fn placements_turn_both_ways() {
+        let rect = Rect::from_min_size(Pos2::new(10.0, 20.0), Vec2::new(200.0, 100.0));
+        for quarter_turns in 0..4 {
+            let placement = Placement {
+                rect,
+                quarter_turns,
+            };
+            let p = Pos2::new(0.25, 0.75);
+            let back = placement.to_image(placement.to_screen(p));
+            assert!((back - p).length() < 1e-5, "{quarter_turns}: {back:?}");
+        }
+        // A quarter clockwise, the image's top-left corner is at the top right.
+        let placement = Placement {
+            rect,
+            quarter_turns: 1,
+        };
+        assert_eq!(placement.to_screen(Pos2::ZERO), rect.right_top());
+        assert_eq!(placement.to_screen(Pos2::new(0.0, 1.0)), rect.left_top());
     }
 
     #[test]

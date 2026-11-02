@@ -12,8 +12,8 @@ The goal is one GUI that covers the whole workflow:
 4. **Adjust**: colour correction: white balance, levels, curves
 5. **Export**: batch export with metadata
 
-> **Status:** early development. Scanner communication and the GUI shell work; Crop, Invert,
-> Adjust and Export are placeholders. See the [roadmap issue](https://github.com/drewsum/film_scanner/issues/1).
+> **Status:** early development. Scanning and cropping work; Invert, Adjust and Export are
+> placeholders. See the [roadmap issue](https://github.com/drewsum/film_scanner/issues/1).
 
 ## Scanner support
 
@@ -105,6 +105,45 @@ Known limits:
 - Scratches into the emulsion that don't block infrared aren't found: infrared only shows
   what blocks light, such as dust, hairs and scratches on the film base.
 
+## Frames: detection, cropping and straightening
+
+After a film scan, the **Crop** step finds the frames on it. The code is in
+`crates/scan-process/src/frames.rs`. It is built for strips of 35 mm negatives in a holder,
+such as the V500's two strips of six:
+
+1. **Strips.** Film lets light through and the holder doesn't, so the strips are the large
+   bright areas of the scan. Their shape says whether they run down or across the scan. Their
+   long edges are found every millimetre and fitted with lines, which give each strip's
+   exact angle. That angle straightens its frames.
+2. **Film base.** The bare film between the perforations and the frames gives the colour of
+   unexposed film, which is also what lies between frames.
+3. **Frames.** Cameras advance the film by a nearly fixed distance (38 mm on 35 mm film), so
+   a row of frames at one spacing is fitted to the whole strip: the one whose gaps look most
+   like bare film and whose frames least. Each frame edge is then moved to where the scan
+   shows it nearby.
+
+Dark and underexposed frames are the hard case, since their edges can look just like the film
+around them. They still get their place from the spacing of the frames around them, and are
+marked **?** to check. Frames as bare as the film base, such as the unexposed end of a roll,
+are left out. Strips can be short, and there can be fewer than 12 frames.
+
+Every frame can be edited. Drag a frame to move it, its handles to resize it, or the round
+handle to turn it. The side panel sets the size and angle exactly, and adds or deletes frames.
+*Detect frames* starts over. Frames are kept in millimetres on the scanner bed, so frames
+found on a preview fit the full scan of the same film. Once edited, a new scan doesn't
+replace them.
+
+*Save frames as TIFF* saves each frame straightened, at the scan's bit depth, as
+`<name>_01.tif`, `<name>_02.tif` and so on. It uses the cleaned and merged image when those
+are on.
+
+The **⟲ ⟳** buttons above the image turn the whole scan in quarter turns. Saved scans and
+frames are turned the same way, and the app remembers the turn between sessions, since film
+goes in the holder the same way each time.
+
+Not yet covered: mounted slides, uncut slide film, medium format and half-frame. Their frames
+can be added by hand.
+
 ## Building
 
 Requires Rust 1.95+ (`rustup` recommended). On Windows, the MSVC toolchain and the Visual
@@ -157,7 +196,7 @@ cargo test -p scan-wia -- --ignored --nocapture
 - `crates/scan-core`: backend-agnostic scanner traits and types (capabilities, scan
   requests with IR and multi-exposure passes), the mock backend, and TIFF export
 - `crates/scan-process`: processing of scans, independent of the scanner: multi-exposure
-  merging and infrared dust and scratch removal
+  merging, infrared dust and scratch removal, and frame detection and cropping
 - `crates/scan-wia`: Windows WIA backend
 - `crates/scan-epson`: native USB backend for the Epson Perfection V500 (Windows)
 - `crates/scan-sane`: SANE backend (Linux, macOS)
