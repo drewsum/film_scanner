@@ -5,11 +5,14 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 
+use scan_core::image::{DynamicImage, ImageFormat};
 use scan_core::{
     CancelToken, Capabilities, DeviceInfo, DeviceRegistry, ProgressSink, ScanError, ScanRequest,
     ScanResult, ScannerDevice, export,
 };
-use scan_process::{DustParams, DustRemoval, ExposureMerge};
+use scan_process::{
+    DetectParams, DustParams, DustRemoval, ExposureMerge, FrameDetection, FrameRect,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScanKind {
@@ -50,12 +53,30 @@ pub enum Command {
         merged: Option<Arc<ExposureMerge>>,
         result: Arc<ScanResult>,
     },
+    /// Find the frames on the result's primary pass.
+    DetectFrames {
+        /// The result's generation, handed back with the outcome.
+        generation: u64,
+        result: Arc<ScanResult>,
+    },
     Save {
         result: Arc<ScanResult>,
         /// Saved in place of the primary pass when present, unless `cleaned` is.
         merged: Option<Arc<ExposureMerge>>,
         /// Saved in place of the primary pass when present.
         cleaned: Option<Arc<DustRemoval>>,
+        /// Clockwise, applied to every image saved.
+        quarter_turns: u8,
+        path: PathBuf,
+    },
+    /// Save `frames` cut out of the primary image (or of `merged` or `cleaned`, as for
+    /// [`Command::Save`]), straightened and turned, each to a file numbered after `path`.
+    SaveFrames {
+        result: Arc<ScanResult>,
+        merged: Option<Arc<ExposureMerge>>,
+        cleaned: Option<Arc<DustRemoval>>,
+        frames: Vec<FrameRect>,
+        quarter_turns: u8,
         path: PathBuf,
     },
 }
@@ -82,6 +103,10 @@ pub enum Event {
         /// Whether the merged exposures were cleaned.
         merged: bool,
         result: Result<DustRemoval, String>,
+    },
+    FramesDetected {
+        generation: u64,
+        detection: FrameDetection,
     },
     Saved(Result<Vec<PathBuf>, String>),
 }
@@ -236,22 +261,69 @@ fn run(
                     result: removed,
                 });
             }
+            Command::DetectFrames { generation, result } => {
+                let detection = scan_process::detect_frames(
+                    result.primary(),
+                    result.gamma,
+                    result.dpi,
+                    result.area,
+                    &DetectParams::default(),
+                );
+                send(Event::FramesDetected {
+                    generation,
+                    detection,
+                });
+            }
             Command::Save {
                 result,
                 merged,
                 cleaned,
+                quarter_turns,
                 path,
             } => {
-                let primary = match (&cleaned, &merged) {
-                    (Some(c), _) => &c.image,
-                    (None, Some(m)) => &m.image,
-                    (None, None) => result.primary(),
-                };
-                let saved = export::save_tiff_with_primary(&result, primary, &path)
+                let primary = processed(&result, &merged, &cleaned);
+                let saved = export::save_tiff_with_primary(&result, primary, quarter_turns, &path)
                     .map_err(|e| e.to_string());
                 send(Event::Saved(saved));
             }
+            Command::SaveFrames {
+                result,
+                merged,
+                cleaned,
+                frames,
+                quarter_turns,
+                path,
+            } => {
+                let image = processed(&result, &merged, &cleaned);
+                let saved = frames
+                    .iter()
+                    .enumerate()
+                    .map(|(n, frame)| {
+                        let crop = scan_process::crop_frame(image, result.dpi, result.area, frame);
+                        let target = export::numbered(&path, n);
+                        export::rotated(&crop, quarter_turns)
+                            .save_with_format(&target, ImageFormat::Tiff)
+                            .map(|()| target)
+                            .map_err(|e| e.to_string())
+                    })
+                    .collect();
+                send(Event::Saved(saved));
+            }
         }
+    }
+}
+
+/// The image to save: the dust-cleaned one, else the merged exposures, else the scan's
+/// primary pass.
+fn processed<'a>(
+    result: &'a ScanResult,
+    merged: &'a Option<Arc<ExposureMerge>>,
+    cleaned: &'a Option<Arc<DustRemoval>>,
+) -> &'a DynamicImage {
+    match (cleaned, merged) {
+        (Some(c), _) => &c.image,
+        (None, Some(m)) => &m.image,
+        (None, None) => result.primary(),
     }
 }
 
@@ -312,6 +384,7 @@ mod tests {
             result: Arc::new(result),
             merged: None,
             cleaned: None,
+            quarter_turns: 0,
             path: path.clone(),
         });
         let Event::Saved(Ok(paths)) = next(&worker) else {
@@ -319,6 +392,52 @@ mod tests {
         };
         assert_eq!(paths, vec![path.clone()]);
         assert!(path.exists());
+    }
+
+    #[test]
+    fn detects_and_saves_frames() {
+        let mut dev = MockBackend.open(&MockBackend::device_info()).unwrap();
+        let request = ScanRequest::new(ScanSource::Transparency, 75);
+        let result = Arc::new(dev.scan(&request, &mut NoProgress).unwrap());
+
+        let worker = Worker::spawn(DeviceRegistry::new(), || {});
+        worker.send(Command::DetectFrames {
+            generation: 5,
+            result: result.clone(),
+        });
+        let Event::FramesDetected {
+            generation: 5,
+            detection,
+        } = next(&worker)
+        else {
+            panic!("expected frames")
+        };
+        assert_eq!((detection.frames.len(), detection.strips), (12, 2));
+
+        let dir = tempfile::tempdir().unwrap();
+        let frames: Vec<_> = detection.frames[..2].iter().map(|f| f.rect).collect();
+        worker.send(Command::SaveFrames {
+            result,
+            merged: None,
+            cleaned: None,
+            frames: frames.clone(),
+            quarter_turns: 1,
+            path: dir.path().join("roll.tif"),
+        });
+        let Event::Saved(Ok(paths)) = next(&worker) else {
+            panic!("expected frames saved")
+        };
+        let names: Vec<_> = paths
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["roll_01.tif", "roll_02.tif"]);
+        // Frames down the strip are portrait; turned a quarter, landscape.
+        let saved = scan_core::image::open(&paths[0]).unwrap();
+        assert!(matches!(saved, DynamicImage::ImageRgb16(_)));
+        let (w, h) = (frames[0].width_mm, frames[0].height_mm);
+        let px = |mm: f32| (mm / scan_core::MM_PER_INCH * 75.0).round() as u32;
+        assert_eq!((saved.width(), saved.height()), (px(h), px(w)));
     }
 
     #[test]

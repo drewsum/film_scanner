@@ -6,9 +6,13 @@ use eframe::egui::{self, Align, Layout, RichText};
 use scan_core::mock::MockBackend;
 use scan_core::{BitDepth, ColorMode, DeviceRegistry};
 
+use crate::crop::{BedView, CropEditor};
 use crate::state::{self, Activity, AppState, EXTRA_EV, ViewChannel, WorkflowStep};
 use crate::view::{self, ImageView};
 use crate::worker::{ScanKind, Worker};
+
+/// Where the scan's turn is remembered between sessions.
+const TURNS_KEY: &str = "quarter_turns";
 
 /// All backends compiled into this build, real hardware first.
 pub fn default_registry() -> DeviceRegistry {
@@ -24,6 +28,9 @@ pub struct ScannerApp {
     state: AppState,
     worker: Worker,
     view: ImageView,
+    crop_editor: CropEditor,
+    /// The middle of the image view on the bed, in millimetres, as last shown.
+    view_centre: Option<(f32, f32)>,
     /// The dust strength slider, applied when it is let go.
     dust_strength: f32,
 }
@@ -33,12 +40,20 @@ impl ScannerApp {
         let ctx = cc.egui_ctx.clone();
         let worker = Worker::spawn(default_registry(), move || ctx.request_repaint());
         let mut state = AppState::default();
+        // Film goes in the holder the same way every time, so the turn carries over.
+        state.quarter_turns = cc
+            .storage
+            .and_then(|s| s.get_string(TURNS_KEY))
+            .and_then(|s| s.parse::<u8>().ok())
+            .map_or(0, |t| t % 4);
         worker.send(state.refresh_devices());
         Self {
             dust_strength: state.dust.strength,
             state,
             worker,
             view: ImageView::default(),
+            crop_editor: CropEditor::default(),
+            view_centre: None,
         }
     }
 
@@ -351,6 +366,139 @@ impl ScannerApp {
         }
     }
 
+    fn crop_controls(&mut self, ui: &mut egui::Ui) {
+        let busy = self.state.is_busy();
+        ui.heading("Frames");
+        let Some(result) = self.state.result.clone() else {
+            ui.label("Scan some film first: its frames are found on the scan.");
+            return;
+        };
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(!busy, egui::Button::new("Detect frames"))
+                .on_hover_text("Finds the frames again, replacing any changes")
+                .clicked()
+                && let Some(cmd) = self.state.redetect_frames()
+            {
+                self.worker.send(cmd);
+            }
+            if ui
+                .button("Add frame")
+                .on_hover_text("Adds a frame in the middle of the view")
+                .clicked()
+            {
+                let a = result.area;
+                let (x, y) = self
+                    .view_centre
+                    .unwrap_or((a.x_mm + a.width_mm / 2.0, a.y_mm + a.height_mm / 2.0));
+                self.state.add_frame(x, y);
+            }
+        });
+
+        let crop = &self.state.crop;
+        let checks = crop.frames.iter().filter(|f| f.check).count();
+        let count = match crop.frames.len() {
+            0 => "No frames".to_owned(),
+            1 => "1 frame".to_owned(),
+            n => format!("{n} frames"),
+        };
+        ui.label(match (crop.edited, crop.strips) {
+            (true, _) => format!("{count}, edited"),
+            (false, 0) => format!("{count}: no film strips found"),
+            (false, 1) => format!("{count} on 1 strip"),
+            (false, s) => format!("{count} on {s} strips"),
+        });
+        if checks > 0 {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!(
+                    "{checks} frame(s) marked ? were placed by the spacing of the others, as \
+                     their edges couldn't be seen: check them."
+                ),
+            );
+        }
+        ui.label(
+            RichText::new(
+                "Drag a frame to move it, its handles to resize it, or the round handle to \
+                 turn it. Delete removes the selected frame.",
+            )
+            .weak(),
+        );
+
+        ui.add_space(4.0);
+        let mut select = None;
+        for (i, frame) in self.state.crop.frames.iter().enumerate() {
+            let label = format!("Frame {}{}", i + 1, if frame.check { "  ?" } else { "" });
+            if ui
+                .selectable_label(self.state.crop.selected == Some(i), label)
+                .clicked()
+            {
+                select = Some(i);
+            }
+        }
+        if select.is_some() {
+            self.state.crop.selected = select;
+        }
+
+        if let Some(i) = self.state.crop.selected
+            && let Some(frame) = self.state.crop.frames.get(i)
+        {
+            ui.add_space(4.0);
+            let mut rect = frame.rect;
+            egui::Grid::new("frame")
+                .num_columns(2)
+                .spacing([12.0, 6.0])
+                .show(ui, |ui| {
+                    fn mm(v: &mut f32) -> egui::DragValue<'_> {
+                        egui::DragValue::new(v)
+                            .speed(0.05)
+                            .range(2.0..=300.0)
+                            .fixed_decimals(2)
+                            .suffix(" mm")
+                    }
+                    ui.label("Width");
+                    ui.add(mm(&mut rect.width_mm));
+                    ui.end_row();
+                    ui.label("Height");
+                    ui.add(mm(&mut rect.height_mm));
+                    ui.end_row();
+                    ui.label("Angle");
+                    ui.add(
+                        egui::DragValue::new(&mut rect.angle_deg)
+                            .speed(0.02)
+                            .range(-180.0..=180.0)
+                            .fixed_decimals(2)
+                            .suffix("°"),
+                    )
+                    .on_hover_text("Clockwise, to straighten the frame");
+                    ui.end_row();
+                });
+            self.state.edit_frame(i, rect);
+            if ui.button(format!("Delete frame {}", i + 1)).clicked() {
+                self.state.delete_frame(i);
+            }
+        }
+
+        ui.add_space(8.0);
+        ui.separator();
+        let can_save = !busy && !self.state.crop.frames.is_empty();
+        if ui
+            .add_enabled(can_save, egui::Button::new("Save frames as TIFF..."))
+            .on_hover_text(
+                "Saves each frame straightened, turned like the view, as its own file: \
+                 name_01.tif, name_02.tif, ...",
+            )
+            .clicked()
+            && let Some(path) = rfd::FileDialog::new()
+                .add_filter("TIFF image", &["tif", "tiff"])
+                .set_file_name("frame.tif")
+                .save_file()
+            && let Some(cmd) = self.state.start_save_frames(path)
+        {
+            self.worker.send(cmd);
+        }
+    }
+
     fn placeholder(&self, ui: &mut egui::Ui, step: WorkflowStep) {
         ui.heading(step.label());
         ui.label(step.description());
@@ -382,6 +530,20 @@ impl ScannerApp {
                 if ui.button("Fit").clicked() {
                     self.view.reset();
                 }
+                if ui
+                    .button("⟳")
+                    .on_hover_text("Turn the scan 90° clockwise, for viewing and saving")
+                    .clicked()
+                {
+                    self.state.turn(true);
+                }
+                if ui
+                    .button("⟲")
+                    .on_hover_text("Turn the scan 90° anticlockwise, for viewing and saving")
+                    .clicked()
+                {
+                    self.state.turn(false);
+                }
                 ui.label(RichText::new("Scroll to zoom, drag to pan, double-click to fit").weak());
             });
         });
@@ -399,8 +561,16 @@ impl ScannerApp {
             (ViewChannel::Visible, None, Some(m)) => (Arc::as_ptr(m) as usize as u64) << 2,
             (ViewChannel::Visible, None, None) => 0,
         };
-        self.view
-            .show(ui, self.state.result_generation, variant, || {
+        let cropping = self.state.step == WorkflowStep::Crop;
+        let state = &mut self.state;
+        let editor = &mut self.crop_editor;
+        let view_centre = &mut self.view_centre;
+        self.view.show(
+            ui,
+            state.result_generation,
+            variant,
+            state.quarter_turns,
+            || {
                 view::render(
                     &result,
                     channel,
@@ -408,7 +578,37 @@ impl ScannerApp {
                     cleaned.as_deref(),
                     show_mask,
                 )
-            });
+            },
+            |ui, response, placement| {
+                let bed = BedView {
+                    area: result.area,
+                    placement: *placement,
+                };
+                let a = result.area;
+                let (x, y) = bed.to_bed(response.rect.center());
+                *view_centre = Some((
+                    x.clamp(a.x_mm, a.x_mm + a.width_mm),
+                    y.clamp(a.y_mm, a.y_mm + a.height_mm),
+                ));
+                if !cropping {
+                    return false;
+                }
+                let crop = &state.crop;
+                let out = editor.show(ui, response, &bed, &crop.frames, crop.selected);
+                if let Some(selected) = out.select {
+                    state.crop.selected = selected;
+                }
+                if let Some((i, rect)) = out.edit {
+                    state.edit_frame(i, rect);
+                }
+                if out.delete
+                    && let Some(i) = state.crop.selected
+                {
+                    state.delete_frame(i);
+                }
+                out.took_pointer
+            },
+        );
     }
 }
 
@@ -433,11 +633,16 @@ impl eframe::App for ScannerApp {
                     ui.add_space(4.0);
                     match self.state.step {
                         WorkflowStep::Scan => self.scan_controls(ui),
+                        WorkflowStep::Crop => self.crop_controls(ui),
                         step => self.placeholder(ui, step),
                     }
                 });
             });
         egui::CentralPanel::default().show(ui, |ui| self.central(ui));
+    }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        storage.set_string(TURNS_KEY, self.state.quarter_turns.to_string());
     }
 }
 
