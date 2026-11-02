@@ -258,6 +258,9 @@ pub struct ScanResult {
     pub area: ScanArea,
     pub passes: Vec<ScanPass>,
     pub infrared: Option<Gray16Image>,
+    /// How the passes' values encode light: a value `v` (0–1 of full scale) stands for
+    /// `v^gamma` of the light at full scale. 1 for linear data. Infrared is always linear.
+    pub gamma: f32,
 }
 
 impl ScanResult {

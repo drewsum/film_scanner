@@ -167,6 +167,7 @@ impl ScannerDevice for MockDevice {
             area,
             passes,
             infrared,
+            gamma: 1.0,
         })
     }
 }

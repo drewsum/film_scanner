@@ -5,7 +5,7 @@ use eframe::egui::{
 };
 use scan_core::ScanResult;
 use scan_core::image::{DynamicImage, GrayImage};
-use scan_process::DustRemoval;
+use scan_process::{DustRemoval, ExposureMerge};
 
 use crate::state::ViewChannel;
 
@@ -14,11 +14,13 @@ pub const MAX_TEXTURE_SIDE: u32 = 4096;
 /// Repaired defects, when the mask is shown.
 const MASK_COLOUR: Color32 = Color32::from_rgb(255, 40, 40);
 
-/// The image to display: a channel of `result`, or the dust-cleaned visible image, with the
-/// repaired pixels marked when `show_mask` is set.
+/// The image to display: a channel of `result`, or the visible image dust-cleaned or with its
+/// exposures merged (the cleaned one is of the merge when both are given), with the repaired
+/// pixels marked when `show_mask` is set.
 pub fn render(
     result: &ScanResult,
     channel: ViewChannel,
+    merged: Option<&ExposureMerge>,
     cleaned: Option<&DustRemoval>,
     show_mask: bool,
 ) -> ColorImage {
@@ -27,7 +29,11 @@ pub fn render(
             to_color_image(&DynamicImage::ImageLuma16(ir.clone()), MAX_TEXTURE_SIDE)
         }
         _ => {
-            let img = cleaned.map_or(result.primary(), |c| &c.image);
+            let img = match (cleaned, merged) {
+                (Some(c), _) => &c.image,
+                (None, Some(m)) => &m.image,
+                (None, None) => result.primary(),
+            };
             let mut color = to_color_image(img, MAX_TEXTURE_SIDE);
             if let Some(c) = cleaned.filter(|_| show_mask) {
                 overlay_mask(&mut color, &c.mask);

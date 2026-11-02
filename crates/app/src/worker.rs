@@ -9,7 +9,7 @@ use scan_core::{
     CancelToken, Capabilities, DeviceInfo, DeviceRegistry, ProgressSink, ScanError, ScanRequest,
     ScanResult, ScannerDevice, export,
 };
-use scan_process::{DustParams, DustRemoval};
+use scan_process::{DustParams, DustRemoval, ExposureMerge};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScanKind {
@@ -35,15 +35,25 @@ pub enum Command {
         request: ScanRequest,
         kind: ScanKind,
     },
-    /// Find and fill dust in the result's primary image, using its infrared channel.
+    /// Merge the result's exposure passes.
+    MergeExposures {
+        /// The result's generation, handed back with the outcome.
+        generation: u64,
+        result: Arc<ScanResult>,
+    },
+    /// Find and fill dust in the result's primary image, or in `merged` when given, using its
+    /// infrared channel.
     RemoveDust {
         /// The result's generation, handed back with the outcome.
         generation: u64,
         strength: f32,
+        merged: Option<Arc<ExposureMerge>>,
         result: Arc<ScanResult>,
     },
     Save {
         result: Arc<ScanResult>,
+        /// Saved in place of the primary pass when present, unless `cleaned` is.
+        merged: Option<Arc<ExposureMerge>>,
         /// Saved in place of the primary pass when present.
         cleaned: Option<Arc<DustRemoval>>,
         path: PathBuf,
@@ -62,9 +72,15 @@ pub enum Event {
         kind: ScanKind,
         result: Result<ScanResult, ScanError>,
     },
+    ExposuresMerged {
+        generation: u64,
+        result: Result<ExposureMerge, String>,
+    },
     DustRemoved {
         generation: u64,
         strength: f32,
+        /// Whether the merged exposures were cleaned.
+        merged: bool,
         result: Result<DustRemoval, String>,
     },
     Saved(Result<Vec<PathBuf>, String>),
@@ -191,31 +207,46 @@ fn run(
                 };
                 send(Event::ScanDone { kind, result });
             }
+            Command::MergeExposures { generation, result } => {
+                let merged = scan_process::merge_exposures(&result.passes, result.gamma)
+                    .map_err(|e| e.to_string());
+                send(Event::ExposuresMerged {
+                    generation,
+                    result: merged,
+                });
+            }
             Command::RemoveDust {
                 generation,
                 strength,
+                merged,
                 result,
             } => {
+                let image = merged.as_ref().map_or(result.primary(), |m| &m.image);
                 let removed = match &result.infrared {
                     Some(ir) => {
                         let params = DustParams::for_scan(result.dpi, strength);
-                        scan_process::remove_dust(result.primary(), ir, &params)
-                            .map_err(|e| e.to_string())
+                        scan_process::remove_dust(image, ir, &params).map_err(|e| e.to_string())
                     }
                     None => Err("the scan has no infrared channel".into()),
                 };
                 send(Event::DustRemoved {
                     generation,
                     strength,
+                    merged: merged.is_some(),
                     result: removed,
                 });
             }
             Command::Save {
                 result,
+                merged,
                 cleaned,
                 path,
             } => {
-                let primary = cleaned.as_ref().map_or(result.primary(), |c| &c.image);
+                let primary = match (&cleaned, &merged) {
+                    (Some(c), _) => &c.image,
+                    (None, Some(m)) => &m.image,
+                    (None, None) => result.primary(),
+                };
                 let saved = export::save_tiff_with_primary(&result, primary, &path)
                     .map_err(|e| e.to_string());
                 send(Event::Saved(saved));
@@ -230,7 +261,7 @@ mod tests {
 
     use super::*;
     use scan_core::mock::MockBackend;
-    use scan_core::{NoProgress, ScanSource, ScannerBackend};
+    use scan_core::{Exposure, NoProgress, ScanSource, ScannerBackend};
 
     fn next(worker: &Worker) -> Event {
         // Skip progress events; wait for the response to the command.
@@ -279,6 +310,7 @@ mod tests {
         let path = dir.path().join("strip.tif");
         worker.send(Command::Save {
             result: Arc::new(result),
+            merged: None,
             cleaned: None,
             path: path.clone(),
         });
@@ -303,6 +335,7 @@ mod tests {
             worker.send(Command::RemoveDust {
                 generation,
                 strength: 0.5,
+                merged: None,
                 result,
             });
         }
@@ -322,6 +355,35 @@ mod tests {
         } = next(&worker)
         else {
             panic!("expected an error without infrared")
+        };
+    }
+
+    #[test]
+    fn merges_exposure_passes() {
+        let mut dev = MockBackend.open(&MockBackend::device_info()).unwrap();
+        let mut request = ScanRequest::new(ScanSource::Transparency, 75);
+        let single = Arc::new(dev.scan(&request, &mut NoProgress).unwrap());
+        request.exposures = vec![Exposure::default(), Exposure { ev: 1.0 }];
+        let double = Arc::new(dev.scan(&request, &mut NoProgress).unwrap());
+
+        let worker = Worker::spawn(DeviceRegistry::new(), || {});
+        for (generation, result) in [(3, double), (4, single)] {
+            worker.send(Command::MergeExposures { generation, result });
+        }
+        let Event::ExposuresMerged {
+            generation: 3,
+            result: Ok(merge),
+        } = next(&worker)
+        else {
+            panic!("expected a merge")
+        };
+        assert_eq!(merge.passes.len(), 1);
+        let Event::ExposuresMerged {
+            generation: 4,
+            result: Err(_),
+        } = next(&worker)
+        else {
+            panic!("expected an error with one pass")
         };
     }
 

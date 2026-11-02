@@ -3,7 +3,7 @@
 //! at 5) followed by the table.
 
 /// Gamma of the driver's tone curves.
-const GAMMA: f64 = 1.8;
+pub const GAMMA: f64 = 1.8;
 
 /// The 8-bit tone curve (type 3, one per channel): 255 · x^(1/1.8), rounded. Matches the
 /// driver's exactly.

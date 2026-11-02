@@ -22,6 +22,7 @@
 use scan_core::image::{DynamicImage, GenericImageView, GrayImage};
 use scan_core::{Gray16Image, MM_PER_INCH};
 
+use crate::fit;
 use crate::inpaint::inpaint;
 
 /// Radius of the local background in millimetres (its mean reaches a little further; see
@@ -275,46 +276,16 @@ impl<'a> Detector<'a> {
                 }
             }
         }
-        let mut line: Option<(f64, f64, f64)> = None;
-        for _ in 0..3 {
-            let near = |&&(r, v): &&(f64, f64)| match line {
-                Some((slope, offset, spread)) => (v - (offset + slope * r)).abs() <= spread,
-                None => true,
-            };
-            let (mut n, mut sx, mut sy, mut sxx, mut sxy) = (0f64, 0f64, 0f64, 0f64, 0f64);
-            for &(r, v) in points.iter().filter(near) {
-                n += 1.0;
-                sx += r;
-                sy += v;
-                sxx += r * r;
-                sxy += r * v;
-            }
-            if n < 100.0 {
-                return (0.0, 0.0);
-            }
-            let (mx, my) = (sx / n, sy / n);
-            let var = sxx / n - mx * mx;
-            if var < 1e-6 {
-                return (0.0, mx as f32);
-            }
-            let slope = (sxy / n - mx * my) / var;
-            let offset = my - slope * mx;
-            let residual: f64 = points
-                .iter()
-                .filter(near)
-                .map(|&(r, v)| (v - (offset + slope * r)).powi(2))
-                .sum::<f64>();
-            let spread = (3.0 * (residual / n).sqrt()).max(0.02);
-            line = Some((slope, offset, spread));
-        }
-        let (slope, offset, spread) = line.expect("fitted at least once");
+        let Some(line) = fit::trimmed_line(&points, 0.02) else {
+            return (0.0, 0.0);
+        };
         let kept: Vec<f64> = points
             .iter()
-            .filter(|&&(r, v)| (v - (offset + slope * r)).abs() <= spread)
+            .filter(|&&p| line.keeps(p))
             .map(|&(r, _)| r)
             .collect();
         let red_mean = kept.iter().sum::<f64>() / kept.len().max(1) as f64;
-        (slope.clamp(0.0, 1.0) as f32, red_mean as f32)
+        (line.slope.clamp(0.0, 1.0) as f32, red_mean as f32)
     }
 }
 
@@ -467,7 +438,7 @@ fn box_filter(v: &mut [f32], w: usize, h: usize, r: usize) {
 }
 
 /// Grow the set pixels of `mask` by `r` pixels in every direction (a square).
-fn dilate(mask: &mut [bool], w: usize, h: usize, r: usize) {
+pub(crate) fn dilate(mask: &mut [bool], w: usize, h: usize, r: usize) {
     if r == 0 {
         return;
     }
