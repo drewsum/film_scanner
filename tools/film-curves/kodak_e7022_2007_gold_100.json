@@ -1,0 +1,156 @@
+{
+  "source": {
+    "film": "KODAK GOLD 100 Film",
+    "publication": "E-7022",
+    "edition": "February 2007",
+    "url": "https://125px.com/docs/film/kodak/E7022-Gold_100_200.pdf",
+    "sha256": "136532fd39686e09f69c22001dbea3bf71e44f2a58babcb6c77e4b340c7a5743"
+  },
+  "notes": [
+    "The 2007 edition covers GOLD 100 and GOLD 200; the spectral sensitivity and dye density",
+    "plots are shared by both films. Kodak's own servers no longer carry it; the URL is an",
+    "archive. Its GOLD 200 curves match the 2016 edition's to 0.003.",
+    "",
+    "Characteristic curves: daylight exposure, Status M densitometry. The sheet prints the",
+    "GOLD 100 Log H ref as \"0.84\", without the minus sign: -0.84 is one stop (0.30) above",
+    "GOLD 200's -1.14, as ISO 100 against 200 should be, and puts a grey card at the red",
+    "density the sheet's exposure check gives for GOLD 100 (0.90 to 1.10).",
+    "",
+    "Page coordinates: the plots' axes are calibrated from their tick marks."
+  ],
+  "page": 3,
+  "log_h_ref": -0.84,
+  "plots": {
+    "characteristic": {
+      "x": [
+        [
+          127.803,
+          -2.0
+        ],
+        [
+          220.056,
+          0.0
+        ]
+      ],
+      "y": [
+        [
+          221.806,
+          1.0
+        ],
+        [
+          129.552,
+          3.0
+        ]
+      ],
+      "curves": {
+        "blue": [
+          "10.0"
+        ],
+        "green": [
+          "10.1"
+        ],
+        "red": [
+          "10.2"
+        ]
+      },
+      "sample": {
+        "start": -2.8,
+        "step": 0.05,
+        "end": 1.0
+      }
+    },
+    "sensitivity": {
+      "x": [
+        [
+          370.918,
+          300.0
+        ],
+        [
+          531.372,
+          700.0
+        ]
+      ],
+      "y": [
+        [
+          168.024,
+          1.0
+        ],
+        [
+          92.24,
+          3.0
+        ]
+      ],
+      "floor": 0.0,
+      "curves": {
+        "yellow": [
+          [
+            25,
+            38
+          ]
+        ],
+        "magenta": [
+          [
+            39,
+            60
+          ]
+        ],
+        "cyan": [
+          [
+            61,
+            68
+          ],
+          [
+            69,
+            89
+          ]
+        ]
+      },
+      "sample": {
+        "start": 360.0,
+        "step": 5.0,
+        "end": 700.0
+      }
+    },
+    "dye_density": {
+      "x": [
+        [
+          418.537,
+          500.0
+        ],
+        [
+          479.987,
+          600.0
+        ]
+      ],
+      "y": [
+        [
+          445.263,
+          0.5
+        ],
+        [
+          334.654,
+          2.0
+        ]
+      ],
+      "curves": {
+        "midscale": [
+          [
+            "91.0",
+            "92.0"
+          ]
+        ],
+        "minimum": [
+          [
+            "92.1",
+            "93.0"
+          ]
+        ]
+      },
+      "sample": {
+        "start": 400.0,
+        "step": 5.0,
+        "end": 695.0
+      }
+    }
+  }
+}

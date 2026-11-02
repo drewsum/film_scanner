@@ -10,6 +10,7 @@ use scan_core::{
     CancelToken, Capabilities, DeviceInfo, DeviceRegistry, ProgressSink, ScanError, ScanRequest,
     ScanResult, ScannerDevice, export,
 };
+use scan_film::Inverter;
 use scan_process::{
     DetectParams, DustParams, DustRemoval, ExposureMerge, FrameDetection, FrameRect,
 };
@@ -53,7 +54,7 @@ pub enum Command {
         merged: Option<Arc<ExposureMerge>>,
         result: Arc<ScanResult>,
     },
-    /// Find the frames on the result's primary pass.
+    /// Find the frames on the result's primary pass, and its film base.
     DetectFrames {
         /// The result's generation, handed back with the outcome.
         generation: u64,
@@ -65,16 +66,20 @@ pub enum Command {
         merged: Option<Arc<ExposureMerge>>,
         /// Saved in place of the primary pass when present.
         cleaned: Option<Arc<DustRemoval>>,
+        /// Turns the image saved for the primary pass into a positive, when given.
+        invert: Option<Arc<Inverter>>,
         /// Clockwise, applied to every image saved.
         quarter_turns: u8,
         path: PathBuf,
     },
     /// Save `frames` cut out of the primary image (or of `merged` or `cleaned`, as for
-    /// [`Command::Save`]), straightened and turned, each to a file numbered after `path`.
+    /// [`Command::Save`]), straightened, inverted (when `invert` is given) and turned, each
+    /// to a file numbered after `path`.
     SaveFrames {
         result: Arc<ScanResult>,
         merged: Option<Arc<ExposureMerge>>,
         cleaned: Option<Arc<DustRemoval>>,
+        invert: Option<Arc<Inverter>>,
         frames: Vec<FrameRect>,
         quarter_turns: u8,
         path: PathBuf,
@@ -107,6 +112,9 @@ pub enum Event {
     FramesDetected {
         generation: u64,
         detection: FrameDetection,
+        /// A guess at the film base from the clearest film, when the detection found no
+        /// strips to measure it on.
+        estimated_base: Option<[f32; 3]>,
     },
     Saved(Result<Vec<PathBuf>, String>),
 }
@@ -269,19 +277,27 @@ fn run(
                     result.area,
                     &DetectParams::default(),
                 );
+                let estimated_base = match detection.base {
+                    Some(_) => None,
+                    None => scan_process::estimate_base(result.primary(), result.gamma),
+                };
                 send(Event::FramesDetected {
                     generation,
                     detection,
+                    estimated_base,
                 });
             }
             Command::Save {
                 result,
                 merged,
                 cleaned,
+                invert,
                 quarter_turns,
                 path,
             } => {
                 let primary = processed(&result, &merged, &cleaned);
+                let positive = invert.map(|inv| positive(primary, result.gamma, &inv));
+                let primary = positive.as_ref().unwrap_or(primary);
                 let saved = export::save_tiff_with_primary(&result, primary, quarter_turns, &path)
                     .map_err(|e| e.to_string());
                 send(Event::Saved(saved));
@@ -290,6 +306,7 @@ fn run(
                 result,
                 merged,
                 cleaned,
+                invert,
                 frames,
                 quarter_turns,
                 path,
@@ -299,7 +316,11 @@ fn run(
                     .iter()
                     .enumerate()
                     .map(|(n, frame)| {
-                        let crop = scan_process::crop_frame(image, result.dpi, result.area, frame);
+                        let mut crop =
+                            scan_process::crop_frame(image, result.dpi, result.area, frame);
+                        if let Some(inv) = &invert {
+                            crop = positive(&crop, result.gamma, inv);
+                        }
                         let target = export::numbered(&path, n);
                         export::rotated(&crop, quarter_turns)
                             .save_with_format(&target, ImageFormat::Tiff)
@@ -311,6 +332,11 @@ fn run(
             }
         }
     }
+}
+
+/// The positive of `image`, a scan of a negative encoding light with `gamma`.
+fn positive(image: &DynamicImage, gamma: f32, inverter: &Inverter) -> DynamicImage {
+    DynamicImage::ImageRgb16(scan_process::invert(image, gamma, inverter))
 }
 
 /// The image to save: the dust-cleaned one, else the merged exposures, else the scan's
@@ -384,6 +410,7 @@ mod tests {
             result: Arc::new(result),
             merged: None,
             cleaned: None,
+            invert: None,
             quarter_turns: 0,
             path: path.clone(),
         });
@@ -408,18 +435,23 @@ mod tests {
         let Event::FramesDetected {
             generation: 5,
             detection,
+            estimated_base: None,
         } = next(&worker)
         else {
             panic!("expected frames")
         };
         assert_eq!((detection.frames.len(), detection.strips), (12, 2));
+        let base = detection.base.expect("the film base");
 
         let dir = tempfile::tempdir().unwrap();
         let frames: Vec<_> = detection.frames[..2].iter().map(|f| f.rect).collect();
+        let stock = scan_film::stock::default_stock();
+        let inverter = Inverter::new(stock.model(), base, &Default::default());
         worker.send(Command::SaveFrames {
             result,
             merged: None,
             cleaned: None,
+            invert: Some(Arc::new(inverter)),
             frames: frames.clone(),
             quarter_turns: 1,
             path: dir.path().join("roll.tif"),

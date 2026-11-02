@@ -9,6 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 image.workspace = true
+scan-film.workspace = true
 thiserror.workspace = true
 log.workspace = true
 

@@ -1,6 +1,6 @@
 [package]
 name = "scan-process"
-description = "Backend-agnostic processing of scans for film_scanner: infrared dust removal"
+description = "Backend-agnostic processing of scans for film_scanner: dust removal, exposure merging, frame detection and negative inversion"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,6 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 scan-core.workspace = true
+scan-film.workspace = true
 thiserror.workspace = true
 
 [lints]

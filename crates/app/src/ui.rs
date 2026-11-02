@@ -1,10 +1,14 @@
 //! egui front end: workflow stepper, scan controls, image view and status bar.
 
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use eframe::egui::{self, Align, Layout, RichText};
+use scan_core::image::DynamicImage;
 use scan_core::mock::MockBackend;
-use scan_core::{BitDepth, ColorMode, DeviceRegistry};
+use scan_core::{BitDepth, ColorMode, DeviceRegistry, ScanSource};
+use scan_film::render::CONTRAST_RANGE;
+use scan_film::{Printing, Rendering};
 
 use crate::crop::{BedView, CropEditor};
 use crate::state::{self, Activity, AppState, EXTRA_EV, ViewChannel, WorkflowStep};
@@ -13,6 +17,8 @@ use crate::worker::{ScanKind, Worker};
 
 /// Where the scan's turn is remembered between sessions.
 const TURNS_KEY: &str = "quarter_turns";
+/// Where the film stock is remembered: the roll in the scanner is likely the same next time.
+const STOCK_KEY: &str = "film_stock";
 
 /// All backends compiled into this build, real hardware first.
 pub fn default_registry() -> DeviceRegistry {
@@ -33,6 +39,8 @@ pub struct ScannerApp {
     view_centre: Option<(f32, f32)>,
     /// The dust strength slider, applied when it is let go.
     dust_strength: f32,
+    /// The processed image scaled to the view, and which result and image it is of.
+    thumbnail: Option<((u64, u64), Arc<DynamicImage>)>,
 }
 
 impl ScannerApp {
@@ -46,6 +54,13 @@ impl ScannerApp {
             .and_then(|s| s.get_string(TURNS_KEY))
             .and_then(|s| s.parse::<u8>().ok())
             .map_or(0, |t| t % 4);
+        if let Some(stock) = cc
+            .storage
+            .and_then(|s| s.get_string(STOCK_KEY))
+            .and_then(|id| scan_film::stock::by_id(&id))
+        {
+            state.invert.stock = stock;
+        }
         worker.send(state.refresh_devices());
         Self {
             dust_strength: state.dust.strength,
@@ -54,6 +69,7 @@ impl ScannerApp {
             view: ImageView::default(),
             crop_editor: CropEditor::default(),
             view_centre: None,
+            thumbnail: None,
         }
     }
 
@@ -481,13 +497,19 @@ impl ScannerApp {
 
         ui.add_space(8.0);
         ui.separator();
+        self.save_frames_button(ui, busy);
+    }
+
+    fn save_frames_button(&mut self, ui: &mut egui::Ui, busy: bool) {
         let can_save = !busy && !self.state.crop.frames.is_empty();
+        let positive = self.state.inverter().is_some();
         if ui
             .add_enabled(can_save, egui::Button::new("Save frames as TIFF..."))
-            .on_hover_text(
-                "Saves each frame straightened, turned like the view, as its own file: \
-                 name_01.tif, name_02.tif, ...",
-            )
+            .on_hover_text(format!(
+                "Saves each frame straightened{}, turned like the view, as its own 16-bit \
+                 file: name_01.tif, name_02.tif, ...",
+                if positive { " and inverted" } else { "" }
+            ))
             .clicked()
             && let Some(path) = rfd::FileDialog::new()
                 .add_filter("TIFF image", &["tif", "tiff"])
@@ -497,6 +519,169 @@ impl ScannerApp {
         {
             self.worker.send(cmd);
         }
+    }
+
+    fn invert_controls(&mut self, ui: &mut egui::Ui) {
+        let busy = self.state.is_busy();
+        ui.heading("Film");
+        let Some(result) = self.state.result.clone() else {
+            ui.label("Scan some film first.");
+            return;
+        };
+        if result.source != ScanSource::Transparency {
+            ui.label("Inversion is for film scans: scan with the film source.");
+            return;
+        }
+        let invert = &mut self.state.invert;
+        ui.checkbox(&mut invert.enabled, "Invert colour negative")
+            .on_hover_text("Off shows and saves the scan as it is");
+        ui.add_enabled_ui(invert.enabled, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Film stock");
+                egui::ComboBox::from_id_salt("stock")
+                    .width(200.0)
+                    .selected_text(invert.stock.display_name())
+                    .show_ui(ui, |ui| {
+                        for &stock in scan_film::stock::all() {
+                            ui.selectable_value(&mut invert.stock, stock, stock.display_name())
+                                .on_hover_text(stock.provenance);
+                        }
+                    });
+            });
+            ui.label(RichText::new(invert.stock.provenance).weak().small());
+        });
+        if !self.state.invert.enabled {
+            ui.add_space(8.0);
+            ui.separator();
+            self.save_frames_button(ui, busy);
+            return;
+        }
+
+        ui.add_space(4.0);
+        let d_min = self.state.invert.stock.model().d_min();
+        match self.state.current_film_base() {
+            Some(base) => {
+                let d = base.light.map(|l| -l.max(1e-6).log10());
+                ui.label(format!(
+                    "Film base density: {:.2} / {:.2} / {:.2}",
+                    d[0], d[1], d[2]
+                ))
+                .on_hover_text(format!(
+                    "Red / green / blue, {}. The negative is inverted against it, which \
+                     removes the orange mask. The datasheet's D-min is {:.2} / {:.2} / {:.2} \
+                     (Status M); a scanner's channels see the mask a little differently.",
+                    if base.measured {
+                        "measured on the unexposed film between the frames and perforations"
+                    } else {
+                        "estimated from the clearest film on the scan, as no film strips \
+                         were found: check the result"
+                    },
+                    d_min[0],
+                    d_min[1],
+                    d_min[2]
+                ));
+                if !base.measured {
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        "Film base estimated: no film strips were found to measure it on.",
+                    );
+                }
+            }
+            None if busy => {
+                ui.label("Measuring the film base...");
+            }
+            None => {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    "No film base found on this scan: it can't be inverted.",
+                );
+            }
+        }
+
+        ui.add_space(8.0);
+        ui.heading("Printing");
+        let printing = &mut self.state.invert.printing;
+        egui::Grid::new("printing")
+            .num_columns(2)
+            .spacing([12.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("Exposure");
+                ui.add(
+                    egui::Slider::new(&mut printing.exposure_ev, -3.0..=3.0)
+                        .step_by(0.05)
+                        .suffix(" EV"),
+                )
+                .on_hover_text("Brighter or darker, in stops, as a printer's exposure");
+                ui.end_row();
+                for (c, (label, hover)) in [
+                    ("Cyan - Red", "More red (+) or cyan (-), in stops"),
+                    ("Magenta - Green", "More green (+) or magenta (-), in stops"),
+                    ("Yellow - Blue", "More blue (+) or yellow (-), in stops"),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    ui.label(label);
+                    ui.add(
+                        egui::Slider::new(&mut printing.balance_ev[c], -1.5..=1.5)
+                            .step_by(0.01)
+                            .suffix(" EV"),
+                    )
+                    .on_hover_text(hover);
+                    ui.end_row();
+                }
+                ui.label("Contrast");
+                ui.add(egui::Slider::new(&mut printing.contrast, CONTRAST_RANGE).step_by(0.05))
+                    .on_hover_text("The print curve's contrast; grey stays grey");
+                ui.end_row();
+                ui.label("Colour");
+                ui.horizontal(|ui| {
+                    ui.radio_value(&mut printing.rendering, Rendering::Print, "Print")
+                        .on_hover_text(
+                            "Each of the film's layers makes its own colour, as when the \
+                             negative is printed on colour paper: the film's own look",
+                        );
+                    ui.radio_value(
+                        &mut printing.rendering,
+                        Rendering::Colorimetric,
+                        "Colorimetric",
+                    )
+                    .on_hover_text(
+                        "Mixes the layers towards the scene's colours, from the film's \
+                         spectral sensitivities. Can look more saturated than a print.",
+                    );
+                });
+                ui.end_row();
+            });
+        ui.horizontal(|ui| {
+            let has_frames = !self.state.crop.frames.is_empty();
+            if ui
+                .add_enabled(!busy && has_frames, egui::Button::new("Auto"))
+                .on_hover_text(
+                    "Sets exposure and colour balance from the frames, as a photofinisher's \
+                     printer does: each frame's average taken as grey, and the roll's \
+                     typical frame used, so one frame of lawn or sea doesn't tint the rest",
+                )
+                .on_disabled_hover_text("Needs frames: detect or add them in the Crop step")
+                .clicked()
+            {
+                self.state.auto_printing();
+            }
+            if ui
+                .button("Reset")
+                .on_hover_text("No exposure or colour change: the film as its datasheet prints it")
+                .clicked()
+            {
+                self.state.invert.printing = Printing {
+                    rendering: self.state.invert.printing.rendering,
+                    ..Printing::default()
+                };
+            }
+        });
+
+        ui.add_space(8.0);
+        ui.separator();
+        self.save_frames_button(ui, busy);
     }
 
     fn placeholder(&self, ui: &mut egui::Ui, step: WorkflowStep) {
@@ -551,15 +736,48 @@ impl ScannerApp {
         let merged = self.state.current_merged().map(|m| m.merge.clone());
         let cleaned = self.state.current_cleaned().map(|c| c.removal.clone());
         let show_mask = self.state.dust.show_mask;
-        // Which view of the result: the channel, and which dust removal (with or without its
-        // mask) or merge, told apart by its address while it is alive.
-        let variant = match (channel, &cleaned, &merged) {
-            (ViewChannel::Infrared, ..) => 1,
-            (ViewChannel::Visible, Some(c), _) => {
-                ((Arc::as_ptr(c) as usize as u64) << 2) | (u64::from(show_mask) << 1)
+        // Which image of the result: the dust removal or merge, told apart by its address
+        // while it is alive, or the primary pass.
+        let image_id = match (&cleaned, &merged) {
+            (Some(c), _) => Arc::as_ptr(c) as usize as u64,
+            (None, Some(m)) => Arc::as_ptr(m) as usize as u64,
+            (None, None) => 0,
+        };
+        let key = (self.state.result_generation, image_id);
+        let visible = match &self.thumbnail {
+            Some((k, image)) if *k == key => image.clone(),
+            _ => {
+                let image = Arc::new(view::thumbnail(
+                    self.state.processed_image().unwrap_or(result.primary()),
+                ));
+                self.thumbnail = Some((key, image.clone()));
+                image
             }
-            (ViewChannel::Visible, None, Some(m)) => (Arc::as_ptr(m) as usize as u64) << 2,
-            (ViewChannel::Visible, None, None) => 0,
+        };
+        let inverter = self.state.inverter();
+        // Which view of the result: the channel, the image, its mask, and its inversion.
+        let variant = match channel {
+            ViewChannel::Infrared => 1,
+            ViewChannel::Visible => {
+                let mut h = std::hash::DefaultHasher::new();
+                (image_id, show_mask && cleaned.is_some()).hash(&mut h);
+                if inverter.is_some() {
+                    let invert = &self.state.invert;
+                    let p = &invert.printing;
+                    invert.stock.id.hash(&mut h);
+                    let base = self.state.current_film_base().map(|b| b.light);
+                    for v in base.into_iter().flatten().chain(p.balance_ev) {
+                        v.to_bits().hash(&mut h);
+                    }
+                    (
+                        p.exposure_ev.to_bits(),
+                        p.contrast.to_bits(),
+                        p.rendering as u8,
+                    )
+                        .hash(&mut h);
+                }
+                h.finish() | 2
+            }
         };
         let cropping = self.state.step == WorkflowStep::Crop;
         let state = &mut self.state;
@@ -574,9 +792,10 @@ impl ScannerApp {
                 view::render(
                     &result,
                     channel,
-                    merged.as_deref(),
+                    &visible,
                     cleaned.as_deref(),
                     show_mask,
+                    inverter.as_ref(),
                 )
             },
             |ui, response, placement| {
@@ -634,6 +853,7 @@ impl eframe::App for ScannerApp {
                     match self.state.step {
                         WorkflowStep::Scan => self.scan_controls(ui),
                         WorkflowStep::Crop => self.crop_controls(ui),
+                        WorkflowStep::Invert => self.invert_controls(ui),
                         step => self.placeholder(ui, step),
                     }
                 });
@@ -643,6 +863,7 @@ impl eframe::App for ScannerApp {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string(TURNS_KEY, self.state.quarter_turns.to_string());
+        storage.set_string(STOCK_KEY, self.state.invert.stock.id.to_owned());
     }
 }
 

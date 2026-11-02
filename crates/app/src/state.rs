@@ -7,6 +7,8 @@ use scan_core::{
     ScanResult, ScanSource, SourceCapabilities,
 };
 
+use scan_core::image::DynamicImage;
+use scan_film::{FilmStock, Inverter, Printing};
 use scan_process::{DustRemoval, ExposureMerge, FrameDetection, FrameRect};
 
 use crate::worker::{Command, Event, ScanKind};
@@ -139,6 +141,37 @@ pub struct Crop {
     pub strips: usize,
 }
 
+/// Inverting film scans of colour negatives with a film stock's profile.
+#[derive(Clone, Copy, Debug)]
+pub struct InvertSettings {
+    /// Show and save film scans as positives.
+    pub enabled: bool,
+    pub stock: &'static FilmStock,
+    pub printing: Printing,
+}
+
+impl Default for InvertSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            stock: scan_film::stock::default_stock(),
+            printing: Printing::default(),
+        }
+    }
+}
+
+/// The light through the bare film base of the result with some generation, which
+/// negatives are inverted against.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FilmBase {
+    pub generation: u64,
+    /// Linear, 0-1 of full scale, per channel.
+    pub light: [f32; 3],
+    /// Measured on the film's rebate by frame detection, rather than guessed from the
+    /// clearest film on the scan.
+    pub measured: bool,
+}
+
 /// User-chosen scan settings, kept valid for the selected device and source.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScanSettings {
@@ -194,6 +227,9 @@ pub struct AppState {
     pub crop: Crop,
     /// How the scan is turned for viewing and saving, in quarter turns clockwise.
     pub quarter_turns: u8,
+    pub invert: InvertSettings,
+    /// The film base of the current result, once frame detection has looked for it.
+    pub film_base: Option<FilmBase>,
     /// The device whose capabilities the settings were last fitted to.
     settings_device: Option<DeviceId>,
 }
@@ -219,6 +255,8 @@ impl Default for AppState {
             cleaned: None,
             crop: Crop::default(),
             quarter_turns: 0,
+            invert: InvertSettings::default(),
+            film_base: None,
             settings_device: None,
         }
     }
@@ -374,14 +412,82 @@ impl AppState {
         })
     }
 
-    /// Whether frames are to be detected on the current result: on film scans, unless the
-    /// frames were edited.
+    /// Whether frames are to be detected on the current result: on every film scan, which
+    /// also measures its film base; frames edited by hand are kept.
     fn detection_pending(&self) -> bool {
         self.result.as_ref().is_some_and(|r| {
             r.source == ScanSource::Transparency
-                && !self.crop.edited
                 && self.crop.detected != Some(self.result_generation)
         })
+    }
+
+    /// The image shown and saved: the dust-cleaned one, else the merged exposures, else the
+    /// primary pass.
+    pub fn processed_image(&self) -> Option<&DynamicImage> {
+        let result = self.result.as_ref()?;
+        Some(match (self.current_cleaned(), self.current_merged()) {
+            (Some(c), _) => &c.removal.image,
+            (None, Some(m)) => &m.merge.image,
+            (None, None) => result.primary(),
+        })
+    }
+
+    /// The current result's film base, once it is known.
+    pub fn current_film_base(&self) -> Option<FilmBase> {
+        self.film_base
+            .filter(|b| b.generation == self.result_generation)
+    }
+
+    /// What turns the current result into a positive, if it is a film scan to be inverted
+    /// and its film base is known.
+    pub fn inverter(&self) -> Option<Inverter> {
+        let result = self.result.as_ref()?;
+        if !self.invert.enabled || result.source != ScanSource::Transparency {
+            return None;
+        }
+        let base = self.current_film_base()?;
+        Some(Inverter::new(
+            self.invert.stock.model(),
+            base.light,
+            &self.invert.printing,
+        ))
+    }
+
+    /// Set the printing's exposure and colour balance the way a photofinisher's printer
+    /// does, from the frames' average colours (see [`scan_film::auto_printing`]).
+    pub fn auto_printing(&mut self) {
+        let (Some(result), Some(base), Some(image)) = (
+            self.result.clone(),
+            self.current_film_base(),
+            self.processed_image(),
+        ) else {
+            return;
+        };
+        let frames: Vec<FrameRect> = self.crop.frames.iter().map(|f| f.rect).collect();
+        if frames.is_empty() {
+            self.error = Some("Auto needs frames: detect or add them in the Crop step".into());
+            return;
+        }
+        let levels = scan_process::frame_levels(
+            image,
+            result.gamma,
+            result.dpi,
+            result.area,
+            &frames,
+            self.invert.stock.model(),
+            base.light,
+        );
+        let p = scan_film::auto_printing(&levels, &self.invert.printing);
+        self.invert.printing = p;
+        self.error = None;
+        self.status = format!(
+            "Auto from {} frames: exposure {:+.2} EV, red {:+.2}, green {:+.2}, blue {:+.2}",
+            levels.len(),
+            p.exposure_ev,
+            p.balance_ev[0],
+            p.balance_ev[1],
+            p.balance_ev[2]
+        );
     }
 
     /// Start the next processing step the current result needs with the current settings:
@@ -420,12 +526,14 @@ impl AppState {
         let result = self.result.clone()?;
         let merged = self.current_merged().map(|m| m.merge.clone());
         let cleaned = self.current_cleaned().map(|c| c.removal.clone());
+        let invert = self.inverter().map(Arc::new);
         self.activity = Activity::Saving;
         self.status = format!("Saving {}...", path.display());
         Some(Command::Save {
             result,
             merged,
             cleaned,
+            invert,
             quarter_turns: self.quarter_turns,
             path,
         })
@@ -439,12 +547,14 @@ impl AppState {
         let result = self.result.clone()?;
         let merged = self.current_merged().map(|m| m.merge.clone());
         let cleaned = self.current_cleaned().map(|c| c.removal.clone());
+        let invert = self.inverter().map(Arc::new);
         self.activity = Activity::Saving;
         self.status = format!("Saving {} frames...", self.crop.frames.len());
         Some(Command::SaveFrames {
             result,
             merged,
             cleaned,
+            invert,
             frames: self.crop.frames.iter().map(|f| f.rect).collect(),
             quarter_turns: self.quarter_turns,
             path,
@@ -666,25 +776,39 @@ impl AppState {
             Event::FramesDetected {
                 generation,
                 detection,
+                estimated_base,
             } => {
                 self.activity = Activity::Idle;
                 self.status = detection_summary(&detection);
-                // Frames edited while it ran are kept.
-                if generation == self.result_generation && !self.crop.edited {
-                    self.crop = Crop {
-                        frames: detection
-                            .frames
-                            .iter()
-                            .map(|f| CropFrame {
-                                rect: f.rect,
-                                check: f.placed_by_spacing,
-                            })
-                            .collect(),
-                        selected: None,
-                        edited: false,
-                        detected: Some(generation),
-                        strips: detection.strips,
+                if generation == self.result_generation {
+                    let base = match (detection.base, estimated_base) {
+                        (Some(light), _) => Some((light, true)),
+                        (None, Some(light)) => Some((light, false)),
+                        (None, None) => None,
                     };
+                    self.film_base = base.map(|(light, measured)| FilmBase {
+                        generation,
+                        light,
+                        measured,
+                    });
+                    self.crop.detected = Some(generation);
+                    // Frames edited by hand, before or while it ran, are kept.
+                    if !self.crop.edited {
+                        self.crop = Crop {
+                            frames: detection
+                                .frames
+                                .iter()
+                                .map(|f| CropFrame {
+                                    rect: f.rect,
+                                    check: f.placed_by_spacing,
+                                })
+                                .collect(),
+                            selected: None,
+                            edited: false,
+                            detected: Some(generation),
+                            strips: detection.strips,
+                        };
+                    }
                 }
                 self.update_processing()
             }
@@ -771,6 +895,7 @@ mod tests {
         state.apply(Event::FramesDetected {
             generation,
             detection,
+            estimated_base: None,
         })
     }
 
@@ -805,6 +930,7 @@ mod tests {
         state.apply(Event::FramesDetected {
             generation: 1,
             detection: FrameDetection::default(),
+            estimated_base: None,
         });
         assert_eq!(state.crop.frames.len(), 12);
         assert_eq!(state.crop.detected, Some(1));
@@ -836,9 +962,13 @@ mod tests {
         assert!(state.crop.edited);
         assert_eq!(state.crop.frames.len(), 11);
 
-        // The frames are on the bed, so they fit the new scan as they are.
-        assert!(preview(&mut state).is_none());
+        // The frames are on the bed, so they fit the new scan as they are. The new scan is
+        // still searched, for its film base.
+        let cmd = preview(&mut state);
+        assert!(matches!(cmd, Some(Command::DetectFrames { .. })));
+        detected(&mut state, cmd);
         assert_eq!(state.crop.frames.len(), 11);
+        assert_eq!(state.current_film_base().map(|b| b.measured), Some(true));
         assert_eq!(state.crop.frames[3].rect.angle_deg, 1.5);
 
         let cmd = state.redetect_frames();
@@ -846,6 +976,59 @@ mod tests {
         detected(&mut state, cmd);
         assert_eq!(state.crop.frames.len(), 12);
         assert!(state.crop.frames[3].rect.angle_deg.abs() < 0.1);
+    }
+
+    #[test]
+    fn film_scans_are_inverted_against_their_measured_base() {
+        let mut state = with_mock_open();
+        let cmd = preview(&mut state);
+        assert!(
+            state.inverter().is_none(),
+            "no base until the frames are looked for"
+        );
+        detected(&mut state, cmd);
+        let base = state.current_film_base().unwrap();
+        assert!(base.measured);
+        for c in 0..3 {
+            let want = scan_core::mock::FILM_BASE[c];
+            // A preview is 8-bit.
+            assert!((base.light[c] / want - 1.0).abs() < 0.03, "{base:?}");
+        }
+        assert!(state.inverter().is_some());
+        let Some(Command::SaveFrames {
+            invert: Some(_), ..
+        }) = state.start_save_frames("f.tif".into())
+        else {
+            panic!("expected the frames saved inverted");
+        };
+        state.activity = Activity::Idle;
+
+        state.invert.enabled = false;
+        assert!(state.inverter().is_none());
+        state.invert.enabled = true;
+
+        // The mock's frames are lit evenly, so the roll comes out near neutral.
+        state.auto_printing();
+        assert!(
+            state.status.starts_with("Auto from 12 frames"),
+            "{}",
+            state.status
+        );
+        let p = state.invert.printing;
+        assert!(p.balance_ev.iter().all(|b| b.abs() < 0.5), "{p:?}");
+
+        // A new scan needs its own base: the old one isn't used for it.
+        preview(&mut state);
+        assert!(state.inverter().is_none());
+    }
+
+    #[test]
+    fn flatbed_scans_are_not_inverted() {
+        let mut state = with_mock_open();
+        state.settings.source = ScanSource::Flatbed;
+        state.fit_settings();
+        preview(&mut state);
+        assert!(state.inverter().is_none());
     }
 
     #[test]

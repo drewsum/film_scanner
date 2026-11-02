@@ -1,0 +1,44 @@
+{
+  "source": {
+    "film": "KODAK GOLD 200 Film",
+    "publication": "E-7022",
+    "edition": "February 2016",
+    "url": "https://business.kodakmoments.com/sites/default/files/files/resources/E7022_Gold_200.pdf",
+    "sha256": "9f19012f258b5e61be9b043c554483f01d338d0a8aff28163cb4ef6d7ddbe7df"
+  },
+  "notes": [
+    "Characteristic curves: daylight exposure, Status M densitometry, Log H ref -1.14.",
+    "Spectral sensitivity: daylight, effective exposure 1/50 s, Status M, density 0.2 above",
+    "D-min. Spectral dye density: typical densities of a midscale neutral subject and D-min.",
+    "",
+    "Page coordinates: the plots' axes are calibrated from their tick marks (the `x` and `y`",
+    "pairs in the config), which agree with the plot frames to 0.02 pt."
+  ],
+  "page": 3,
+  "log_h_ref": -1.14,
+  "plots": {
+    "characteristic": {
+      "x": [[127.803, -2.0], [220.057, 0.0]],
+      "y": [[239.682, 1.0], [147.427, 3.0]],
+      "curves": { "blue": [35], "green": [36], "red": [37] },
+      "sample": { "start": -3.0, "step": 0.05, "end": 0.85 }
+    },
+    "sensitivity": {
+      "x": [[94.906, 300.0], [255.362, 700.0]],
+      "y": [[460.911, 1.0], [385.127, 3.0]],
+      "floor": 0.0,
+      "curves": {
+        "yellow": [[63, 76]],
+        "magenta": [[77, 98]],
+        "cyan": [[99, 106], [107, 127]]
+      },
+      "sample": { "start": 360.0, "step": 5.0, "end": 700.0 }
+    },
+    "dye_density": {
+      "x": [[418.537, 500.0], [479.987, 600.0]],
+      "y": [[250.381, 0.5], [139.772, 2.0]],
+      "curves": { "midscale": [129], "minimum": [130] },
+      "sample": { "start": 400.0, "step": 5.0, "end": 695.0 }
+    }
+  }
+}

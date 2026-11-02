@@ -152,6 +152,10 @@ pub struct FrameDetection {
     pub frames: Vec<DetectedFrame>,
     /// Strips of film found, including any without frames.
     pub strips: usize,
+    /// The linear light (0–1 of full scale) through the bare film base, per channel: the
+    /// median of the strips' rebates (or, where the holder covers those, of their clearest
+    /// film). What a negative is inverted against.
+    pub base: Option<[f32; 3]>,
 }
 
 /// Find the frames on a transparency scan of negative film strips. `image` is the scan of
@@ -170,11 +174,13 @@ pub fn detect_frames(
     };
     let format = Format::new(&params.format, work.mm);
     let inset = params.inset_mm / work.mm;
+    let mut bases = Vec::new();
     for strip in find_strips(&work, &levels, &format) {
         let Some(sampled) = Sampled::new(&work, &levels, &strip, &format) else {
             continue;
         };
         detection.strips += 1;
+        bases.push(sampled.base);
         for frame in sampled.frames(&format) {
             let along = (frame.start + inset, frame.end - inset);
             let across = (frame.left + inset, frame.right - inset);
@@ -203,6 +209,12 @@ pub fn detect_frames(
                 placed_by_spacing: frame.placed_by_spacing,
             });
         }
+    }
+    if !bases.is_empty() {
+        detection.base = Some(std::array::from_fn(|c| {
+            let mut v: Vec<f32> = bases.iter().map(|b| b[c]).collect();
+            percentile(&mut v, 0.5)
+        }));
     }
     detection
 }
