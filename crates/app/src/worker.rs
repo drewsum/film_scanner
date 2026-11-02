@@ -9,10 +9,12 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 
 use scan_core::image::codecs::jpeg::JpegEncoder;
-use scan_core::image::{DynamicImage, ImageFormat};
+use scan_core::image::codecs::png::PngEncoder;
+use scan_core::image::codecs::tiff::TiffEncoder;
+use scan_core::image::{DynamicImage, ImageEncoder, ImageError};
 use scan_core::{
-    CancelToken, Capabilities, DeviceInfo, DeviceRegistry, ProgressSink, ScanError, ScanRequest,
-    ScanResult, ScannerDevice, export,
+    CancelToken, Capabilities, DeviceInfo, DeviceRegistry, MM_PER_INCH, ProgressSink, ScanError,
+    ScanRequest, ScanResult, ScannerDevice, export,
 };
 use scan_process::adjust::{self, Adjustments};
 use scan_process::{
@@ -20,6 +22,7 @@ use scan_process::{
 };
 
 use crate::export::FrameFormat;
+use crate::session::Roll;
 use crate::state::Film;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,9 +86,10 @@ pub enum Command {
         path: PathBuf,
     },
     /// Save `frames` cut out of the primary image (or of `merged` or `cleaned`, as for
-    /// [`Command::Save`]), straightened, inverted (when `film` is given) and edited with
-    /// their own adjustments, then turned (`quarter_turns`, then each frame's own), each to
-    /// its own file in `format`. Then write `metadata`'s text to its file, when given.
+    /// [`Command::Save`]), straightened (with their border and straightening), healed,
+    /// inverted (when `film` is given) and edited with their own adjustments, then turned
+    /// (`quarter_turns`, then each frame's own), each to its own file in `format`, tagged
+    /// sRGB. Then write `metadata`'s text to its file, when given.
     SaveFrames {
         result: Arc<ScanResult>,
         merged: Option<Arc<ExposureMerge>>,
@@ -96,6 +100,16 @@ pub enum Command {
         format: FrameFormat,
         metadata: Option<(PathBuf, String)>,
     },
+    /// Write `roll` to `path`, and `scan` beside it (as scanned) when given.
+    SaveRoll {
+        scan: Option<Arc<ScanResult>>,
+        roll: Box<Roll>,
+        path: PathBuf,
+        /// The result's generation, handed back with the outcome.
+        generation: u64,
+    },
+    /// Read the roll file at the path, and its scan.
+    OpenRoll(PathBuf),
 }
 
 #[derive(Debug)]
@@ -129,6 +143,15 @@ pub enum Event {
         estimated_base: Option<[f32; 3]>,
     },
     Saved(Result<Vec<PathBuf>, String>),
+    RollSaved {
+        path: PathBuf,
+        generation: u64,
+        result: Result<Vec<PathBuf>, String>,
+    },
+    RollOpened {
+        path: PathBuf,
+        result: Result<(Box<Roll>, ScanResult), String>,
+    },
 }
 
 /// Handle to the worker thread. Dropping it stops the thread once its current job finishes.
@@ -309,7 +332,10 @@ fn run(
                 path,
             } => {
                 let primary = processed(&result, &merged, &cleaned);
-                let primary = developed(primary, result.gamma, film.as_ref(), &adjust);
+                let px_per_mm = result.dpi as f32 / MM_PER_INCH;
+                let spots = adjust::spot_pixels(&adjust.spots, None, &result.area, px_per_mm);
+                let primary = adjust::heal(primary, &spots);
+                let primary = developed(&primary, result.gamma, film.as_ref(), &adjust);
                 let saved = export::save_tiff_with_primary(&result, &primary, quarter_turns, &path)
                     .map_err(|e| e.to_string());
                 send(Event::Saved(saved));
@@ -325,10 +351,15 @@ fn run(
                 metadata,
             } => {
                 let image = processed(&result, &merged, &cleaned);
+                let px_per_mm = result.dpi as f32 / MM_PER_INCH;
                 let saved = frames
                     .into_iter()
                     .map(|(frame, adj, target)| {
-                        let crop = scan_process::crop_frame(image, result.dpi, result.area, &frame);
+                        let cut = adjust::framed(&frame, &adj);
+                        let crop = scan_process::crop_frame(image, result.dpi, result.area, &cut);
+                        let spots =
+                            adjust::spot_pixels(&adj.spots, Some(&cut), &result.area, px_per_mm);
+                        let crop = adjust::heal(&crop, &spots);
                         let crop = developed(&crop, result.gamma, film.as_ref(), &adj);
                         let turns = (quarter_turns + adj.quarter_turns) % 4;
                         save_frame(&adjust::orient(&crop, turns, adj.mirror), format, &target)
@@ -347,6 +378,37 @@ fn run(
                     },
                 });
                 send(Event::Saved(saved));
+            }
+            Command::SaveRoll {
+                scan,
+                roll,
+                path,
+                generation,
+            } => {
+                let mut written = Vec::new();
+                let saved = scan
+                    .map_or(Ok(()), |scan| {
+                        export::save_tiff(&scan, &roll.scan_path(&path))
+                            .map(|files| written = files)
+                            .map_err(|e| e.to_string())
+                    })
+                    .and_then(|()| {
+                        std::fs::write(&path, roll.to_text())
+                            .map_err(|e| format!("{}: {e}", path.display()))
+                    })
+                    .map(|()| {
+                        written.insert(0, path.clone());
+                        written
+                    });
+                send(Event::RollSaved {
+                    path,
+                    generation,
+                    result: saved,
+                });
+            }
+            Command::OpenRoll(path) => {
+                let result = Roll::open(&path).map(|(roll, scan)| (Box::new(roll), scan));
+                send(Event::RollOpened { path, result });
             }
         }
     }
@@ -368,22 +430,26 @@ fn developed<'a>(
     Cow::Owned(DynamicImage::ImageRgb16(positive))
 }
 
-/// Write `image` (16-bit) to `path` in `format`, as 8 bits for JPEG and PNG.
-fn save_frame(
-    image: &DynamicImage,
-    format: FrameFormat,
-    path: &Path,
-) -> Result<(), scan_core::image::ImageError> {
+/// Write `image` (16-bit) to `path` in `format`, as 8 bits for JPEG and PNG, with an sRGB
+/// profile.
+fn save_frame(image: &DynamicImage, format: FrameFormat, path: &Path) -> Result<(), ImageError> {
+    let file = BufWriter::new(File::create(path)?);
+    let eight = || DynamicImage::ImageRgb8(image.to_rgb8());
     match format {
         FrameFormat::Jpeg(quality) => {
-            let file = BufWriter::new(File::create(path)?);
-            JpegEncoder::new_with_quality(file, quality).encode_image(&image.to_rgb8())
+            write_tagged(&eight(), JpegEncoder::new_with_quality(file, quality))
         }
-        FrameFormat::Png => {
-            DynamicImage::ImageRgb8(image.to_rgb8()).save_with_format(path, ImageFormat::Png)
-        }
-        FrameFormat::Tiff => image.save_with_format(path, ImageFormat::Tiff),
+        FrameFormat::Png => write_tagged(&eight(), PngEncoder::new(file)),
+        FrameFormat::Tiff => write_tagged(image, TiffEncoder::new(file)),
     }
+}
+
+/// Write `image` with `encoder`, tagged with an sRGB profile.
+fn write_tagged(image: &DynamicImage, mut encoder: impl ImageEncoder) -> Result<(), ImageError> {
+    encoder
+        .set_icc_profile(crate::icc::srgb().to_vec())
+        .map_err(ImageError::Unsupported)?;
+    image.write_with_encoder(encoder)
 }
 
 /// The image to save: the dust-cleaned one, else the merged exposures, else the scan's
@@ -505,9 +571,11 @@ mod tests {
             ..Adjustments::default()
         };
         let film = Film {
+            film_type: crate::state::FilmType::ColorNegative,
             stock: scan_film::stock::default_stock(),
             base,
             printing: Default::default(),
+            mono: Default::default(),
         };
         worker.send(Command::SaveFrames {
             result: result.clone(),
@@ -572,6 +640,85 @@ mod tests {
             "format: 0
 "
         );
+    }
+
+    #[test]
+    fn exports_are_cut_with_their_geometry_healed_and_tagged_srgb() {
+        use scan_core::image::ImageDecoder;
+
+        let mut dev = MockBackend.open(&MockBackend::device_info()).unwrap();
+        let request = ScanRequest::new(ScanSource::Transparency, 150);
+        let result = Arc::new(dev.scan(&request, &mut NoProgress).unwrap());
+        let detection = scan_process::detect_frames(
+            result.primary(),
+            result.gamma,
+            result.dpi,
+            result.area,
+            &DetectParams::default(),
+        );
+        let rect = detection.frames[0].rect;
+        let bordered = Adjustments {
+            border_mm: 2.0,
+            spots: vec![adjust::Spot {
+                x_mm: rect.cx_mm,
+                y_mm: rect.cy_mm,
+                radius_mm: 0.5,
+            }],
+            ..Adjustments::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let worker = Worker::spawn(DeviceRegistry::new(), || {});
+        let paths: Vec<_> = ["a.jpg", "b.png", "c.tif"]
+            .iter()
+            .map(|n| dir.path().join(n))
+            .collect();
+        for (path, format) in
+            paths
+                .iter()
+                .zip([FrameFormat::Jpeg(90), FrameFormat::Png, FrameFormat::Tiff])
+        {
+            worker.send(Command::SaveFrames {
+                result: result.clone(),
+                merged: None,
+                cleaned: None,
+                film: None,
+                frames: vec![(rect, bordered.clone(), path.clone())],
+                quarter_turns: 0,
+                format,
+                metadata: None,
+            });
+            let Event::Saved(Ok(_)) = next(&worker) else {
+                panic!("expected {path:?} saved")
+            };
+        }
+        let px = |mm: f32| (mm / scan_core::MM_PER_INCH * 150.0).round() as u32;
+        let saved = scan_core::image::open(&paths[0]).unwrap();
+        assert_eq!(
+            (saved.width(), saved.height()),
+            (px(rect.width_mm + 4.0), px(rect.height_mm + 4.0))
+        );
+        let jpeg = std::io::BufReader::new(File::open(&paths[0]).unwrap());
+        let mut decoder = scan_core::image::codecs::jpeg::JpegDecoder::new(jpeg).unwrap();
+        assert_eq!(
+            decoder.icc_profile().unwrap().as_deref(),
+            Some(crate::icc::srgb())
+        );
+        let png = std::io::BufReader::new(File::open(&paths[1]).unwrap());
+        let mut decoder = scan_core::image::codecs::png::PngDecoder::new(png).unwrap();
+        assert_eq!(
+            decoder.icc_profile().unwrap().as_deref(),
+            Some(crate::icc::srgb())
+        );
+        let tiff = std::io::BufReader::new(File::open(&paths[2]).unwrap());
+        let mut decoder = scan_core::image::codecs::tiff::TiffDecoder::new(tiff).unwrap();
+        assert_eq!(
+            decoder.icc_profile().unwrap().as_deref(),
+            Some(crate::icc::srgb())
+        );
+        assert!(matches!(
+            scan_core::image::open(&paths[2]).unwrap(),
+            DynamicImage::ImageRgb16(_)
+        ));
     }
 
     #[test]

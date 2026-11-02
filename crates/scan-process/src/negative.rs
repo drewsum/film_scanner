@@ -9,7 +9,7 @@ use std::borrow::Cow;
 
 use scan_core::image::{DynamicImage, GenericImageView, ImageBuffer, Rgb};
 use scan_core::{MM_PER_INCH, ScanArea};
-use scan_film::{FilmModel, Inverter, Printing};
+use scan_film::Inverter;
 
 use crate::frames::FrameRect;
 
@@ -83,21 +83,18 @@ pub(crate) fn in_parallel(src: &[u16], dst: &mut [u16], f: impl Fn(&[u16], &mut 
     });
 }
 
-/// Each frame's mean log10 scene light per channel at neutral printing, as
-/// [`scan_film::auto_printing`] takes them. `image` is the scan of `area` at `dpi`, its
-/// values encoding light with `gamma`, of a film with `model` whose bare base lets `base`
-/// through. Frames are sampled about every quarter millimetre; a frame off the scan is left
-/// out.
+/// Each frame's mean log10 scene light per channel through `neutral` (an inverter with no
+/// printing exposure or balance), as [`scan_film::auto_printing`] takes them. `image` is
+/// the scan of `area` at `dpi`, its values encoding light with `gamma`. Frames are sampled
+/// about every quarter millimetre; a frame off the scan is left out.
 pub fn frame_levels(
     image: &DynamicImage,
     gamma: f32,
     dpi: u32,
     area: ScanArea,
     frames: &[FrameRect],
-    model: &FilmModel,
-    base: [f32; 3],
+    neutral: &Inverter,
 ) -> Vec<[f32; 3]> {
-    let neutral = Inverter::new(model, base, &Printing::default());
     let (w, h) = (image.width() as f32, image.height() as f32);
     let decode = decode_table(gamma);
     let px_per_mm = dpi as f32 / MM_PER_INCH;
@@ -182,7 +179,7 @@ pub(crate) fn pixel16(image: &DynamicImage, x: u32, y: u32) -> [u16; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use scan_film::stock;
+    use scan_film::{FilmModel, Printing, stock};
 
     const GAMMA: f32 = 1.8;
 
@@ -274,8 +271,7 @@ mod tests {
             dpi,
             area,
             &[frame(7.0), frame(22.0)],
-            model,
-            base,
+            &Inverter::new(model, base, &Printing::default()),
         );
         assert_eq!(levels.len(), 2);
         let expect = [[0.5f32, 0.36, 0.25], [0.18; 3]];

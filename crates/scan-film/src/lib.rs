@@ -23,7 +23,7 @@ pub mod stock;
 pub mod stocks;
 
 pub use model::FilmModel;
-pub use render::{Inverter, Printing, Rendering, Tone, auto_printing};
+pub use render::{Inverter, Mono, Printing, Rendering, Tone, Toning, auto_printing};
 pub use stock::{FilmKind, FilmStock};
 
 #[cfg(test)]

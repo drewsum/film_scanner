@@ -1,5 +1,7 @@
 use crate::model::{FilmModel, GREY, MIN_GAMMA};
-use crate::render::{Inverter, Printing, Rendering, Tone, auto_printing};
+use crate::render::{
+    BW_GAMMA, BW_GREY_DENSITY, Inverter, Mono, Printing, Rendering, Tone, Toning, auto_printing,
+};
 use crate::sheets::kodak_e7022::SHEET;
 use crate::stock;
 
@@ -12,6 +14,89 @@ fn model() -> &'static FilmModel {
 fn scanned(model: &FilmModel, base: [f32; 3], e: [f32; 3]) -> [f32; 3] {
     let d = model.negative(e);
     std::array::from_fn(|c| base[c] * 10f32.powf(-d[c]))
+}
+
+#[test]
+fn black_and_white_negatives_print_grey_and_in_order() {
+    let base = [0.7, 0.68, 0.66];
+    let mono = Mono::default();
+    let inverter = Inverter::black_and_white(base, &Printing::default(), &mono);
+    assert!(inverter.is_mono() && !inverter.separable());
+    // A grey card's density above base prints as a grey card does.
+    let card: [f32; 3] = std::array::from_fn(|c| base[c] * 10f32.powf(-BW_GREY_DENSITY));
+    let d = inverter.pixel(card);
+    let grey = Inverter::new(model(), [0.5; 3], &Printing::default()).display_channel(GREY);
+    for v in d {
+        assert!((v - grey).abs() < 1e-4, "{d:?} vs {grey}");
+    }
+    // Denser negative, lighter print; one stop more is BW_GAMMA·log10(2) denser.
+    let denser = card.map(|l| l * 10f32.powf(-BW_GAMMA * 2f32.log10()));
+    let e = inverter.scene(0, denser[0]);
+    assert!((e / GREY - 2.0).abs() < 1e-3, "{e}");
+    assert!(inverter.pixel(denser)[1] > d[1]);
+    // The color balance doesn't tint it.
+    let tinted = Printing {
+        balance_ev: [0.5, 0.0, -0.5],
+        ..Printing::default()
+    };
+    let t = Inverter::black_and_white(base, &tinted, &mono).pixel(card);
+    assert!((t[0] - t[2]).abs() < 1e-6);
+}
+
+#[test]
+fn black_and_white_mixes_and_tones() {
+    let base = [0.7; 3];
+    // Only red counts: the other channels' light makes no difference.
+    let red = Mono {
+        mix: [2.0, 0.0, 0.0],
+        ..Mono::default()
+    };
+    let inverter = Inverter::black_and_white(base, &Printing::default(), &red);
+    let a = inverter.pixel([0.1, 0.3, 0.05]);
+    let b = inverter.pixel([0.1, 0.02, 0.6]);
+    assert!((a[0] - b[0]).abs() < 1e-6);
+    // Sepia warms the midtones and leaves black and white.
+    let sepia = Mono {
+        toning: Toning::Sepia,
+        toning_amount: 1.0,
+        ..Mono::default()
+    };
+    let toned = Inverter::black_and_white(base, &Printing::default(), &sepia);
+    let mid = toned.pixel([0.7 * 10f32.powf(-BW_GREY_DENSITY); 3]);
+    assert!(mid[0] > mid[1] && mid[1] > mid[2], "{mid:?}");
+    let white = toned.display([1e6; 3]);
+    assert!(white.iter().all(|v| *v > 0.99), "{white:?}");
+    for t in Toning::ALL {
+        assert!(!t.label().is_empty());
+    }
+}
+
+#[test]
+fn slides_pass_their_light_through() {
+    let inverter = Inverter::positive(&Printing::default());
+    assert!(inverter.separable() && !inverter.is_mono());
+    // A grey card on the slide, as sRGB shows it.
+    let grey = crate::spectral::srgb_encode(f64::from(GREY)) as f32;
+    let d = inverter.pixel([GREY; 3]);
+    assert!(d.iter().all(|v| (v - grey).abs() < 1e-5), "{d:?}");
+    // More light, lighter; exposure and balance as on a negative.
+    assert!(inverter.pixel([0.5; 3])[0] > d[0]);
+    let warm = Printing {
+        exposure_ev: 1.0,
+        balance_ev: [0.5, 0.0, -0.5],
+        ..Printing::default()
+    };
+    let w = Inverter::positive(&warm);
+    assert!((w.scene(1, 0.1) - 0.2).abs() < 1e-6);
+    let p = w.pixel([GREY; 3]);
+    assert!(p[0] > p[1] && p[1] > p[2]);
+    // More contrast spreads light and dark from grey.
+    let punchy = Inverter::positive(&Printing {
+        contrast: 2.0,
+        ..Printing::default()
+    });
+    assert!(punchy.pixel([0.05; 3])[0] < inverter.pixel([0.05; 3])[0]);
+    assert!((punchy.pixel([GREY; 3])[0] - grey).abs() < 1e-5);
 }
 
 #[test]

@@ -1,3 +1,4 @@
+use scan_core::ScanArea;
 use scan_core::image::{ImageBuffer, Rgb};
 use scan_film::stock;
 
@@ -179,9 +180,9 @@ fn selective_color_moves_its_hues_only() {
     let grey = [0.4, 0.4, 0.4];
     let s = adj.selective;
     let (b, r, g) = (
-        recolor(blue, 0.0, &s),
-        recolor(red, 0.0, &s),
-        recolor(grey, 0.0, &s),
+        recolor(blue, 0.0, 0.0, &s),
+        recolor(red, 0.0, 0.0, &s),
+        recolor(grey, 0.0, 0.0, &s),
     );
     assert!(b.iter().sum::<f32>() > blue.iter().sum::<f32>());
     assert!(b[2] - b[0] < blue[2] - blue[0]);
@@ -191,7 +192,7 @@ fn selective_color_moves_its_hues_only() {
     // A hue shift turns reds towards yellow.
     let mut s = [HueAdjust::default(); 6];
     s[0].hue_deg = 30.0;
-    let shifted = recolor(red, 0.0, &s);
+    let shifted = recolor(red, 0.0, 0.0, &s);
     assert!(shifted[1] > red[1] + 0.1 && shifted[0] < red[0]);
 }
 
@@ -401,6 +402,260 @@ fn positives_balance_from_their_log_means() {
     let d = neutralize(m.map(f32::exp2));
     let fixed: Vec<f32> = (0..3).map(|c| m[c] + d[c]).collect();
     assert!((fixed[0] - fixed[2]).abs() < 1e-5);
+}
+
+#[test]
+fn temperature_and_tint_move_the_balance_keeping_the_level() {
+    let warm = Adjustments {
+        temperature: 1.0,
+        ..Adjustments::default()
+    };
+    let [r, g, b] = warm.color_ev();
+    assert!((r - TEMPERATURE_EV).abs() < 1e-6 && g == 0.0 && (b + TEMPERATURE_EV).abs() < 1e-6);
+    let magenta = Adjustments {
+        tint: 0.5,
+        balance_ev: [0.1, 0.0, 0.0],
+        ..Adjustments::default()
+    };
+    let e = magenta.color_ev();
+    assert!(e[1] < 0.0 && e[0] > 0.1 && e[2] > 0.0);
+    // Neither changes the overall level.
+    let mean = |e: [f32; 3]| e.iter().sum::<f32>() / 3.0;
+    assert!((mean(e) - 0.1 / 3.0).abs() < 1e-6);
+    let printing = warm.printing(&Printing::default());
+    assert_eq!(printing.balance_ev, warm.color_ev());
+    let g = warm.gains();
+    assert!(g[0] > 1.0 && g[1] == 1.0 && g[2] < 1.0);
+}
+
+#[test]
+fn borders_grow_the_frame_and_straightening_keeps_it_inside() {
+    let rect = FrameRect {
+        cx_mm: 50.0,
+        cy_mm: 40.0,
+        width_mm: 36.0,
+        height_mm: 24.0,
+        angle_deg: 1.0,
+    };
+    assert_eq!(framed(&rect, &Adjustments::default()), rect);
+    let border = Adjustments {
+        border_mm: 1.5,
+        ..Adjustments::default()
+    };
+    let grown = framed(&rect, &border);
+    assert_eq!((grown.width_mm, grown.height_mm), (39.0, 27.0));
+    assert!(border.reframes());
+
+    let level = Adjustments {
+        straighten_deg: 3.0,
+        ..border
+    };
+    let turned = framed(&rect, &level);
+    assert!((turned.angle_deg - (1.0 - 3.0)).abs() < 1e-6);
+    // Smaller, the same shape, and every corner inside the grown frame.
+    assert!(turned.width_mm < 39.0);
+    assert!((turned.width_mm / turned.height_mm - 39.0 / 27.0).abs() < 1e-4);
+    for (x, y) in turned.corners() {
+        let (u, v) = grown.to_local(x, y);
+        assert!(u.abs() <= 19.5 + 1e-3 && v.abs() <= 13.5 + 1e-3, "{u}, {v}");
+    }
+}
+
+#[test]
+fn spots_are_found_on_the_cut_and_healed() {
+    let rect = FrameRect {
+        cx_mm: 20.0,
+        cy_mm: 10.0,
+        width_mm: 10.0,
+        height_mm: 8.0,
+        angle_deg: 90.0,
+    };
+    // Its own right is down the bed: a spot 2 mm below the middle is 2 mm right of it.
+    let spot = Spot {
+        x_mm: 20.0,
+        y_mm: 12.0,
+        radius_mm: 0.5,
+    };
+    let area = ScanArea::full(40.0, 30.0);
+    let [x, y, r] = spot_pixels(&[spot], Some(&rect), &area, 10.0)[0];
+    assert!((x - 70.0).abs() < 1e-3 && (y - 40.0).abs() < 1e-3 && r == 5.0);
+    let [x, y, _] = spot_pixels(&[spot], None, &area, 2.0)[0];
+    assert!((x - 40.0).abs() < 1e-3 && (y - 24.0).abs() < 1e-3);
+
+    let mut img = image(100, 80, |_, _| [0.5, 0.4, 0.3]);
+    for yy in 36..44 {
+        for xx in 66..74 {
+            img.put_pixel(xx, yy, Rgb([0, 0, 0]));
+        }
+    }
+    let dusty = DynamicImage::ImageRgb16(img);
+    let healed = heal(&dusty, &[[70.0, 40.0, 6.0]]).to_rgb16();
+    let p = px(&healed, 70, 40);
+    assert!(
+        (p[0] - 0.5).abs() < 0.01 && (p[2] - 0.3).abs() < 0.01,
+        "{p:?}"
+    );
+    // Nothing to heal, or off the image: unchanged and not copied.
+    assert!(matches!(heal(&dusty, &[]), Cow::Borrowed(_)));
+    assert!(matches!(
+        heal(&dusty, &[[500.0, 5.0, 3.0]]),
+        Cow::Borrowed(_)
+    ));
+}
+
+/// Dark on the left, light on the right, each with a little texture.
+fn two_tone() -> Rgb16Image {
+    image(200, 100, |x, y| {
+        let t = if (x / 4 + y / 4) % 2 == 0 { 0.02 } else { 0.0 };
+        let v = if x < 100 { 0.12 } else { 0.85 } + t;
+        [v; 3]
+    })
+}
+
+#[test]
+fn shadows_and_highlights_work_on_their_own_areas() {
+    let card = two_tone();
+    let lifted = apply(
+        card.clone(),
+        &Adjustments {
+            shadows: 1.0,
+            ..Adjustments::default()
+        },
+        1.0,
+    );
+    let (dark, light) = (px(&card, 30, 50)[0], px(&card, 170, 50)[0]);
+    assert!(
+        px(&lifted, 30, 50)[0] > dark * 1.6,
+        "{:?}",
+        px(&lifted, 30, 50)
+    );
+    assert!((px(&lifted, 170, 50)[0] - light).abs() < 0.01);
+    let calmed = apply(
+        card.clone(),
+        &Adjustments {
+            highlights: -1.0,
+            ..Adjustments::default()
+        },
+        1.0,
+    );
+    assert!(px(&calmed, 170, 50)[0] < light * 0.8);
+    assert!((px(&calmed, 30, 50)[0] - dark).abs() < 0.01);
+    // The texture within an area is kept: scaled with it, not flattened.
+    let step = |img: &Rgb16Image| px(img, 30, 50)[0] - px(img, 34, 50)[0];
+    assert!(step(&lifted).abs() > step(&card).abs());
+}
+
+#[test]
+fn clarity_steepens_local_contrast_and_leaves_flat_areas() {
+    // A fine texture on midgrey, and a flat band.
+    let card = image(200, 100, |x, y| {
+        let v = if y < 50 {
+            0.5 + 0.05 * (x as f32 * 0.8).sin()
+        } else {
+            0.5
+        };
+        [v; 3]
+    });
+    let spread = |img: &Rgb16Image| {
+        let row: Vec<f32> = (40..160).map(|x| px(img, x, 25)[1]).collect();
+        row.iter().cloned().fold(f32::MIN, f32::max) - row.iter().cloned().fold(f32::MAX, f32::min)
+    };
+    let with = |amount| {
+        apply(
+            card.clone(),
+            &Adjustments {
+                clarity: amount,
+                ..Adjustments::default()
+            },
+            1.0,
+        )
+    };
+    let (crisp, soft) = (with(1.0), with(-1.0));
+    assert!(spread(&crisp) > spread(&card) * 1.5);
+    assert!(spread(&soft) < spread(&card) * 0.5);
+    assert!((px(&crisp, 100, 90)[0] - 0.5).abs() < 0.002);
+}
+
+#[test]
+fn vibrance_lifts_muted_colors_most_and_spares_grey() {
+    let muted = [0.45, 0.52, 0.56];
+    let vivid = [0.9, 0.2, 0.6];
+    let chroma = |p: [f32; 3]| {
+        let [_, u, v] = opponent(p);
+        u.hypot(v)
+    };
+    let gain = |p| chroma(recolor(p, 0.0, 1.0, &Default::default())) / chroma(p);
+    assert!(gain(muted) > 1.5, "{}", gain(muted));
+    assert!(gain(vivid) < 1.2, "{}", gain(vivid));
+    let grey = [0.4; 3];
+    let out = recolor(grey, 0.0, 1.0, &Default::default());
+    assert!(out.iter().all(|v| (v - 0.4).abs() < 1e-5));
+    // Skin (orange-red) is lifted less than a muted green of the same chroma.
+    let skin = [0.6, 0.5, 0.45];
+    let green = [0.5, 0.58, 0.5];
+    assert!(gain(skin) < gain(green), "{} {}", gain(skin), gain(green));
+}
+
+#[test]
+fn falloff_and_vignette_change_the_corners_not_the_middle() {
+    let card = image(100, 60, |_, _| [0.5; 3]);
+    let with = |a: Adjustments| apply(card.clone(), &a, 1.0);
+    let lit = with(Adjustments {
+        falloff: 0.5,
+        ..Adjustments::default()
+    });
+    let dark = with(Adjustments {
+        vignette: -1.0,
+        ..Adjustments::default()
+    });
+    let light = with(Adjustments {
+        vignette: 1.0,
+        ..Adjustments::default()
+    });
+    assert!(px(&lit, 0, 0)[0] > 0.7);
+    assert!(px(&dark, 0, 0)[0] < 0.25);
+    assert!(px(&light, 99, 59)[0] > 0.75);
+    for img in [&lit, &dark, &light] {
+        assert!((px(img, 50, 30)[0] - 0.5).abs() < 0.005);
+    }
+}
+
+#[test]
+fn new_edits_count_as_edits() {
+    let edits = [
+        Adjustments {
+            highlights: 0.1,
+            ..Adjustments::default()
+        },
+        Adjustments {
+            shadows: 0.1,
+            ..Adjustments::default()
+        },
+        Adjustments {
+            clarity: 0.1,
+            ..Adjustments::default()
+        },
+        Adjustments {
+            vibrance: 0.1,
+            ..Adjustments::default()
+        },
+        Adjustments {
+            falloff: 0.1,
+            ..Adjustments::default()
+        },
+        Adjustments {
+            vignette: 0.1,
+            ..Adjustments::default()
+        },
+    ];
+    for a in edits {
+        assert!(a.edits_positive(), "{a:?}");
+    }
+    let geometry = Adjustments {
+        straighten_deg: 1.0,
+        ..Adjustments::default()
+    };
+    assert!(!geometry.edits_positive() && geometry.reframes());
 }
 
 #[test]

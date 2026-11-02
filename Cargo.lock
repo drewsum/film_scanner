@@ -1228,12 +1228,14 @@ dependencies = [
  "jiff",
  "log",
  "rfd",
+ "ron",
  "scan-core",
  "scan-epson",
  "scan-film",
  "scan-process",
  "scan-sane",
  "scan-wia",
+ "serde",
  "tempfile",
  "winresource",
  "yaml-rust2",
@@ -3128,6 +3130,7 @@ version = "0.1.0"
 dependencies = [
  "scan-core",
  "scan-film",
+ "serde",
  "thiserror 2.0.21",
 ]
 

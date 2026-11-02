@@ -8,11 +8,13 @@ use scan_core::{
 };
 
 use scan_core::image::DynamicImage;
-use scan_film::{FilmStock, Inverter, Printing};
+use scan_film::{FilmStock, Inverter, Mono, Printing};
 use scan_process::adjust::{self, Adjustments, Levels};
 use scan_process::{DustRemoval, ExposureMerge, FrameDetection, FrameRect};
 
 use crate::export::{self, ExportSettings};
+use crate::history::{self, History, Preset};
+use crate::session::{self, Roll};
 use crate::worker::{Command, Event, ScanKind};
 
 /// The stages of the film scanning workflow, in order.
@@ -53,14 +55,16 @@ impl WorkflowStep {
                 "Automatically detect frames on the strip, remove borders and straighten each frame."
             }
             WorkflowStep::Invert => {
-                "Invert negatives using film-stock profiles, removing the orange mask of color film."
+                "Turn the film into positives: color negatives with film-stock profiles, \
+                 removing the orange mask, black-and-white negatives and slides."
             }
             WorkflowStep::Adjust => {
-                "Edit each frame on its own: color, levels, curves, selective color, grain \
-                 reduction and sharpening."
+                "Edit each frame on its own: color, tone, levels, curves, selective color, \
+                 grain reduction, sharpening, straightening and spot healing."
             }
             WorkflowStep::Export => {
-                "Save the finished frames of the roll into a folder, with the metadata                  film_roll_publisher uploads them to Immich with."
+                "Save the finished frames of the roll into a folder, with the metadata \
+                 film_roll_publisher uploads them to Immich with."
             }
         }
     }
@@ -84,6 +88,7 @@ pub enum Activity {
     RemovingDust,
     DetectingFrames,
     Saving,
+    OpeningRoll,
 }
 
 /// Infrared dust and scratch removal of scans that have an infrared channel.
@@ -132,6 +137,10 @@ pub struct CropFrame {
     pub check: bool,
     /// The frame's own edits, from the Adjust step.
     pub adjust: Adjustments,
+    /// Left out of exports and saves: a blank, fogged or repeated frame.
+    pub skip: bool,
+    /// Its edits' undo and redo.
+    pub history: History,
 }
 
 impl CropFrame {
@@ -140,7 +149,14 @@ impl CropFrame {
             rect,
             check: false,
             adjust: Adjustments::default(),
+            skip: false,
+            history: History::default(),
         }
+    }
+
+    /// What is cut from the scan for it: its rectangle with its border and straightening.
+    pub fn cut(&self) -> FrameRect {
+        adjust::framed(&self.rect, &self.adjust)
     }
 }
 
@@ -161,43 +177,113 @@ pub struct Crop {
     pub reversed: bool,
 }
 
-/// Inverting film scans of color negatives with a film stock's profile.
+/// What film is in the holder, which decides how it is turned into a positive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum FilmType {
+    /// Inverted with the film stock's profile, which removes the orange mask.
+    #[default]
+    ColorNegative,
+    /// Inverted on a generic black-and-white film's curve, mixed to grey and toned.
+    BlackAndWhite,
+    /// A positive already: printed as it is, with the roll's exposure and balance.
+    Slide,
+}
+
+impl FilmType {
+    pub const ALL: [FilmType; 3] = [
+        FilmType::ColorNegative,
+        FilmType::BlackAndWhite,
+        FilmType::Slide,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            FilmType::ColorNegative => "Color negative",
+            FilmType::BlackAndWhite => "Black-and-white negative",
+            FilmType::Slide => "Slide (positive)",
+        }
+    }
+
+    /// How it is kept in settings and roll files: never change these once released.
+    pub fn key(self) -> &'static str {
+        match self {
+            FilmType::ColorNegative => "color-negative",
+            FilmType::BlackAndWhite => "black-and-white",
+            FilmType::Slide => "slide",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|t| t.key() == key)
+    }
+
+    /// Whether it needs the film base measured: negatives are inverted against it.
+    pub fn is_negative(self) -> bool {
+        self != FilmType::Slide
+    }
+}
+
+/// Turning film scans into positives: color negatives with a film stock's profile,
+/// black-and-white negatives and slides without one.
 #[derive(Clone, Copy, Debug)]
 pub struct InvertSettings {
     /// Show and save film scans as positives.
     pub enabled: bool,
+    pub film_type: FilmType,
+    /// The color negative film's profile.
     pub stock: &'static FilmStock,
     pub printing: Printing,
+    /// How black-and-white film is made grey and toned.
+    pub mono: Mono,
 }
 
 impl Default for InvertSettings {
     fn default() -> Self {
         Self {
             enabled: true,
+            film_type: FilmType::ColorNegative,
             stock: scan_film::stock::default_stock(),
             printing: Printing::default(),
+            mono: Mono::default(),
         }
     }
 }
 
-/// What inverts the current result: its film stock, film base and the roll's printing.
-/// Each frame is inverted with its own adjustments' exposure and balance added.
+/// What turns the current result into positives: its film's type and stock, its film base
+/// and the roll's printing. Each frame is printed with its own adjustments' exposure and
+/// color added.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Film {
+    pub film_type: FilmType,
     pub stock: &'static FilmStock,
-    /// Linear light through the bare film base, per channel.
+    /// Linear light through the bare film base, per channel (1 for a slide).
     pub base: [f32; 3],
     pub printing: Printing,
+    pub mono: Mono,
 }
 
 impl Film {
     /// The inverter for an image with `adjust`.
     pub fn inverter(&self, adjust: &Adjustments) -> Inverter {
-        Inverter::new(
-            self.stock.model(),
-            self.base,
-            &adjust.printing(&self.printing),
-        )
+        self.with_printing(&adjust.printing(&self.printing))
+    }
+
+    /// The inverter with no printing exposure or balance, which frames are measured
+    /// through for Auto.
+    pub fn neutral(&self) -> Inverter {
+        self.with_printing(&Printing {
+            exposure_ev: 0.0,
+            balance_ev: [0.0; 3],
+            ..self.printing
+        })
+    }
+
+    fn with_printing(&self, printing: &Printing) -> Inverter {
+        match self.film_type {
+            FilmType::ColorNegative => Inverter::new(self.stock.model(), self.base, printing),
+            FilmType::BlackAndWhite => Inverter::black_and_white(self.base, printing, &self.mono),
+            FilmType::Slide => Inverter::positive(printing),
+        }
     }
 }
 
@@ -275,9 +361,19 @@ pub struct AppState {
     pub scan_adjust: Adjustments,
     /// Adjustments copied from a frame, to paste onto others.
     pub clipboard: Option<Adjustments>,
+    /// The whole scan's undo and redo (each frame has its own).
+    pub scan_history: History,
+    /// Saved edits, kept between sessions.
+    pub presets: Vec<Preset>,
     pub export: ExportSettings,
+    /// The roll file the current result was last saved to or opened from, and that
+    /// result's generation: saving to it again needn't write the scan again.
+    pub roll_file: Option<(std::path::PathBuf, u64)>,
     /// The device whose capabilities the settings were last fitted to.
     settings_device: Option<DeviceId>,
+    /// Every target's edits as they were when last settled (the whole scan's, then each
+    /// frame's), which a change is undone back to; `None` until the frames settle.
+    settled: Option<Vec<Adjustments>>,
 }
 
 impl Default for AppState {
@@ -305,8 +401,12 @@ impl Default for AppState {
             film_base: None,
             scan_adjust: Adjustments::default(),
             clipboard: None,
+            scan_history: History::default(),
+            presets: Vec::new(),
             export: ExportSettings::default(),
+            roll_file: None,
             settings_device: None,
+            settled: None,
         }
     }
 }
@@ -498,17 +598,25 @@ impl AppState {
         }
     }
 
-    /// What inverts the current result, if it is a film scan to be inverted and its film
-    /// base is known.
+    /// What turns the current result into positives, if it is a film scan to be turned
+    /// and (for a negative) its film base is known.
     pub fn film(&self) -> Option<Film> {
         let result = self.result.as_ref()?;
         if !self.invert.enabled || result.source != ScanSource::Transparency {
             return None;
         }
+        let film_type = self.invert.film_type;
+        let base = if film_type.is_negative() {
+            self.current_film_base()?.light
+        } else {
+            [1.0; 3]
+        };
         Some(Film {
+            film_type,
             stock: self.invert.stock,
-            base: self.current_film_base()?.light,
+            base,
             printing: self.invert.printing,
+            mono: self.invert.mono,
         })
     }
 
@@ -533,6 +641,90 @@ impl AppState {
         }
     }
 
+    fn history_mut(&mut self, target: Option<usize>) -> &mut History {
+        match target.and_then(|i| self.crop.frames.get_mut(i)) {
+            Some(frame) => &mut frame.history,
+            None => &mut self.scan_history,
+        }
+    }
+
+    pub fn history(&self, target: Option<usize>) -> &History {
+        match target.and_then(|i| self.crop.frames.get(i)) {
+            Some(frame) => &frame.history,
+            None => &self.scan_history,
+        }
+    }
+
+    /// Record every change of edits since the last call in its target's history, if
+    /// `settled` (nothing is being dragged): a slider dragged is one change. Call once per
+    /// frame of the UI, after it has made its changes.
+    pub fn track_history(&mut self, settled: bool) {
+        let now = |state: &Self| {
+            std::iter::once(&state.scan_adjust)
+                .chain(state.crop.frames.iter().map(|f| &f.adjust))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        match self.settled.take() {
+            Some(before) if before.len() == self.crop.frames.len() + 1 => {
+                if !settled {
+                    self.settled = Some(before);
+                    return;
+                }
+                for (i, before) in before.into_iter().enumerate() {
+                    let target = i.checked_sub(1);
+                    if *self.adjustments(target) != before {
+                        self.history_mut(target).record(before);
+                    }
+                }
+                self.settled = Some(now(self));
+            }
+            // The frames changed (or this is the first call): start again from here.
+            _ => self.settled = Some(now(self)),
+        }
+    }
+
+    /// Stop tracking changes until the next [`AppState::track_history`]: the frames were
+    /// replaced or moved, so their edits before aren't theirs.
+    pub(crate) fn forget_settled(&mut self) {
+        self.settled = None;
+    }
+
+    /// Undo `target`'s last change of edits; false if there is none.
+    pub fn undo(&mut self, target: Option<usize>) -> bool {
+        let current = self.adjustments(target).clone();
+        match self.history_mut(target).undo(current) {
+            Some(previous) => self.set_settled(target, previous),
+            None => false,
+        }
+    }
+
+    /// Redo `target`'s last undone change; false if there is none.
+    pub fn redo(&mut self, target: Option<usize>) -> bool {
+        let current = self.adjustments(target).clone();
+        match self.history_mut(target).redo(current) {
+            Some(next) => self.set_settled(target, next),
+            None => false,
+        }
+    }
+
+    /// Give `target` `adjust`, as already recorded, so tracking doesn't record it again.
+    fn set_settled(&mut self, target: Option<usize>, adjust: Adjustments) -> bool {
+        let i = target
+            .filter(|&i| i < self.crop.frames.len())
+            .map_or(0, |i| i + 1);
+        if let Some(entry) = self.settled.as_mut().and_then(|s| s.get_mut(i)) {
+            *entry = adjust.clone();
+        }
+        *self.adjustments_mut(target) = adjust;
+        true
+    }
+
+    /// The frames saved and exported, in order, with their indices: those not skipped.
+    pub fn exported_frames(&self) -> impl Iterator<Item = (usize, &CropFrame)> {
+        self.crop.frames.iter().enumerate().filter(|(_, f)| !f.skip)
+    }
+
     /// Adjust `target` automatically, as SilverFast's auto adjust does:
     ///
     /// - **Color.** A frame of a negative gets the printing a photofinisher's printer
@@ -548,7 +740,9 @@ impl AppState {
         let (Some(result), Some(image)) = (self.result.clone(), self.processed_image()) else {
             return;
         };
-        let rect = target.and_then(|i| self.crop.frames.get(i)).map(|f| f.rect);
+        let rect = target
+            .and_then(|i| self.crop.frames.get(i))
+            .map(|f| f.cut());
         let film = self.film();
         let mut adj = self.adjustments(target).clone();
         let (preview, scale) = scan_process::preview_frame(
@@ -558,6 +752,8 @@ impl AppState {
             rect.as_ref(),
             AUTO_PREVIEW_SIDE,
         );
+        adj.temperature = 0.0;
+        adj.tint = 0.0;
         match (film, rect) {
             (Some(f), Some(rect)) => {
                 let levels = scan_process::frame_levels(
@@ -566,8 +762,7 @@ impl AppState {
                     result.dpi,
                     result.area,
                     &[rect],
-                    f.stock.model(),
-                    f.base,
+                    &f.neutral(),
                 );
                 if let Some(level) = levels.first() {
                     let p = scan_film::auto_printing(&[*level], &f.printing);
@@ -606,6 +801,127 @@ impl AppState {
             l.white * 255.0
         );
         *self.adjustments_mut(target) = adj;
+    }
+
+    /// [`AppState::auto_adjust`] every frame.
+    pub fn auto_all_frames(&mut self) {
+        let n = self.crop.frames.len();
+        for i in 0..n {
+            self.auto_adjust(Some(i));
+        }
+        if n > 0 {
+            self.status = format!("Auto: color and levels for each of {n} frames on its own");
+        }
+    }
+
+    /// Pull every frame's exposure and color balance to the roll's: each frame's average
+    /// color (its mean log light per channel, through the film at neutral printing) is
+    /// moved to the median frame's, so frames shot in the same light print alike, without
+    /// each being made grey on its own as Auto does. Temperature, tint and every other
+    /// edit are kept.
+    pub fn match_roll(&mut self) {
+        let (Some(result), Some(image)) = (self.result.clone(), self.processed_image()) else {
+            return;
+        };
+        let film = self.film();
+        // Each frame's level, in stops, if it is on the scan.
+        let levels: Vec<Option<[f32; 3]>> = self
+            .crop
+            .frames
+            .iter()
+            .map(|frame| {
+                let rect = frame.cut();
+                match &film {
+                    Some(f) => scan_process::frame_levels(
+                        image,
+                        result.gamma,
+                        result.dpi,
+                        result.area,
+                        &[rect],
+                        &f.neutral(),
+                    )
+                    .first()
+                    .map(|l| l.map(|v| v / std::f32::consts::LOG10_2)),
+                    None => {
+                        let (preview, _) = scan_process::preview_frame(
+                            image,
+                            result.dpi,
+                            result.area,
+                            Some(&rect),
+                            MATCH_PREVIEW_SIDE,
+                        );
+                        Some(adjust::log_means(&preview, result.gamma))
+                    }
+                }
+            })
+            .collect();
+        let known: Vec<[f32; 3]> = levels.iter().flatten().copied().collect();
+        if known.len() < 2 {
+            self.error = Some("Match roll needs at least two frames on the scan".into());
+            return;
+        }
+        let target: [f32; 3] = std::array::from_fn(|c| {
+            let mut v: Vec<f32> = known.iter().map(|l| l[c]).collect();
+            v.sort_by(f32::total_cmp);
+            v[v.len() / 2]
+        });
+        for (frame, level) in self.crop.frames.iter_mut().zip(&levels) {
+            let Some(level) = level else { continue };
+            let offset: [f32; 3] = std::array::from_fn(|c| target[c] - level[c]);
+            let exposure = offset.iter().sum::<f32>() / 3.0;
+            let adj = &mut frame.adjust;
+            // What temperature and tint add, which the balance makes up to the offset.
+            let warmth = Adjustments {
+                temperature: adj.temperature,
+                tint: adj.tint,
+                ..Adjustments::default()
+            }
+            .color_ev();
+            adj.exposure_ev = exposure;
+            adj.balance_ev = std::array::from_fn(|c| offset[c] - exposure - warmth[c]);
+        }
+        self.error = None;
+        self.status = format!("Matched {} frames to the roll's median frame", known.len());
+    }
+
+    /// Save `target`'s edits, without its geometry, as a preset named `name`, replacing
+    /// one of that name.
+    pub fn save_preset(&mut self, name: &str, target: Option<usize>) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        let preset = Preset {
+            name: name.to_owned(),
+            adjust: history::without_geometry(self.adjustments(target)),
+        };
+        match self.presets.iter_mut().find(|p| p.name == name) {
+            Some(p) => *p = preset,
+            None => self.presets.push(preset),
+        }
+        self.status = format!("Saved preset {name}");
+    }
+
+    /// Apply preset `index` to `target`, keeping its geometry.
+    pub fn apply_preset(&mut self, index: usize, target: Option<usize>) {
+        if let Some(p) = self.presets.get(index).cloned() {
+            history::paste(self.adjustments_mut(target), p.adjust);
+            self.status = format!("Applied preset {}", p.name);
+        }
+    }
+
+    /// Apply preset `index` to every frame, each keeping its geometry.
+    pub fn apply_preset_to_all(&mut self, index: usize) {
+        if let Some(p) = self.presets.get(index).cloned() {
+            for frame in &mut self.crop.frames {
+                history::paste(&mut frame.adjust, p.adjust.clone());
+            }
+            self.status = format!(
+                "Applied preset {} to {} frames",
+                p.name,
+                self.crop.frames.len()
+            );
+        }
     }
 
     /// Balance `target` so the point where its linear light (through the film, for a
@@ -652,38 +968,37 @@ impl AppState {
         self.clipboard = Some(self.adjustments(target).clone());
     }
 
-    /// Paste the copied adjustments onto `target`, all but its orientation.
+    /// Paste the copied adjustments onto `target`, all but its geometry.
     pub fn paste_adjustments(&mut self, target: Option<usize>) {
         if let Some(copied) = self.clipboard.clone() {
-            paste(self.adjustments_mut(target), copied);
+            history::paste(self.adjustments_mut(target), copied);
         }
     }
 
-    /// Paste the copied adjustments onto every frame, all but their orientation.
+    /// Paste the copied adjustments onto every frame, all but their geometry.
     pub fn paste_to_all_frames(&mut self) {
         if let Some(copied) = &self.clipboard {
             for frame in &mut self.crop.frames {
-                paste(&mut frame.adjust, copied.clone());
+                history::paste(&mut frame.adjust, copied.clone());
             }
         }
     }
 
-    /// Undo every edit of `target` but its orientation.
+    /// Undo every edit of `target` but its geometry (its turn, mirroring, straightening and
+    /// healed spots).
     pub fn reset_adjustments(&mut self, target: Option<usize>) {
-        paste(self.adjustments_mut(target), Adjustments::default());
+        history::paste(self.adjustments_mut(target), Adjustments::default());
     }
 
     /// Set the printing's exposure and color balance the way a photofinisher's printer
     /// does, from the frames' average colors (see [`scan_film::auto_printing`]).
     pub fn auto_printing(&mut self) {
-        let (Some(result), Some(base), Some(image)) = (
-            self.result.clone(),
-            self.current_film_base(),
-            self.processed_image(),
-        ) else {
+        let (Some(result), Some(film), Some(image)) =
+            (self.result.clone(), self.film(), self.processed_image())
+        else {
             return;
         };
-        let frames: Vec<FrameRect> = self.crop.frames.iter().map(|f| f.rect).collect();
+        let frames: Vec<FrameRect> = self.crop.frames.iter().map(|f| f.cut()).collect();
         if frames.is_empty() {
             self.error = Some("Auto needs frames: detect or add them in the Crop step".into());
             return;
@@ -694,8 +1009,7 @@ impl AppState {
             result.dpi,
             result.area,
             &frames,
-            self.invert.stock.model(),
-            base.light,
+            &film.neutral(),
         );
         let p = scan_film::auto_printing(&levels, &self.invert.printing);
         self.invert.printing = p;
@@ -759,9 +1073,9 @@ impl AppState {
         })
     }
 
-    /// Save every frame as its own TIFF, numbered after `path`.
+    /// Save every frame not skipped as its own TIFF, numbered after `path`.
     pub fn start_save_frames(&mut self, path: std::path::PathBuf) -> Option<Command> {
-        let targets = (0..self.crop.frames.len())
+        let targets = (0..self.exported_frames().count())
             .map(|n| scan_core::export::numbered(&path, n))
             .collect();
         self.save_frames(targets, export::FrameFormat::Tiff, None)
@@ -775,6 +1089,8 @@ impl AppState {
             problems.push("Scan the film first".into());
         } else if self.crop.frames.is_empty() {
             problems.push("Find the frames in the Crop step first".into());
+        } else if self.exported_frames().next().is_none() {
+            problems.push("Every frame is skipped".into());
         }
         if self.export.folder.is_none() {
             problems.push("Choose a folder to export to".into());
@@ -791,7 +1107,7 @@ impl AppState {
         let Some(folder) = &self.export.folder else {
             return Vec::new();
         };
-        let count = self.crop.frames.len();
+        let count = self.exported_frames().count();
         let mut paths: Vec<_> = (0..count)
             .map(|n| self.export.frame_path(folder, n, count))
             .collect();
@@ -805,7 +1121,11 @@ impl AppState {
     /// in from that profile (and perhaps edited since). Film not inverted has no profile.
     pub fn fill_export_film(&mut self) {
         let stock = self.invert.stock;
-        if self.film().is_some() && self.export.film_from != Some(stock.id) {
+        if self
+            .film()
+            .is_some_and(|f| f.film_type == FilmType::ColorNegative)
+            && self.export.film_from != Some(stock.id)
+        {
             self.export.metadata.fill_film(stock);
             self.export.film_from = Some(stock.id);
         }
@@ -832,30 +1152,63 @@ impl AppState {
         format: export::FrameFormat,
         metadata: Option<(std::path::PathBuf, String)>,
     ) -> Option<Command> {
-        if self.is_busy() || self.crop.frames.is_empty() {
+        if self.is_busy() || self.exported_frames().next().is_none() {
             return None;
         }
         let result = self.result.clone()?;
         let merged = self.current_merged().map(|m| m.merge.clone());
         let cleaned = self.current_cleaned().map(|c| c.removal.clone());
+        let frames: Vec<_> = self
+            .exported_frames()
+            .zip(targets)
+            .map(|((_, f), target)| (f.rect, f.adjust.clone(), target))
+            .collect();
         self.activity = Activity::Saving;
-        self.status = format!("Saving {} frames...", self.crop.frames.len());
+        self.status = format!("Saving {} frames...", frames.len());
         Some(Command::SaveFrames {
             result,
             merged,
             cleaned,
             film: self.film(),
-            frames: self
-                .crop
-                .frames
-                .iter()
-                .zip(targets)
-                .map(|(f, target)| (f.rect, f.adjust.clone(), target))
-                .collect(),
+            frames,
             quarter_turns: self.quarter_turns,
             format,
             metadata,
         })
+    }
+
+    /// Save the current result's frames and every edit as the roll file `path` (with the
+    /// roll file extension), and the scan beside it, unless it is already there.
+    pub fn start_save_roll(&mut self, path: std::path::PathBuf) -> Option<Command> {
+        if self.is_busy() {
+            return None;
+        }
+        let path = path.with_extension(session::EXTENSION);
+        let roll = Roll::of(self, &path)?;
+        let saved = self
+            .roll_file
+            .as_ref()
+            .is_some_and(|(p, g)| *p == path && *g == self.result_generation)
+            && roll.scan_path(&path).exists();
+        self.activity = Activity::Saving;
+        self.status = format!("Saving {}...", path.display());
+        Some(Command::SaveRoll {
+            scan: if saved { None } else { self.result.clone() },
+            roll: Box::new(roll),
+            path,
+            generation: self.result_generation,
+        })
+    }
+
+    /// Open the roll file at `path`, in place of the current result.
+    pub fn start_open_roll(&mut self, path: std::path::PathBuf) -> Option<Command> {
+        if self.is_busy() {
+            return None;
+        }
+        self.activity = Activity::OpeningRoll;
+        self.status = format!("Opening {}...", path.display());
+        self.error = None;
+        Some(Command::OpenRoll(path))
     }
 
     /// Turn the scan a quarter clockwise, or anticlockwise.
@@ -896,6 +1249,7 @@ impl AppState {
     /// Number the frames from the other end of the film, now and for later detections. The
     /// selection and each frame's edits go with their frames.
     pub fn reverse_frames(&mut self) {
+        self.forget_settled();
         let crop = &mut self.crop;
         crop.reversed = !crop.reversed;
         crop.frames.reverse();
@@ -905,6 +1259,7 @@ impl AppState {
 
     pub fn delete_frame(&mut self, index: usize) {
         if index < self.crop.frames.len() {
+            self.forget_settled();
             self.crop.frames.remove(index);
             self.crop.edited = true;
             self.crop.selected = None;
@@ -943,6 +1298,7 @@ impl AppState {
                 }
             }
         };
+        self.forget_settled();
         self.crop.frames.push(CropFrame::new(rect));
         self.crop.edited = true;
         self.crop.selected = Some(self.crop.frames.len() - 1);
@@ -1101,16 +1457,17 @@ impl AppState {
                     });
                     self.crop.detected = Some(generation);
                     // Frames edited by hand, before or while it ran, are kept; otherwise each
-                    // new frame keeps the edits of the old one in its place.
+                    // new frame keeps the edits (and skipping and history) of the old one in
+                    // its place.
                     if !self.crop.edited {
+                        self.forget_settled();
                         let old = std::mem::take(&mut self.crop.frames);
                         let mut frames: Vec<CropFrame> = detection
                             .frames
                             .iter()
                             .map(|f| CropFrame {
-                                rect: f.rect,
                                 check: f.placed_by_spacing,
-                                adjust: carried_adjustments(&old, &f.rect),
+                                ..carried(&old, &f.rect)
                             })
                             .collect();
                         if self.crop.reversed {
@@ -1139,6 +1496,47 @@ impl AppState {
                 }
                 None
             }
+            Event::RollSaved {
+                path,
+                generation,
+                result,
+            } => {
+                self.activity = Activity::Idle;
+                match result {
+                    Ok(paths) => {
+                        self.status = match paths.len() {
+                            1 => format!("Saved the roll: {}", path.display()),
+                            n => format!(
+                                "Saved the roll and its scan ({n} files): {}",
+                                path.display()
+                            ),
+                        };
+                        self.roll_file = Some((path, generation));
+                    }
+                    Err(e) => self.error = Some(format!("Saving the roll failed: {e}")),
+                }
+                None
+            }
+            Event::RollOpened { path, result } => {
+                self.activity = Activity::Idle;
+                match result {
+                    Ok((roll, scan)) => {
+                        let frames = roll.frames.len();
+                        roll.restore(self, scan, path.clone());
+                        self.status = format!(
+                            "Opened {} with {frames} frame{}",
+                            path.display(),
+                            if frames == 1 { "" } else { "s" }
+                        );
+                        return self.update_processing();
+                    }
+                    Err(e) => {
+                        self.status = "Could not open the roll".into();
+                        self.error = Some(format!("{}: {e}", path.display()));
+                    }
+                }
+                None
+            }
         }
     }
 }
@@ -1146,29 +1544,30 @@ impl AppState {
 /// How big a preview [`AppState::auto_adjust`] measures, on its longer side.
 const AUTO_PREVIEW_SIDE: u32 = 1024;
 
-/// `from` pasted onto `to`, keeping `to`'s orientation.
-fn paste(to: &mut Adjustments, from: Adjustments) {
-    *to = Adjustments {
-        quarter_turns: to.quarter_turns,
-        mirror: to.mirror,
-        ..from
-    };
-}
+/// How big a preview [`AppState::match_roll`] measures a positive's frames on.
+const MATCH_PREVIEW_SIDE: u32 = 512;
 
-/// The adjustments of the frame of `old` that `rect` replaces: the one whose middle is
-/// nearest `rect`'s, within half its shorter side. A preview's frames and a later scan's
-/// are the same frames found again, a little more exactly.
-fn carried_adjustments(old: &[CropFrame], rect: &FrameRect) -> Adjustments {
+/// A frame at `rect`, with the edits, skipping and history of the frame of `old` it
+/// replaces: the one whose middle is nearest `rect`'s, within half its shorter side. A
+/// preview's frames and a later scan's are the same frames found again, a little more
+/// exactly.
+fn carried(old: &[CropFrame], rect: &FrameRect) -> CropFrame {
     let reach = rect.width_mm.min(rect.height_mm) / 2.0;
-    old.iter()
+    let replaced = old
+        .iter()
         .map(|f| {
             let d = (f.rect.cx_mm - rect.cx_mm).hypot(f.rect.cy_mm - rect.cy_mm);
             (d, f)
         })
         .filter(|&(d, _)| d <= reach)
-        .min_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, f)| f.adjust.clone())
-        .unwrap_or_default()
+        .min_by(|a, b| a.0.total_cmp(&b.0));
+    match replaced {
+        Some((_, f)) => CropFrame {
+            rect: *rect,
+            ..f.clone()
+        },
+        None => CropFrame::new(*rect),
+    }
 }
 
 /// A line on what a frame detection found.
@@ -2052,8 +2451,7 @@ mod tests {
             result.dpi,
             result.area,
             &[state.crop.frames[5].rect],
-            film.stock.model(),
-            film.base,
+            &film.neutral(),
         );
         let alone = scan_film::auto_printing(&levels, &film.printing);
         let p = adj.printing(&film.printing);
@@ -2068,6 +2466,213 @@ mod tests {
         state.adjustments_mut(None).exposure_ev = 1.0;
         state.auto_adjust(None);
         assert_eq!(state.scan_adjust.exposure_ev, 0.0);
+    }
+
+    #[test]
+    fn changes_are_undone_one_gesture_at_a_time() {
+        let mut state = film_with_frames();
+        state.track_history(true);
+        // A slider dragged over several frames of the UI is one change.
+        for ev in [0.1, 0.2, 0.3] {
+            state.adjustments_mut(Some(1)).exposure_ev = ev;
+            state.track_history(false);
+        }
+        state.track_history(true);
+        state.adjustments_mut(Some(1)).contrast = 0.5;
+        state.adjustments_mut(None).saturation = 0.2;
+        state.track_history(true);
+        assert!(state.history(Some(1)).can_undo() && state.history(None).can_undo());
+        assert!(!state.history(Some(0)).can_undo());
+
+        assert!(state.undo(Some(1)));
+        assert_eq!(state.adjustments(Some(1)).contrast, 0.0);
+        assert_eq!(state.adjustments(Some(1)).exposure_ev, 0.3);
+        // Undoing isn't itself recorded as a change.
+        state.track_history(true);
+        assert!(state.undo(Some(1)));
+        assert_eq!(state.adjustments(Some(1)), &Adjustments::default());
+        assert!(!state.undo(Some(1)));
+        assert!(state.redo(Some(1)));
+        assert_eq!(state.adjustments(Some(1)).exposure_ev, 0.3);
+        assert!(state.undo(None));
+        assert_eq!(state.scan_adjust.saturation, 0.0);
+
+        // Pasting onto every frame is undone frame by frame.
+        state.adjustments_mut(Some(4)).brightness = 0.3;
+        state.copy_adjustments(Some(4));
+        state.paste_to_all_frames();
+        state.track_history(true);
+        assert!(state.undo(Some(7)));
+        assert_eq!(state.adjustments(Some(7)).brightness, 0.0);
+
+        // Frames moved around aren't recorded as edits: each keeps its own history.
+        let last = state.crop.frames[11].history.clone();
+        state.reverse_frames();
+        state.track_history(true);
+        assert_eq!(state.crop.frames[0].history, last);
+    }
+
+    #[test]
+    fn skipped_frames_are_left_out_of_saves_and_exports() {
+        let mut state = film_with_frames();
+        state.crop.frames[0].skip = true;
+        state.crop.frames[4].skip = true;
+        state.adjustments_mut(Some(1)).exposure_ev = 0.6;
+        let Some(Command::SaveFrames { frames, .. }) = state.start_save_frames("f.tif".into())
+        else {
+            panic!("expected a save");
+        };
+        assert_eq!(frames.len(), 10);
+        // Numbered without gaps, from frame 2.
+        assert_eq!(frames[0].1.exposure_ev, 0.6);
+        assert_eq!(frames[0].2, std::path::Path::new("f_01.tif"));
+        state.activity = Activity::Idle;
+        state.export.folder = Some("out".into());
+        state.export.write_metadata = false;
+        let paths = state.export_paths();
+        assert_eq!(paths.len(), 10);
+        assert!(paths[9].ends_with("roll_10.jpg"));
+        for frame in &mut state.crop.frames {
+            frame.skip = true;
+        }
+        assert!(
+            state
+                .export_problems()
+                .contains(&"Every frame is skipped".to_owned())
+        );
+        assert!(state.start_export().is_none());
+        // Skipping goes with the frame through a new scan.
+        state.crop.frames[3].skip = false;
+        let cmd = preview(&mut state);
+        detected(&mut state, cmd);
+        assert!(!state.crop.frames[3].skip && state.crop.frames[2].skip);
+    }
+
+    #[test]
+    fn auto_all_and_match_roll_set_every_frame() {
+        let mut state = film_with_frames();
+        state.auto_all_frames();
+        assert!(
+            state
+                .crop
+                .frames
+                .iter()
+                .all(|f| f.adjust.levels[adjust::MASTER] != Levels::default())
+        );
+        assert!(state.status.contains("12 frames"), "{}", state.status);
+
+        // Matched, every frame measures the same through its printing.
+        let mut state = film_with_frames();
+        state.adjustments_mut(Some(2)).temperature = 0.5;
+        state.adjustments_mut(Some(2)).contrast = 0.3;
+        state.match_roll();
+        assert!(state.status.starts_with("Matched 12"), "{}", state.status);
+        let film = state.film().unwrap();
+        let result = state.result.clone().unwrap();
+        let image = state.processed_image().unwrap();
+        let printed: Vec<[f32; 3]> = state
+            .crop
+            .frames
+            .iter()
+            .map(|f| {
+                let level = scan_process::frame_levels(
+                    image,
+                    result.gamma,
+                    result.dpi,
+                    result.area,
+                    &[f.cut()],
+                    &film.neutral(),
+                )[0];
+                let ev = f.adjust.color_ev();
+                std::array::from_fn(|c| {
+                    level[c] / std::f32::consts::LOG10_2 + f.adjust.exposure_ev + ev[c]
+                })
+            })
+            .collect();
+        for p in &printed[1..] {
+            for c in 0..3 {
+                assert!(
+                    (p[c] - printed[0][c]).abs() < 1e-3,
+                    "{p:?} {:?}",
+                    printed[0]
+                );
+            }
+        }
+        let a = state.adjustments(Some(2));
+        assert_eq!((a.temperature, a.contrast), (0.5, 0.3), "other edits kept");
+    }
+
+    #[test]
+    fn presets_hold_edits_without_geometry() {
+        let mut state = film_with_frames();
+        let a = state.adjustments_mut(Some(0));
+        a.vibrance = 0.4;
+        a.quarter_turns = 1;
+        a.straighten_deg = 2.0;
+        state.save_preset("  Gold sunny ", Some(0));
+        assert_eq!(state.presets.len(), 1);
+        assert_eq!(state.presets[0].name, "Gold sunny");
+        assert_eq!(state.presets[0].adjust.straighten_deg, 0.0);
+        // The same name replaces it; a blank one saves nothing.
+        state.adjustments_mut(Some(0)).vibrance = 0.5;
+        state.save_preset("Gold sunny", Some(0));
+        state.save_preset(" ", Some(0));
+        assert_eq!(state.presets.len(), 1);
+
+        state.adjustments_mut(Some(3)).straighten_deg = -1.0;
+        state.apply_preset(0, Some(3));
+        let b = state.adjustments(Some(3));
+        assert_eq!(
+            (b.vibrance, b.straighten_deg, b.quarter_turns),
+            (0.5, -1.0, 0)
+        );
+        state.apply_preset_to_all(0);
+        assert!(state.crop.frames.iter().all(|f| f.adjust.vibrance == 0.5));
+        assert_eq!(state.adjustments(Some(0)).quarter_turns, 1);
+    }
+
+    #[test]
+    fn black_and_white_and_slides_print_without_a_profile() {
+        let mut state = film_with_frames();
+        state.invert.film_type = FilmType::BlackAndWhite;
+        let film = state
+            .film()
+            .expect("a negative needs its base, which is known");
+        assert!(film.inverter(&Adjustments::default()).is_mono());
+        // The export's film isn't filled in from the color profile.
+        state.fill_export_film();
+        assert!(state.export.metadata.manufacturer.is_empty());
+
+        state.invert.film_type = FilmType::Slide;
+        state.film_base = None;
+        let film = state.film().expect("a slide needs no base");
+        assert_eq!(film.base, [1.0; 3]);
+        state.auto_printing();
+        assert!(
+            state.status.starts_with("Auto from 12 frames"),
+            "{}",
+            state.status
+        );
+        state.invert.film_type = FilmType::ColorNegative;
+        assert!(state.film().is_none(), "a color negative does");
+        for t in FilmType::ALL {
+            assert_eq!(FilmType::from_key(t.key()), Some(t));
+        }
+    }
+
+    #[test]
+    fn frames_are_cut_with_their_border_and_straightening() {
+        let mut state = film_with_frames();
+        let rect = state.crop.frames[0].rect;
+        let a = state.adjustments_mut(Some(0));
+        a.border_mm = 1.0;
+        let cut = state.crop.frames[0].cut();
+        assert_eq!(cut.width_mm, rect.width_mm + 2.0);
+        // Pasting and resetting keep a frame's straightening, but not its border.
+        state.adjustments_mut(Some(0)).straighten_deg = 1.0;
+        state.reset_adjustments(Some(0));
+        let a = state.adjustments(Some(0));
+        assert_eq!((a.straighten_deg, a.border_mm), (1.0, 0.0));
     }
 
     #[test]
