@@ -12,6 +12,7 @@ use scan_film::{Printing, Rendering};
 
 use crate::crop::{BedView, CropEditor};
 use crate::edit::Editor;
+use crate::export::{self, ExportSettings, FrameFormat};
 use crate::state::{self, Activity, AppState, EXTRA_EV, ViewChannel, WorkflowStep};
 use crate::view::{self, ImageView};
 use crate::worker::{ScanKind, Worker};
@@ -20,6 +21,14 @@ use crate::worker::{ScanKind, Worker};
 const TURNS_KEY: &str = "quarter_turns";
 /// Where the film stock is remembered: the roll in the scanner is likely the same next time.
 const STOCK_KEY: &str = "film_stock";
+
+/// Where the Export step's settings are remembered, with the camera fields under
+/// `export.<field>`: the same camera and folder are likely next time, not the same roll.
+const EXPORT_FOLDER_KEY: &str = "export.folder";
+const EXPORT_PREFIX_KEY: &str = "export.prefix";
+/// `jpeg <quality>`, `png` or `tiff`.
+const EXPORT_FORMAT_KEY: &str = "export.format";
+const EXPORT_METADATA_KEY: &str = "export.write_metadata";
 
 /// All backends compiled into this build, real hardware first.
 pub fn default_registry() -> DeviceRegistry {
@@ -62,6 +71,9 @@ impl ScannerApp {
             .and_then(|id| scan_film::stock::by_id(&id))
         {
             state.invert.stock = stock;
+        }
+        if let Some(storage) = cc.storage {
+            restore_export(&mut state.export, storage);
         }
         worker.send(state.refresh_devices());
         Self {
@@ -719,11 +731,135 @@ impl ScannerApp {
         });
     }
 
-    fn placeholder(&self, ui: &mut egui::Ui, step: WorkflowStep) {
-        ui.heading(step.label());
-        ui.label(step.description());
+    fn export_controls(&mut self, ui: &mut egui::Ui) {
+        let busy = self.state.is_busy();
+        self.state.fill_export_film();
+        ui.heading("Export");
+        let frames = self.state.crop.frames.len();
+        let settings = &mut self.state.export;
+        egui::Grid::new("export")
+            .num_columns(2)
+            .spacing([8.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("Folder");
+                ui.horizontal(|ui| {
+                    if ui.button("Choose...").clicked() {
+                        let mut dialog = rfd::FileDialog::new();
+                        if let Some(folder) = &settings.folder {
+                            dialog = dialog.set_directory(folder);
+                        }
+                        if let Some(folder) = dialog.pick_folder() {
+                            settings.folder = Some(folder);
+                        }
+                    }
+                    let shown = settings
+                        .folder
+                        .as_ref()
+                        .map_or("None chosen".into(), |f| f.display().to_string());
+                    ui.add(egui::Label::new(RichText::new(shown).weak()).truncate());
+                });
+                ui.end_row();
+
+                ui.label("File names");
+                ui.vertical(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut settings.prefix)
+                            .hint_text("roll180")
+                            .desired_width(160.0),
+                    )
+                    .on_hover_text(
+                        "The start of every frame's file name: frames are saved as \
+                         <this>_01, <this>_02, ... in frame order",
+                    );
+                    let count = frames.max(1);
+                    let folder = std::path::Path::new("");
+                    let name = |n| settings.frame_path(folder, n, count).display().to_string();
+                    let shown = if count > 1 {
+                        format!("{}, {} ... {}", name(0), name(1), name(count - 1))
+                    } else {
+                        name(0)
+                    };
+                    ui.label(RichText::new(shown).weak().small());
+                });
+                ui.end_row();
+
+                ui.label("Format");
+                ui.horizontal(|ui| {
+                    let quality = match settings.format {
+                        FrameFormat::Jpeg(q) => q,
+                        _ => 95,
+                    };
+                    egui::ComboBox::from_id_salt("export_format")
+                        .selected_text(settings.format.label())
+                        .show_ui(ui, |ui| {
+                            for format in [
+                                FrameFormat::Jpeg(quality),
+                                FrameFormat::Png,
+                                FrameFormat::Tiff,
+                            ] {
+                                ui.selectable_value(&mut settings.format, format, format.label());
+                            }
+                        });
+                    if let FrameFormat::Jpeg(q) = &mut settings.format {
+                        ui.add(egui::Slider::new(q, 50..=100).text("quality"));
+                    }
+                });
+                ui.end_row();
+            });
+        if !settings.format.publishable() {
+            ui.label(
+                RichText::new("film_roll_publisher uploads JPEG and PNG files only.")
+                    .weak()
+                    .small(),
+            );
+        }
+
         ui.add_space(8.0);
-        ui.label(RichText::new("Coming soon.").italics().weak());
+        ui.separator();
+        ui.checkbox(
+            &mut settings.write_metadata,
+            format!("Write {} for film_roll_publisher", export::METADATA_FILE),
+        )
+        .on_hover_text(
+            "Saves the roll's details next to the frames, for rollpublisher to upload \
+             them to Immich with: run it in the export folder",
+        );
+        if settings.write_metadata {
+            metadata_fields(ui, &mut self.state.export, self.state.invert.stock);
+        }
+
+        ui.add_space(8.0);
+        ui.separator();
+        let problems = self.state.export_problems();
+        for problem in &problems {
+            ui.label(RichText::new(problem).color(ui.visuals().warn_fg_color));
+        }
+        let paths = self.state.export_paths();
+        let existing: Vec<_> = paths.iter().filter(|p| p.exists()).collect();
+        if let Some(first) = existing.first() {
+            ui.label(
+                RichText::new(format!(
+                    "{} file(s) in the folder will be replaced, {} first",
+                    existing.len(),
+                    first.file_name().unwrap_or_default().to_string_lossy()
+                ))
+                .color(ui.visuals().warn_fg_color),
+            );
+        }
+        if ui
+            .add_enabled(
+                !busy && problems.is_empty(),
+                egui::Button::new(format!("Export {frames} frames")),
+            )
+            .on_hover_text(
+                "Saves each frame straightened, inverted and with its own edits from the \
+                 Adjust step, turned like the view",
+            )
+            .clicked()
+            && let Some(cmd) = self.state.start_export()
+        {
+            self.worker.send(cmd);
+        }
     }
 
     fn central(&mut self, ui: &mut egui::Ui) {
@@ -887,7 +1023,7 @@ impl eframe::App for ScannerApp {
                         WorkflowStep::Crop => self.crop_controls(ui),
                         WorkflowStep::Invert => self.invert_controls(ui),
                         WorkflowStep::Adjust => self.adjust_controls(ui),
-                        step => self.placeholder(ui, step),
+                        WorkflowStep::Export => self.export_controls(ui),
                     }
                 });
             });
@@ -897,6 +1033,146 @@ impl eframe::App for ScannerApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string(TURNS_KEY, self.state.quarter_turns.to_string());
         storage.set_string(STOCK_KEY, self.state.invert.stock.id.to_owned());
+        remember_export(&mut self.state.export, storage);
+    }
+}
+
+/// The roll, film and camera fields of the publisher's metadata. Required ones are marked.
+fn metadata_fields(
+    ui: &mut egui::Ui,
+    settings: &mut ExportSettings,
+    stock: &'static scan_film::FilmStock,
+) {
+    let text = |ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str| {
+        ui.label(label);
+        ui.add(
+            egui::TextEdit::singleline(value)
+                .hint_text(hint)
+                .desired_width(190.0),
+        );
+        ui.end_row();
+    };
+    let date = |ui: &mut egui::Ui, label: &str, value: &mut String| {
+        ui.label(label);
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(value)
+                    .hint_text("MM/DD/YYYY")
+                    .desired_width(110.0),
+            );
+            if ui.small_button("Today").clicked() {
+                *value = export::today();
+            }
+        });
+        ui.end_row();
+    };
+    let m = &mut settings.metadata;
+    egui::CollapsingHeader::new("Roll")
+        .default_open(true)
+        .show(ui, |ui| {
+            egui::Grid::new("meta_roll").num_columns(2).show(ui, |ui| {
+                text(ui, "Name *", &mut m.name, "Album name in Immich");
+                ui.label("Description");
+                ui.add(
+                    egui::TextEdit::multiline(&mut m.description)
+                        .desired_rows(2)
+                        .desired_width(190.0),
+                );
+                ui.end_row();
+                date(ui, "Date captured *", &mut m.date_captured);
+                date(ui, "Date scanned", &mut m.date_scanned);
+                ui.label("Public");
+                ui.checkbox(&mut m.public, "");
+                ui.end_row();
+                text(ui, "GPS latitude", &mut m.gps_latitude, "41.8781");
+                text(ui, "GPS longitude", &mut m.gps_longitude, "-87.6298");
+            });
+        });
+    egui::CollapsingHeader::new("Film")
+        .default_open(true)
+        .show(ui, |ui| {
+            egui::Grid::new("meta_film").num_columns(2).show(ui, |ui| {
+                text(ui, "Manufacturer *", &mut m.manufacturer, "Kodak");
+                text(ui, "Stock *", &mut m.stock, "Gold");
+                text(ui, "ISO *", &mut m.iso, "200");
+                text(ui, "Development", &mut m.development_notes, "Lab, C-41");
+            });
+            if ui
+                .small_button("From the film profile")
+                .on_hover_text(format!("Fill in {}", stock.display_name()))
+                .clicked()
+            {
+                m.fill_film(stock);
+            }
+        });
+    egui::CollapsingHeader::new("Camera")
+        .default_open(true)
+        .show(ui, |ui| {
+            egui::Grid::new("meta_camera")
+                .num_columns(2)
+                .show(ui, |ui| {
+                    text(ui, "Make *", &mut m.camera_make, "Nikon");
+                    text(ui, "Model *", &mut m.camera_model, "FM2");
+                    text(ui, "Lens make", &mut m.lens_make, "Nikon");
+                    text(ui, "Lens model", &mut m.lens_model, "50mm f/1.8");
+                    text(ui, "F-number", &mut m.f_number, "f/8");
+                    text(ui, "Focal length", &mut m.focal_length, "50mm");
+                    text(ui, "Flash", &mut m.flash, "No");
+                    text(ui, "Filters", &mut m.filters, "UV");
+                });
+            ui.label(RichText::new("Kept for the next roll.").weak().small());
+        });
+}
+
+fn restore_export(export: &mut ExportSettings, storage: &dyn eframe::Storage) {
+    if let Some(folder) = storage
+        .get_string(EXPORT_FOLDER_KEY)
+        .filter(|f| !f.is_empty())
+    {
+        export.folder = Some(folder.into());
+    }
+    if let Some(prefix) = storage.get_string(EXPORT_PREFIX_KEY) {
+        export.prefix = prefix;
+    }
+    match storage.get_string(EXPORT_FORMAT_KEY).as_deref() {
+        Some("png") => export.format = FrameFormat::Png,
+        Some("tiff") => export.format = FrameFormat::Tiff,
+        Some(jpeg) => {
+            if let Some(q) = jpeg
+                .strip_prefix("jpeg ")
+                .and_then(|q| q.parse::<u8>().ok())
+            {
+                export.format = FrameFormat::Jpeg(q.clamp(1, 100));
+            }
+        }
+        None => {}
+    }
+    if let Some(on) = storage.get_string(EXPORT_METADATA_KEY) {
+        export.write_metadata = on == "true";
+    }
+    for (key, value) in export.metadata.camera_fields() {
+        if let Some(saved) = storage.get_string(&format!("export.{key}")) {
+            *value = saved;
+        }
+    }
+}
+
+fn remember_export(export: &mut ExportSettings, storage: &mut dyn eframe::Storage) {
+    let folder = export
+        .folder
+        .as_ref()
+        .map_or(String::new(), |f| f.display().to_string());
+    storage.set_string(EXPORT_FOLDER_KEY, folder);
+    storage.set_string(EXPORT_PREFIX_KEY, export.prefix.clone());
+    let format = match export.format {
+        FrameFormat::Jpeg(q) => format!("jpeg {q}"),
+        FrameFormat::Png => "png".into(),
+        FrameFormat::Tiff => "tiff".into(),
+    };
+    storage.set_string(EXPORT_FORMAT_KEY, format);
+    storage.set_string(EXPORT_METADATA_KEY, export.write_metadata.to_string());
+    for (key, value) in export.metadata.camera_fields() {
+        storage.set_string(&format!("export.{key}"), value.clone());
     }
 }
 
