@@ -101,8 +101,8 @@ printing's contrast steepens or flattens it about grey. Slides have no profiles 
   - Then master levels stretch the frame to full range, clipping 0.1% at each end. One
     stretch is used for all three channels, so the balance just set is kept.
   - Auto measures the picture alone: the frame without its border, and half a millimetre
-    inside its edges, so the sliver of bare film detection leaves around a frame (black
-    once printed) doesn't set its black point.
+    inside its edges, so a soft gate edge or a sliver of bare film (black once printed)
+    doesn't set its black point.
   - The whole scan of a negative keeps the roll's printing (the Invert step's Auto).
 - **Grey picker:** click something that should be neutral. The balance changes so that
   point's scene light (or linear light, on a positive) is equal in all three channels,

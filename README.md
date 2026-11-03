@@ -127,10 +127,9 @@ such as the V500's two strips of six:
    like bare film and whose frames least. Each frame edge is then moved to where the scan
    shows it nearby. Where the holder covers the film's edges (as the V500's does), the
    picture runs on under it, so a frame's long edges are the holder's.
-4. **Edges.** Each frame is grown 0.2 mm past its edges (`DetectParams::bleed_mm`), so the
-   picture's own soft or uneven edge is kept whole, at the cost of a sliver of film base.
-   Frames never run onto the holder. Auto and Match roll measure only the picture, inside
-   that sliver.
+4. **Edges.** Each frame is trimmed 0.1 mm on every side (`DetectParams::inset_mm`), just
+   enough that no film base shows along its edges, and frames never run onto the holder.
+   Auto and Match roll measure only the picture, half a millimetre inside its edges.
 
 Dark and underexposed frames are the hard case, since their edges can look just like the film
 around them. They still get their place from the spacing of the frames around them, and are

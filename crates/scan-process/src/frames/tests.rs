@@ -81,14 +81,14 @@ impl Strip {
         (dx * a[0] + dy * a[1], dx * n[0] + dy * n[1])
     }
 
-    /// The frames as they should be found, grown as the detection does, but kept off the
+    /// The frames as they should be found, trimmed as the detection does, and kept off the
     /// holder.
     fn truth(&self) -> Vec<(FrameRect, Shot)> {
         let (a, _) = self.axes();
-        let bleed = DetectParams::default().bleed_mm;
+        let inset = DetectParams::default().inset_mm;
         let on_film = self.visible - HOLDER_MARGIN_MM;
-        let across = 2.0 * (self.image + bleed).min(on_film);
-        let along = 36.0 + 2.0 * bleed;
+        let across = 2.0 * (self.image.min(on_film) - inset);
+        let along = 36.0 - 2.0 * inset;
         self.frames
             .iter()
             .filter(|f| f.1 != Shot::Blank)
@@ -335,8 +335,8 @@ fn frames_of_the_mock_scanner() {
         let off = [
             r.cx_mm - (x + w / 2.0),
             r.cy_mm - (y + h / 2.0),
-            r.width_mm - (w + 0.4),
-            r.height_mm - (h + 0.4),
+            r.width_mm - (w - 0.2),
+            r.height_mm - (h - 0.2),
         ];
         assert!(off.iter().all(|d| d.abs() < 0.5), "frame {i}: {r:?}");
     }

@@ -15,10 +15,10 @@
 //!    underexposed frame, whose edges look just like the film around it, still gets its
 //!    place from the frames around it. Each edge is then moved to where the scan shows it
 //!    nearby, if it does. Where the holder covers the film's edges, the image runs on under
-//!    it, so a frame's long edges are the holder's. Each frame is then grown a little past
-//!    its edges, so none of the image is cut off, but never onto the holder. Frames whose
-//!    ends couldn't be seen are flagged for checking, and frames as bare as the film base
-//!    (the unexposed end of a roll) are left out.
+//!    it, so a frame's long edges are the holder's. Each frame is then trimmed a little, so
+//!    no film base shows along its edges, and kept off the holder. Frames whose ends
+//!    couldn't be seen are flagged for checking, and frames as bare as the film base (the
+//!    unexposed end of a roll) are left out.
 //!
 //! Frames are [`FrameRect`]s in millimetres on the scanner bed, so frames found on a
 //! low-resolution preview fit a later full-resolution scan of the same film.
@@ -128,17 +128,16 @@ impl FilmFormat {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DetectParams {
     pub format: FilmFormat,
-    /// Added to every side of a detected frame, so the image's own soft or uneven edge is
-    /// kept whole, at the cost of a sliver of film base. Never past the film, onto the
-    /// holder.
-    pub bleed_mm: f32,
+    /// Trimmed off every side of a detected frame, so no film base shows along its edges.
+    /// Frames never run past the film, onto the holder.
+    pub inset_mm: f32,
 }
 
 impl Default for DetectParams {
     fn default() -> Self {
         Self {
             format: FilmFormat::FILM_135,
-            bleed_mm: 0.2,
+            inset_mm: 0.1,
         }
     }
 }
@@ -182,7 +181,7 @@ pub fn detect_frames(
         return detection;
     };
     let format = Format::new(&params.format, work.mm);
-    let bleed = params.bleed_mm / work.mm;
+    let inset = params.inset_mm / work.mm;
     let mut bases = Vec::new();
     for strip in find_strips(&work, &levels, &format) {
         let Some(sampled) = Sampled::new(&work, &levels, &strip, &format) else {
@@ -190,9 +189,12 @@ pub fn detect_frames(
         };
         detection.strips += 1;
         bases.push(sampled.base);
-        for frame in sampled.frames(&format, bleed) {
+        for frame in sampled.frames(&format, inset) {
             let along = (frame.start, frame.end);
             let across = (frame.left, frame.right);
+            if along.1 <= along.0 || across.1 <= across.0 {
+                continue;
+            }
             let v = sampled.v_start + (along.0 + along.1) / 2.0;
             let u = sampled.u_start + (across.0 + across.1) / 2.0;
             let [x, y] = strip.point(v, u);
@@ -790,8 +792,8 @@ impl Sampled {
         best
     }
 
-    /// The frames along the strip, each grown by `bleed` on every side but kept on the film.
-    fn frames(&self, format: &Format, bleed: f32) -> Vec<Found> {
+    /// The frames along the strip, each trimmed by `inset` on every side and kept on the film.
+    fn frames(&self, format: &Format, inset: f32) -> Vec<Found> {
         let Some((first, last)) = self.film_rows(format) else {
             return Vec::new();
         };
@@ -880,11 +882,11 @@ impl Sampled {
             let edges_seen = along_seen.iter().filter(|&&s| s).count() as u8
                 + u8::from(covered || left.is_some())
                 + u8::from(covered || right.is_some());
-            let left = left.unwrap_or(self.middle - unseen) - bleed;
-            let right = right.unwrap_or(self.middle + unseen) + bleed;
+            let left = left.unwrap_or(self.middle - unseen) + inset;
+            let right = right.unwrap_or(self.middle + unseen) - inset;
             frames.push(Found {
-                start: (s - bleed).max(e0),
-                end: (e + bleed).min(e1),
+                start: s.max(e0) + inset,
+                end: e.min(e1) - inset,
                 left: left.max(self.middle - visible).max(0.0),
                 right: right.min(self.middle + visible).min(self.nu as f32),
                 edges_seen,
