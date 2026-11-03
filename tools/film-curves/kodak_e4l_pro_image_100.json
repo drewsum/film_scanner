@@ -1,0 +1,48 @@
+{
+  "source": {
+    "film": "KODAK PROFESSIONAL PRO IMAGE 100 Color Negative Film",
+    "publication": "E-4L",
+    "edition": "July 1997",
+    "url": "https://dreamartemis.wordpress.com/wp-content/uploads/2014/01/kodak-proimage-100.pdf",
+    "sha256": "f2d1a1faa32bbbc96ab4f69ffa5ee7d99f8bc554392dcec42f715fb934d92700"
+  },
+  "notes": [
+    "The film's launch datasheet; Kodak has published no later one. Kodak's own servers no",
+    "longer carry it; the URL is an archive (found for issue #31).",
+    "",
+    "Characteristic curves: daylight exposure, Status M densitometry, Process C-41. The",
+    "exposure axis is labelled in Kodak's bar notation (3-bar.0 = -3.0). The sheet gives no",
+    "Log H ref: -0.84 is assumed, where Kodak's ISO 100 sheets put a grey card (log10(0.8 /",
+    "100) + 1.26), as Ektar 100's and Gold 100's do. It puts a grey card at the red density",
+    "the sheet's exposure check gives (1.03 to 1.23).",
+    "",
+    "Spectral sensitivity: effective exposure 1/50 s, Status M, density 0.2 above D-min.",
+    "",
+    "Spectral dye density: typical densities of a midscale neutral subject and D-min.",
+    "",
+    "Page coordinates: the plots' axes are calibrated from their tick marks and gridlines."
+  ],
+  "page": 2,
+  "log_h_ref": -0.84,
+  "plots": {
+    "characteristic": {
+      "x": [[102.881, -3.0], [241.110, 0.0]],
+      "y": [[213.714, 1.0], [121.468, 3.0]],
+      "curves": { "blue": ["12.0"], "green": [13], "red": ["12.1"] },
+      "sample": { "start": -3.1, "step": 0.05, "end": 0.85 }
+    },
+    "sensitivity": {
+      "x": [[382.834, 300.0], [543.429, 700.0]],
+      "y": [[189.327, 1.0], [113.598, 3.0]],
+      "floor": 0.0,
+      "curves": { "yellow": ["19.1"], "magenta": [20], "cyan": ["19.0"] },
+      "sample": { "start": 370.0, "step": 5.0, "end": 660.0 }
+    },
+    "dye_density": {
+      "x": [[286.490, 500.0], [347.873, 600.0]],
+      "y": [[477.824, 0.5], [367.223, 2.0]],
+      "curves": { "midscale": [25], "minimum": [26] },
+      "sample": { "start": 405.0, "step": 5.0, "end": 695.0 }
+    }
+  }
+}

@@ -121,13 +121,15 @@ fn extracted_curves_agree_with_the_sheets_exposure_checks() {
     // the lightest step of a paper grey scale, read through the Status M red filter. The
     // last column is how far outside them the sheet's own curves may be: E-4046 and E-4050
     // print the same check word for word, and their curves sit 0.02 to 0.09 denser (see
-    // the stocks' modules); AF3-0262E's Log H ref is assumed, and lands 0.01 off its check.
+    // the stocks' modules); AF3-0262E's Log H ref is assumed, and lands 0.01 off its check; E-4L's is assumed
+    // too, and lands within its check.
     let checks = [
         ("kodak-kodacolor-200", 0.85..=1.05, Some(1.25..=1.45), 0.0),
         ("kodak-gold-200", 0.85..=1.05, Some(1.25..=1.45), 0.0),
         ("kodak-gold-100", 0.90..=1.10, Some(1.30..=1.50), 0.0),
         ("kodak-ektar-100", 0.77..=0.87, Some(1.13..=1.23), 0.09),
         ("kodak-portra-400", 0.77..=0.87, Some(1.13..=1.23), 0.05),
+        ("kodak-pro-image-100", 1.03..=1.23, Some(1.43..=1.63), 0.0),
         ("kodak-ultramax-400", 0.80..=1.00, Some(1.20..=1.40), 0.0),
         ("fujifilm-400", 0.75..=0.95, None, 0.02),
     ];
