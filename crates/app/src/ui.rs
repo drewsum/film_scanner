@@ -16,6 +16,7 @@ use crate::export::{self, ExportSettings, FrameFormat};
 use crate::history::Preset;
 use crate::session;
 use crate::state::{self, Activity, AppState, EXTRA_EV, FilmType, ViewChannel, WorkflowStep};
+use crate::stock_curves::{self, Stock};
 use crate::strip::Filmstrip;
 use crate::tooltip_art::ArtTip;
 use crate::view::{self, ImageView};
@@ -750,12 +751,16 @@ impl ScannerApp {
                             .selected_text(invert.stock.display_name())
                             .show_ui(ui, |ui| {
                                 for &stock in scan_film::stock::all() {
-                                    ui.selectable_value(
+                                    let item = ui.selectable_value(
                                         &mut invert.stock,
                                         stock,
                                         stock.display_name(),
-                                    )
-                                    .on_hover_text(stock.provenance);
+                                    );
+                                    stock_curves::on_hover(
+                                        item,
+                                        stock.provenance,
+                                        Stock::Color(stock),
+                                    );
                                 }
                             });
                         ui.end_row();
@@ -773,12 +778,16 @@ impl ScannerApp {
                                 ui.selectable_value(&mut invert.mono_stock, None, GENERIC_BW)
                                     .on_hover_text(GENERIC_BW_NOTE);
                                 for &stock in scan_film::stock::mono_all() {
-                                    ui.selectable_value(
+                                    let item = ui.selectable_value(
                                         &mut invert.mono_stock,
                                         Some(stock),
                                         stock.display_name(),
-                                    )
-                                    .on_hover_text(stock.provenance);
+                                    );
+                                    stock_curves::on_hover(
+                                        item,
+                                        stock.provenance,
+                                        Stock::Mono(stock),
+                                    );
                                 }
                             });
                         ui.end_row();
@@ -787,10 +796,14 @@ impl ScannerApp {
             match invert.film_type {
                 FilmType::ColorNegative => {
                     ui.label(RichText::new(invert.stock.provenance).weak().small());
+                    stock_curves::panel(ui, Stock::Color(invert.stock));
                 }
                 FilmType::BlackAndWhite => {
                     let note = invert.mono_stock.map_or(GENERIC_BW_NOTE, |s| s.provenance);
                     ui.label(RichText::new(note).weak().small());
+                    if let Some(stock) = invert.mono_stock {
+                        stock_curves::panel(ui, Stock::Mono(stock));
+                    }
                     mono_controls(ui, &mut invert.mono);
                 }
                 FilmType::Slide => {

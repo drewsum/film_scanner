@@ -10,6 +10,7 @@ mod history;
 mod icc;
 mod session;
 mod state;
+mod stock_curves;
 mod strip;
 mod tooltip_art;
 mod ui;

@@ -30,3 +30,7 @@ Conventions:
 - Each drawing must be used by a tooltip, and must render (tests in `tooltip_art.rs`).
   To look at them all, in both themes:
   `TOOLTIP_ART_OUT=<folder> cargo test -p film-scanner preview -- --ignored`.
+
+The film stocks' characteristic curves aren't here: `src/stock_curves.rs` draws them from
+each stock's datasheet, with the same tokens, for the stock lists' tooltips and the Invert
+step's sidebar.

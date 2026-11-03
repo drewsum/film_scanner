@@ -178,7 +178,7 @@ pub fn size(svg: &str) -> Option<Vec2> {
 /// The tooltip: `text`, with the drawing `name` under it, the parts named in `highlight`
 /// picked out.
 fn show(ui: &mut Ui, text: WidgetText, name: &str, highlight: &[&str]) {
-    let Some((svg, size)) = drawing(name).and_then(|svg| Some((svg, size(svg)?))) else {
+    let Some(svg) = drawing(name) else {
         debug_assert!(false, "no tooltip drawing {name}");
         ui.label(text);
         return;
@@ -187,15 +187,31 @@ fn show(ui: &mut Ui, text: WidgetText, name: &str, highlight: &[&str]) {
         highlight.iter().all(|p| tokens(svg).any(|t| t == *p)),
         "tooltip drawing {name} has no part among {highlight:?}"
     );
+    show_svg(ui, text, name, svg, highlight);
+}
+
+/// The tooltip: `text`, with the SVG template `svg` (named `name`) under it.
+pub fn show_svg(ui: &mut Ui, text: WidgetText, name: &str, svg: &str, highlight: &[&str]) {
+    let Some(size) = size(svg) else {
+        debug_assert!(false, "tooltip drawing {name} has no size");
+        ui.label(text);
+        return;
+    };
     ui.set_max_width(ui.spacing().tooltip_width.max(size.x));
     ui.label(text);
+    ui.add_space(4.0);
+    ui.add(image(ui, name, svg, highlight).fit_to_exact_size(size));
+}
+
+/// The SVG template `svg` (named `name`) as an image in `ui`'s theme, the parts named in
+/// `highlight` lit; sized as its `<svg>` element asks unless the caller sizes it.
+pub fn image(ui: &Ui, name: &str, svg: &str, highlight: &[&str]) -> egui::Image<'static> {
     let svg = fill(svg, &palette(ui.visuals()), highlight);
-    // A new name for each theme and highlight, so each is rendered once and kept.
+    // A new name for each theme, highlight and drawing, so each is rendered once and kept.
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     svg.hash(&mut hasher);
     let uri = format!("bytes://tooltip-art/{name}-{:016x}.svg", hasher.finish());
-    ui.add_space(4.0);
-    ui.add(egui::Image::from_bytes(uri, svg.into_bytes()).fit_to_exact_size(size));
+    egui::Image::from_bytes(uri, svg.into_bytes())
 }
 
 /// [`Response::on_hover_text`], with a drawing.
