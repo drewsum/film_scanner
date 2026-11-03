@@ -99,7 +99,8 @@ fn main() {
         white[2]
     );
     let rects: Vec<_> = detection.frames.iter().map(|f| f.rect).collect();
-    let levels = frame_levels(&img, gamma, dpi, area, &rects, model, base);
+    let neutral = scan_film::Inverter::new(model, base, &Default::default());
+    let levels = frame_levels(&img, gamma, dpi, area, &rects, &neutral);
     // A channel whose densities the scanner scales differently from Status M shows as a
     // color offset that changes with the frame's level ("crossover"); offsets that don't
     // follow the level are the scenes' own color.

@@ -51,6 +51,7 @@ const SEARCH_STEP_MM: f32 = 0.1;
 
 /// A rectangle on the scanner bed in millimetres, turned about its centre.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FrameRect {
     pub cx_mm: f32,
     pub cy_mm: f32,

@@ -108,7 +108,8 @@ impl ExportSettings {
 
 /// A roll's metadata, as the publisher's format 0 has it. Everything is kept as typed, and
 /// checked by [`RollMetadata::validate`] before it is written.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct RollMetadata {
     pub name: String,
     pub description: String,

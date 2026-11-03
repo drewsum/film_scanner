@@ -8,11 +8,14 @@ The goal is one GUI that covers the whole workflow:
 1. **Scan**: detect scanners, preview, and capture high-bit-depth scans, including infrared
    (dust/scratch removal) and multi-exposure passes
 2. **Crop**: automatically detect frames on a strip, remove borders and straighten them
-3. **Invert**: turn negatives into positives using film-stock profiles (orange-mask removal)
-4. **Adjust**: edit each frame on its own: color, levels, curves, selective color, grain
-   reduction, sharpening
+3. **Invert**: turn negatives into positives using film-stock profiles (orange-mask removal),
+   and black-and-white negatives and slides
+4. **Adjust**: edit each frame on its own: color, tone, levels, curves, selective color,
+   grain reduction, sharpening, straightening, spot healing
 5. **Export**: save the roll's frames into a folder, with the metadata
    [film_roll_publisher](https://github.com/drewsum/film_roll_publisher) uploads them with
+
+A roll (the scan, its frames and every edit) can be saved and opened again later.
 
 > **Status:** early development. Scanning, cropping, inverting color negatives, editing
 > each frame and exporting the roll work. See the [roadmap issue](https://github.com/drewsum/film_scanner/issues/1).
@@ -168,7 +171,15 @@ The step has the film stock, exposure and color balance in stops (like a photofi
 printer), contrast, and *Print* or *Colorimetric* color. *Auto* balances the roll as a
 printer does: each frame's average is taken as grey, and the roll gets the median of the
 frames' corrections. The view, *Save as TIFF* and *Save frames as TIFF* all give positives
-(16-bit sRGB) while *Invert color negative* is on.
+(16-bit sRGB) while *Make positives* is on.
+
+Two other kinds of film have no profiles yet, and are printed without one:
+
+- **Black-and-white negatives** are inverted on a generic black-and-white film's straight
+  line, against the measured film base. *Grey from* picks which of the scan's channels
+  make the grey (all of them is the least noisy), and *Toning* tints the print sepia,
+  selenium or blue.
+- **Slides** are printed as they are, with the printing's exposure, balance and contrast.
 
 How profiles work, and how to add a stock, is in
 [docs/film-profiles.md](docs/film-profiles.md). `cargo run -p scan-film --example profile`
@@ -179,9 +190,12 @@ SCAN.tif` measures a saved (uninverted) film scan against it.
 
 The **Adjust** step edits every frame on its own, with the tools SilverFast has for a
 frame: Auto, grey, black and white pickers, histogram and levels, curves, color balance,
-brightness, contrast and saturation, selective color, grain and color noise reduction,
-unsharp masking, and turning and mirroring. Pick a frame (or the whole scan) from the list;
-the view shows it cut out, straightened and developed.
+temperature and tint, brightness and contrast, highlights, shadows and clarity, saturation
+and vibrance, selective color, grain and color noise reduction, unsharp masking, light
+falloff and vignette, straightening (with a level tool), a film border, spot healing, and
+turning and mirroring. Pick a frame from the strip along the bottom (or the list, or the
+whole scan); the view shows it cut out, straightened and developed. *Before*, *Split* and
+*Clipping* compare it with no edits and mark what is clipped.
 
 The roll's printing in the Invert step stays the starting point. A frame's exposure and
 color balance are added to it **in the film's scene light, before the print curve**, the
@@ -190,8 +204,20 @@ uses the film's profile just like the roll's does. Its *Auto* balances the frame
 printer would on its own, then stretches it to full range. The rest edits the positive.
 
 Each frame's edits are kept through a new scan of the same film (they follow the frame
-detection finds in their place), can be copied to other frames, and are saved with it by
-*Save frames as TIFF*. How it all works is in [docs/editing.md](docs/editing.md).
+detection finds in their place), can be undone (Ctrl+Z), copied to other frames or saved
+as presets, and are saved with it by *Save frames as TIFF*. *Auto all* sets each frame
+on its own; *Match roll* brings every frame to the roll's typical exposure and color
+instead. Untick a frame in the strip to leave it out of exports. How it all works, and the
+keyboard shortcuts, are in [docs/editing.md](docs/editing.md).
+
+## Saving a roll
+
+*Save roll...* (Ctrl+S) saves the scan, its frames and every edit, so the roll can be
+opened again later (*Open roll...*, Ctrl+O) to change a frame and export it again. A roll
+file (`roll180.filmroll`) is text, and the scan is kept beside it as scanned, in the same
+files *Save as TIFF* writes (`roll180.tif`, and `roll180_ir.tif` and so on): merging and
+dust removal are done again when it is opened. Saving to the same roll again writes only
+the roll file.
 
 ## Exporting a roll
 
@@ -200,8 +226,9 @@ as `roll180_01.jpg`, `roll180_02.jpg`, ... in the Crop step's frame order: *File
 how they start (`roll` by default), and shows the names it will give.
 JPEG (with a quality) and 8-bit PNG are what
 [film_roll_publisher](https://github.com/drewsum/film_roll_publisher) uploads; 16-bit TIFF
-is there for archiving. Files already in the folder are pointed out before they're
-replaced.
+is there for archiving. Every file is tagged with an sRGB color profile, so viewers and
+Immich know its colors. Frames unticked in the strip are left out, and the rest numbered
+without gaps. Files already in the folder are pointed out before they're replaced.
 
 Tick *Write metadata.yml for film_roll_publisher* to save the roll's details next to the
 frames, in the publisher's format 0:
@@ -278,7 +305,8 @@ cargo test -p scan-wia -- --ignored --nocapture
 - `crates/scan-wia`: Windows WIA backend
 - `crates/scan-epson`: native USB backend for the Epson Perfection V500 (Windows)
 - `crates/scan-sane`: SANE backend (Linux, macOS)
-- `crates/app`: the `film-scanner` egui application, and the Export step's `metadata.yml`
+- `crates/app`: the `film-scanner` egui application, the Export step's `metadata.yml`,
+  and roll files
 
 ## License
 

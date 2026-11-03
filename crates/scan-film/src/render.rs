@@ -14,6 +14,11 @@
 //!    print does; [`Rendering::Colorimetric`] mixes them with the matrix fitted from the
 //!    film's spectral sensitivities.
 //! 5. **Tone.** A print-like curve (see [`Tone`]) for display, then sRGB encoding.
+//!
+//! Black-and-white negatives ([`Inverter::black_and_white`]) and slides
+//! ([`Inverter::positive`]) go through the same steps without a film profile: a generic
+//! black-and-white film's straight line in place of the film's curves, its channels mixed
+//! to grey (see [`Mono`]); or, for a slide, the light through it taken as the scene's.
 
 use crate::model::{FilmModel, GREY};
 use crate::spectral::{self, Mat3};
@@ -89,31 +94,147 @@ impl Tone {
     }
 }
 
-/// Turns the light through a negative into a positive, for one film, base and printing.
+/// A toning of black-and-white prints, as the chemistry tints the silver.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Toning {
+    #[default]
+    None,
+    /// Warm brown, strongest in the highlights.
+    Sepia,
+    /// Cool purple-brown in the shadows.
+    Selenium,
+    /// Blue, as a cyanotype.
+    Blue,
+}
+
+impl Toning {
+    pub const ALL: [Toning; 4] = [Toning::None, Toning::Sepia, Toning::Selenium, Toning::Blue];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Toning::None => "None",
+            Toning::Sepia => "Sepia",
+            Toning::Selenium => "Selenium",
+            Toning::Blue => "Blue",
+        }
+    }
+
+    /// The power each channel's display value (0–1) is raised to at full strength: above 1
+    /// takes that color out of the midtones, below 1 adds it. Black and white stay.
+    fn powers(self) -> [f32; 3] {
+        match self {
+            Toning::None => [1.0; 3],
+            Toning::Sepia => [0.88, 1.0, 1.3],
+            Toning::Selenium => [1.04, 1.12, 1.0],
+            Toning::Blue => [1.3, 1.08, 0.85],
+        }
+    }
+}
+
+/// How black-and-white film is turned grey: for silver film scanned in color.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Mono {
+    /// How much each of red, green and blue counts towards the grey, scaled to add up to 1.
+    /// Silver is near neutral, so this mostly trades one channel's noise for another's; a
+    /// chromogenic (C-41) black-and-white film's dye differs more.
+    pub mix: [f32; 3],
+    pub toning: Toning,
+    /// 0 (none) to 1.
+    pub toning_amount: f32,
+}
+
+impl Default for Mono {
+    fn default() -> Self {
+        Self {
+            mix: [1.0 / 3.0; 3],
+            toning: Toning::None,
+            toning_amount: 0.5,
+        }
+    }
+}
+
+/// A generic black-and-white negative's density above its base where a grey card exposed
+/// as the film's speed asks lands: about where the published curves of such films put it.
+pub const BW_GREY_DENSITY: f32 = 0.75;
+/// A generic black-and-white negative's gamma (contrast index), developed normally.
+pub const BW_GAMMA: f32 = 0.62;
+
+#[derive(Clone, Debug)]
+enum Kind {
+    /// A color negative, with its film's curves.
+    Color {
+        model: Box<FilmModel>,
+        matrix: Option<[[f32; 3]; 3]>,
+    },
+    /// A black-and-white negative, on a generic straight line.
+    Mono(Mono),
+    /// A slide: the light through it is the scene's. `power` is its contrast about grey.
+    Positive { power: f32 },
+}
+
+/// Turns the light through a negative (or a slide) into a positive, for one film, base and
+/// printing.
 #[derive(Clone, Debug)]
 pub struct Inverter {
-    model: FilmModel,
+    kind: Kind,
     /// Linear light through the bare film base, per channel, on the scan's scale.
     base: [f32; 3],
     /// Printing exposure per channel, as a factor on scene light.
     gain: [f32; 3],
-    matrix: Option<[[f32; 3]; 3]>,
     tone: Tone,
 }
 
 impl Inverter {
+    /// For a color negative of the film `model`.
     pub fn new(model: &FilmModel, base: [f32; 3], printing: &Printing) -> Self {
         let matrix = match printing.rendering {
             Rendering::Print => None,
             Rendering::Colorimetric => Some(to_f32(model.colorimetric())),
         };
         Self {
-            model: model.clone(),
+            kind: Kind::Color {
+                model: Box::new(model.clone()),
+                matrix,
+            },
             base: base.map(|b| b.max(1e-6)),
             gain: printing
                 .balance_ev
                 .map(|b| 2f32.powf(printing.exposure_ev + b)),
-            matrix,
+            tone: Tone::new(printing.contrast),
+        }
+    }
+
+    /// For a black-and-white negative, without a profile: each channel turned back into
+    /// light on a generic film's straight line ([`BW_GREY_DENSITY`], [`BW_GAMMA`]), mixed
+    /// to grey, printed, then toned. The printing's color balance and rendering don't
+    /// apply.
+    pub fn black_and_white(base: [f32; 3], printing: &Printing, mono: &Mono) -> Self {
+        let total: f32 = mono.mix.iter().map(|m| m.max(0.0)).sum();
+        let mix = if total > 0.0 {
+            mono.mix.map(|m| m.max(0.0) / total)
+        } else {
+            [1.0 / 3.0; 3]
+        };
+        Self {
+            kind: Kind::Mono(Mono { mix, ..*mono }),
+            base: base.map(|b| b.max(1e-6)),
+            gain: [2f32.powf(printing.exposure_ev); 3],
+            tone: Tone::new(printing.contrast),
+        }
+    }
+
+    /// For a slide (or any positive film), without a profile: the light through it, with
+    /// the printing's exposure and balance, is the scene's, its contrast moved about grey
+    /// by the printing's (unchanged at [`DEFAULT_CONTRAST`]).
+    pub fn positive(printing: &Printing) -> Self {
+        Self {
+            kind: Kind::Positive {
+                power: printing.contrast / DEFAULT_CONTRAST,
+            },
+            base: [1.0; 3],
+            gain: printing
+                .balance_ev
+                .map(|b| 2f32.powf(printing.exposure_ev + b)),
             tone: Tone::new(printing.contrast),
         }
     }
@@ -127,27 +248,58 @@ impl Inverter {
     pub fn scene(&self, c: usize, light: f32) -> f32 {
         let base = self.base[c];
         let density = (base / light.max(base * 1e-5)).log10();
-        self.model.exposure(c, density) * self.gain[c]
+        let e = match &self.kind {
+            Kind::Color { model, .. } => model.exposure(c, density),
+            Kind::Mono(_) => GREY * 10f32.powf((density - BW_GREY_DENSITY) / BW_GAMMA),
+            Kind::Positive { .. } => light.max(0.0),
+        };
+        e * self.gain[c]
     }
 
     /// Whether each output channel depends on its own input channel alone, so a channel
     /// can be rendered with [`Inverter::display_channel`].
     pub fn separable(&self) -> bool {
-        self.matrix.is_none()
+        match &self.kind {
+            Kind::Color { matrix, .. } => matrix.is_none(),
+            Kind::Mono(_) => false,
+            Kind::Positive { .. } => true,
+        }
+    }
+
+    /// Whether this makes a black-and-white image, so color balance means nothing.
+    pub fn is_mono(&self) -> bool {
+        matches!(self.kind, Kind::Mono(_))
     }
 
     /// The display value (sRGB encoded, 0–1) of scene light `e`, for a separable inverter.
     pub fn display_channel(&self, e: f32) -> f32 {
-        spectral::srgb_encode(f64::from(self.tone.apply(e))) as f32
+        let light = match self.kind {
+            Kind::Positive { power } if e > 0.0 => GREY * (e / GREY).powf(power),
+            Kind::Positive { .. } => 0.0,
+            _ => self.tone.apply(e),
+        };
+        spectral::srgb_encode(f64::from(light.min(1.0))) as f32
     }
 
     /// The display color (sRGB encoded, 0–1) of scene light `e`.
     pub fn display(&self, e: [f32; 3]) -> [f32; 3] {
-        let e = match &self.matrix {
-            Some(m) => std::array::from_fn(|r| (0..3).map(|k| m[r][k] * e[k]).sum()),
-            None => e,
-        };
-        e.map(|v| self.display_channel(v))
+        match &self.kind {
+            Kind::Color {
+                matrix: Some(m), ..
+            } => {
+                let e: [f32; 3] = std::array::from_fn(|r| (0..3).map(|k| m[r][k] * e[k]).sum());
+                e.map(|v| self.display_channel(v))
+            }
+            Kind::Mono(mono) => {
+                let grey: f32 = (0..3).map(|c| mono.mix[c] * e[c]).sum();
+                let v = self.display_channel(grey);
+                let amount = mono.toning_amount.clamp(0.0, 1.0);
+                mono.toning
+                    .powers()
+                    .map(|p| v.powf(1.0 + (p - 1.0) * amount))
+            }
+            _ => e.map(|v| self.display_channel(v)),
+        }
     }
 
     /// The display color of a pixel whose linear light through the film is `light`.

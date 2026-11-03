@@ -6,7 +6,11 @@
 mod crop;
 mod edit;
 mod export;
+mod history;
+mod icc;
+mod session;
 mod state;
+mod strip;
 mod ui;
 mod view;
 mod worker;

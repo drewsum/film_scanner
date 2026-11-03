@@ -2,31 +2,46 @@
 //!
 //! [`develop`] makes a frame's positive, in this order:
 //!
-//! 1. **Color, in scene light.** The frame's exposure and color balance are added to the
-//!    roll's printing (see [`Adjustments::printing`]), so a negative is inverted with them
-//!    before the print tone curve, the way a photofinisher corrects each frame's printer
-//!    lights. A positive (a flatbed scan, or film left uninverted) gets them as gains on its
-//!    linear light.
+//! 1. **Color, in scene light.** The frame's exposure, color balance, temperature and tint
+//!    are added to the roll's printing (see [`Adjustments::printing`]), so a negative is
+//!    inverted with them before the print tone curve, the way a photofinisher corrects each
+//!    frame's printer lights. A positive (a flatbed scan, or film left uninverted) gets them
+//!    as gains on its linear light.
 //!
 //! Then [`apply`] edits the positive, 16-bit sRGB:
 //!
 //! 2. **Grain and color noise reduction**: an edge-preserving (guided) filter of the
 //!    image's brightness and of its color, separately.
-//! 3. **Tone**, per channel then for all three: levels, then curves, then brightness and
+//! 3. **Light falloff**: the edges brightened, for a scanner's or lens's uneven light.
+//! 4. **Highlights and shadows**: each pixel brightened or darkened by how light its
+//!    surroundings are (a large guided filter of brightness), so contrast within an area
+//!    is kept.
+//! 5. **Tone**, per channel then for all three: levels, then curves, then brightness and
 //!    contrast. Together these are one table per channel.
-//! 4. **Saturation and selective color**: chroma scaled, and hue, saturation and lightness
-//!    moved for six hue ranges.
-//! 5. **Sharpening**: an unsharp mask of brightness alone, so it adds no color fringes.
+//! 6. **Clarity**: local contrast, the difference from a large guided filter of brightness
+//!    steepened (or flattened) in the midtones. The guided filter keeps strong edges out of
+//!    it, so they get no halos.
+//! 7. **Saturation, vibrance and selective color**: chroma scaled (vibrance more where it
+//!    is low, and less on skin), and hue, saturation and lightness moved for six hue
+//!    ranges.
+//! 8. **Vignette**: the corners darkened or lightened, for effect.
+//! 9. **Sharpening**: an unsharp mask of brightness alone, so it adds no color fringes.
 //!
-//! [`orient`] turns and mirrors the result. The spatial steps (2 and 5) are sized in pixels
-//! of the saved image; a preview passes its `scale` so it shows what is saved.
+//! [`orient`] turns and mirrors the result. The spatial steps (2 and 9) are sized in pixels
+//! of the saved image; a preview passes its `scale` so it shows what is saved. The others
+//! (4, 6) are sized by the image, so they look the same at any size.
+//!
+//! Before all of this, a frame's geometry decides what is cut from the scan ([`framed`]:
+//! its border and straightening), and its spots are healed on the cut ([`heal`]).
 
 use std::borrow::Cow;
 use std::f32::consts::PI;
 
-use scan_core::image::DynamicImage;
+use scan_core::ScanArea;
+use scan_core::image::{DynamicImage, GrayImage, Luma};
 use scan_film::{Inverter, Printing};
 
+use crate::frames::FrameRect;
 use crate::negative::{Rgb16Image, decode_table, invert, to_u16};
 
 /// Index of the levels and curves that apply to all three channels; red, green and blue
@@ -44,9 +59,19 @@ pub const HUE_RANGES: [(&str, f32); 6] = [
     ("Magentas", 300.0),
 ];
 
+/// How far full temperature moves red and blue, in stops each way.
+pub const TEMPERATURE_EV: f32 = 0.5;
+/// How far full tint moves green, in stops (red and blue go half as far the other way).
+pub const TINT_EV: f32 = 0.4;
+
 /// Levels: input `black` to `white` stretched to the output range, with a midtone `gamma`
 /// (above 1 lightens). Values are 0–1 of full scale, sRGB encoded.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(default)
+)]
 pub struct Levels {
     pub black: f32,
     pub white: f32,
@@ -79,6 +104,11 @@ impl Levels {
 /// A tone curve through control points, interpolated with a monotone cubic spline
 /// (Fritsch–Carlson), so it never overshoots between points. Flat beyond its end points.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(from = "Vec<[f32; 2]>", into = "Vec<[f32; 2]>")
+)]
 pub struct Curve {
     /// (input, output), 0–1, in increasing input.
     points: Vec<[f32; 2]>,
@@ -92,6 +122,18 @@ impl Default for Curve {
         Self {
             points: vec![[0.0, 0.0], [1.0, 1.0]],
         }
+    }
+}
+
+impl From<Vec<[f32; 2]>> for Curve {
+    fn from(points: Vec<[f32; 2]>) -> Self {
+        Self::new(points)
+    }
+}
+
+impl From<Curve> for Vec<[f32; 2]> {
+    fn from(curve: Curve) -> Self {
+        curve.points
     }
 }
 
@@ -214,6 +256,11 @@ impl Curve {
 /// Selective color for one hue range: hue moved by `hue_deg` (towards the next range up
 /// for +), saturation and lightness scaled by −1 to +1.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(default)
+)]
 pub struct HueAdjust {
     pub hue_deg: f32,
     pub saturation: f32,
@@ -228,6 +275,11 @@ impl HueAdjust {
 
 /// Grain and color noise reduction, 0 (off) to 1 each.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(default)
+)]
 pub struct NoiseReduction {
     /// Smooths brightness: film grain.
     pub grain: f32,
@@ -250,6 +302,11 @@ impl Default for NoiseReduction {
 
 /// Unsharp masking of brightness.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(default)
+)]
 pub struct Sharpen {
     /// How much of the difference from the blurred image is added: 0 (off) to 3.
     pub amount: f32,
@@ -270,14 +327,35 @@ impl Default for Sharpen {
     }
 }
 
+/// A spot to heal (dust or a hair the infrared pass missed, or any speck on film infrared
+/// can't see through), on the scanner bed: it stays put when its frame is moved,
+/// straightened or given a border.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Spot {
+    pub x_mm: f32,
+    pub y_mm: f32,
+    pub radius_mm: f32,
+}
+
 /// Everything the Adjust step sets for one frame (or the whole scan). The default changes
 /// nothing.
 #[derive(Clone, Debug, Default, PartialEq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(default)
+)]
 pub struct Adjustments {
     /// Brighter (+) or darker (−), in stops, on top of the roll's printing.
     pub exposure_ev: f32,
     /// More (+) or less (−) red, green, blue, in stops, on top of the roll's printing.
     pub balance_ev: [f32; 3],
+    /// −1 (cooler, bluer) to 1 (warmer, more amber), on top of the balance: see
+    /// [`TEMPERATURE_EV`].
+    pub temperature: f32,
+    /// −1 (greener) to 1 (more magenta), on top of the balance: see [`TINT_EV`].
+    pub tint: f32,
     /// [`MASTER`], then red, green, blue.
     pub levels: [Levels; 4],
     /// [`MASTER`], then red, green, blue.
@@ -286,12 +364,33 @@ pub struct Adjustments {
     pub brightness: f32,
     /// −1 to 1: an S-curve about the middle grey (+), or its inverse.
     pub contrast: f32,
+    /// −1 (darker) to 1 (lighter): light areas, by how light their surroundings are.
+    pub highlights: f32,
+    /// −1 (darker) to 1 (lighter): dark areas, by how dark their surroundings are.
+    pub shadows: f32,
+    /// −1 (softer) to 1 (crisper): local contrast in the midtones.
+    pub clarity: f32,
     /// −1 (grey) to 1 (twice the chroma).
     pub saturation: f32,
+    /// −1 to 1: saturation that changes muted colors most and spares skin.
+    pub vibrance: f32,
     /// One per [`HUE_RANGES`].
     pub selective: [HueAdjust; 6],
     pub noise: NoiseReduction,
     pub sharpen: Sharpen,
+    /// 0 to 1: the edges and corners brightened, up to twice in the corners, for a
+    /// scanner's or lens's light falling off.
+    pub falloff: f32,
+    /// −1 (darker corners) to 1 (lighter), for effect.
+    pub vignette: f32,
+    /// The frame turned clockwise, in degrees, and cut just smaller to stay inside: fine
+    /// levelling, finer than the Crop step's. Not for the whole scan.
+    pub straighten_deg: f32,
+    /// Film kept around the frame, in millimetres: its rebate and edge printing, for the
+    /// look. Not for the whole scan.
+    pub border_mm: f32,
+    /// Healed before anything else.
+    pub spots: Vec<Spot>,
     /// Clockwise, after mirroring, on top of the scan's own turn.
     pub quarter_turns: u8,
     /// Flipped left to right, before turning.
@@ -299,18 +398,29 @@ pub struct Adjustments {
 }
 
 impl Adjustments {
-    /// The frame's printing: the roll's, with this frame's exposure and balance added.
+    /// The frame's printing: the roll's, with this frame's exposure and color (see
+    /// [`Adjustments::color_ev`]) added.
     pub fn printing(&self, roll: &Printing) -> Printing {
+        let color = self.color_ev();
         Printing {
             exposure_ev: roll.exposure_ev + self.exposure_ev,
-            balance_ev: std::array::from_fn(|c| roll.balance_ev[c] + self.balance_ev[c]),
+            balance_ev: std::array::from_fn(|c| roll.balance_ev[c] + color[c]),
             ..*roll
         }
     }
 
-    /// The factor on each channel's linear light of the exposure and balance.
+    /// The color balance with the temperature and tint added, in stops per channel. Neither
+    /// changes the overall level.
+    pub fn color_ev(&self) -> [f32; 3] {
+        let t = self.temperature.clamp(-1.0, 1.0) * TEMPERATURE_EV;
+        let m = self.tint.clamp(-1.0, 1.0) * TINT_EV;
+        let [r, g, b] = self.balance_ev;
+        [r + t + m / 2.0, g - m, b - t + m / 2.0]
+    }
+
+    /// The factor on each channel's linear light of the exposure and color.
     pub fn gains(&self) -> [f32; 3] {
-        self.balance_ev.map(|b| 2f32.powf(self.exposure_ev + b))
+        self.color_ev().map(|b| 2f32.powf(self.exposure_ev + b))
     }
 
     /// Whether these change nothing.
@@ -318,13 +428,92 @@ impl Adjustments {
         *self == Self::default()
     }
 
-    /// Whether [`apply`] changes anything: everything but exposure, balance and orientation.
+    /// Whether [`apply`] changes anything: everything but exposure, color, geometry, spots
+    /// and orientation.
     pub fn edits_positive(&self) -> bool {
         tone_changes(self)
             || color_changes(self)
             || self.noise.grain > 0.0
             || self.noise.color > 0.0
             || self.sharpen.amount > 0.0
+            || self.falloff > 0.0
+            || self.vignette != 0.0
+            || self.highlights != 0.0
+            || self.shadows != 0.0
+            || self.clarity != 0.0
+    }
+
+    /// Whether the frame is cut differently from its rectangle: see [`framed`].
+    pub fn reframes(&self) -> bool {
+        self.straighten_deg != 0.0 || self.border_mm != 0.0
+    }
+}
+
+/// What is cut from the scan for `rect`, a frame on the bed, with `adjust`'s geometry:
+/// `rect` grown by the border on every side, then turned by the straightening (the picture
+/// turns the other way) and shrunk, keeping its shape, just enough to stay inside.
+pub fn framed(rect: &FrameRect, adjust: &Adjustments) -> FrameRect {
+    let border = adjust.border_mm.max(0.0);
+    let (w, h) = (rect.width_mm + 2.0 * border, rect.height_mm + 2.0 * border);
+    let (s, c) = adjust.straighten_deg.to_radians().sin_cos();
+    let (s, c) = (s.abs(), c.abs());
+    let fit = (w / (w * c + h * s)).min(h / (w * s + h * c)).min(1.0);
+    FrameRect {
+        width_mm: w * fit,
+        height_mm: h * fit,
+        angle_deg: rect.angle_deg - adjust.straighten_deg,
+        ..*rect
+    }
+}
+
+/// Where `spots` fall on an image cut for `frame` (or, for `None`, of the whole `area`) at
+/// `px_per_mm`: each spot's x, y and radius, in that image's pixels.
+pub fn spot_pixels(
+    spots: &[Spot],
+    frame: Option<&FrameRect>,
+    area: &ScanArea,
+    px_per_mm: f32,
+) -> Vec<[f32; 3]> {
+    spots
+        .iter()
+        .map(|s| {
+            let (x, y) = match frame {
+                Some(f) => {
+                    let (u, v) = f.to_local(s.x_mm, s.y_mm);
+                    (u + f.width_mm / 2.0, v + f.height_mm / 2.0)
+                }
+                None => (s.x_mm - area.x_mm, s.y_mm - area.y_mm),
+            };
+            [x * px_per_mm, y * px_per_mm, s.radius_mm * px_per_mm]
+        })
+        .collect()
+}
+
+/// `image` with every spot (x, y and radius in its pixels; see [`spot_pixels`]) filled in
+/// from around it, the way dust removal fills its defects ([`crate::inpaint`]). Spots off
+/// the image change nothing.
+pub fn heal<'a>(image: &'a DynamicImage, spots: &[[f32; 3]]) -> Cow<'a, DynamicImage> {
+    let (w, h) = (image.width(), image.height());
+    let mut mask = GrayImage::new(w, h);
+    let mut any = false;
+    for &[x, y, r] in spots {
+        let r = r.max(1.0);
+        let (x0, x1) = ((x - r).floor().max(0.0), (x + r).ceil().min(w as f32));
+        let (y0, y1) = ((y - r).floor().max(0.0), (y + r).ceil().min(h as f32));
+        for py in y0 as u32..y1.max(y0) as u32 {
+            for px in x0 as u32..x1.max(x0) as u32 {
+                let (dx, dy) = (px as f32 + 0.5 - x, py as f32 + 0.5 - y);
+                if dx * dx + dy * dy <= r * r {
+                    mask.put_pixel(px, py, Luma([255]));
+                    any = true;
+                }
+            }
+        }
+    }
+    if any {
+        Cow::Owned(crate::inpaint::inpaint(image, &mask))
+    } else {
+        Cow::Borrowed(image)
     }
 }
 
@@ -382,6 +571,13 @@ pub fn apply(mut image: Rgb16Image, adjust: &Adjustments, scale: f32) -> Rgb16Im
     if adjust.noise.grain > 0.0 || adjust.noise.color > 0.0 {
         denoise(&mut image, &adjust.noise, scale);
     }
+    if adjust.falloff > 0.0 {
+        let k = adjust.falloff.min(1.0);
+        edges(&mut image, |v, r2| v * (1.0 + k * r2));
+    }
+    if adjust.highlights != 0.0 || adjust.shadows != 0.0 {
+        local_tone(&mut image, adjust.highlights, adjust.shadows);
+    }
     if tone_changes(adjust) {
         let tables = tone_tables(adjust);
         par_pixels(&mut image, |_, p| {
@@ -390,11 +586,31 @@ pub fn apply(mut image: Rgb16Image, adjust: &Adjustments, scale: f32) -> Rgb16Im
             }
         });
     }
+    if adjust.clarity != 0.0 {
+        clarity(&mut image, adjust.clarity);
+    }
     if color_changes(adjust) {
-        let (saturation, selective) = (adjust.saturation, adjust.selective);
+        let (saturation, vibrance, selective) =
+            (adjust.saturation, adjust.vibrance, adjust.selective);
         par_pixels(&mut image, |_, p| {
-            let rgb = recolor(p.map(|v| f32::from(v) / 65535.0), saturation, &selective);
+            let rgb = recolor(
+                p.map(|v| f32::from(v) / 65535.0),
+                saturation,
+                vibrance,
+                &selective,
+            );
             *p = rgb.map(to_u16);
+        });
+    }
+    if adjust.vignette != 0.0 {
+        let k = 0.7 * adjust.vignette.clamp(-1.0, 1.0);
+        edges(&mut image, |v, r2| {
+            let s = k * smoothstep(0.2, 1.0, r2);
+            if s < 0.0 {
+                v * (1.0 + s)
+            } else {
+                v + (1.0 - v) * s
+            }
         });
     }
     if adjust.sharpen.amount > 0.0 {
@@ -411,7 +627,73 @@ fn tone_changes(a: &Adjustments) -> bool {
 }
 
 fn color_changes(a: &Adjustments) -> bool {
-    a.saturation != 0.0 || a.selective.iter().any(|s| !s.is_identity())
+    a.saturation != 0.0 || a.vibrance != 0.0 || a.selective.iter().any(|s| !s.is_identity())
+}
+
+/// Every value `v` (0–1) of `image` replaced by `f(v, r2)`, where `r2` is the pixel's
+/// squared distance from the middle, 1 in the corners (0.5 at the middle of each edge).
+fn edges(image: &mut Rgb16Image, f: impl Fn(f32, f32) -> f32 + Sync) {
+    let (w, h) = (image.width() as usize, image.height() as usize);
+    par_pixels(image, |i, p| {
+        let dx = ((i % w) as f32 + 0.5) / w as f32 - 0.5;
+        let dy = ((i / w) as f32 + 0.5) / h as f32 - 0.5;
+        let r2 = 2.0 * (dx * dx + dy * dy);
+        *p = p.map(|v| to_u16(f(f32::from(v) / 65535.0, r2)));
+    });
+}
+
+/// The mean of each pixel's channels, 0–1.
+fn brightness(image: &Rgb16Image) -> Vec<f32> {
+    image
+        .as_raw()
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|p| p.iter().map(|&v| f32::from(v)).sum::<f32>() / (3.0 * 65535.0))
+        .collect()
+}
+
+/// The radius of the surroundings [`local_tone`] looks at, as a fraction of the image's
+/// longer side.
+const LOCAL_TONE_RADIUS: f32 = 0.03;
+/// And [`clarity`]'s.
+const CLARITY_RADIUS: f32 = 0.012;
+
+/// Highlights and shadows: every pixel's channels scaled by how light its surroundings are
+/// (a guided filter of brightness, which follows strong edges, so an edge isn't haloed).
+/// Shadows lift (or deepen) dark surroundings, up to 2.6 times at black; highlights
+/// darken (or lighten) light ones, down to 0.4 times at white.
+fn local_tone(image: &mut Rgb16Image, highlights: f32, shadows: f32) {
+    let (w, h) = (image.width() as usize, image.height() as usize);
+    let light = brightness(image);
+    let radius = ((w.max(h) as f32 * LOCAL_TONE_RADIUS).round() as usize).max(2);
+    let around = guided(&light, w, h, radius, 0.1 * 0.1);
+    let (hi, sh) = (highlights.clamp(-1.0, 1.0), shadows.clamp(-1.0, 1.0));
+    let (sh, hi) = (
+        sh * if sh > 0.0 { 1.6 } else { 0.8 },
+        hi * if hi < 0.0 { 0.6 } else { 0.8 },
+    );
+    par_pixels(image, |i, p| {
+        let b = around[i].clamp(0.0, 1.0);
+        let gain = (1.0 + sh * (1.0 - b).powi(3) + hi * b.powi(3)).max(0.05);
+        *p = p.map(|v| to_u16(f32::from(v) / 65535.0 * gain));
+    });
+}
+
+/// Local contrast: each pixel's difference in brightness from its surroundings (a guided
+/// filter, so strong edges, which it follows, aren't haloed) added again `amount` times,
+/// most in the midtones, to every channel.
+fn clarity(image: &mut Rgb16Image, amount: f32) {
+    let (w, h) = (image.width() as usize, image.height() as usize);
+    let light = brightness(image);
+    let radius = ((w.max(h) as f32 * CLARITY_RADIUS).round() as usize).max(2);
+    let around = guided(&light, w, h, radius, 0.08 * 0.08);
+    let amount = amount.clamp(-1.0, 1.0);
+    par_pixels(image, |i, p| {
+        let l = light[i];
+        let add = amount * (l - around[i]) * 4.0 * l * (1.0 - l) * 65535.0;
+        *p = p.map(|v| (f32::from(v) + add).round().clamp(0.0, 65535.0) as u16);
+    });
 }
 
 /// Steepness of the contrast S-curve at full contrast.
@@ -479,8 +761,11 @@ pub fn hue_weights(hue_deg: f32) -> [f32; 6] {
     })
 }
 
-/// Saturation and selective color of one pixel, 0–1 sRGB encoded.
-fn recolor(p: [f32; 3], saturation: f32, selective: &[HueAdjust; 6]) -> [f32; 3] {
+/// Where skin tones are, in hue: orange-red, and how far either side they reach.
+const SKIN_HUE: (f32, f32) = (25.0, 35.0);
+
+/// Saturation, vibrance and selective color of one pixel, 0–1 sRGB encoded.
+fn recolor(p: [f32; 3], saturation: f32, vibrance: f32, selective: &[HueAdjust; 6]) -> [f32; 3] {
     let [m, u, v] = opponent(p);
     let chroma = u.hypot(v);
     let hue = v.atan2(u).to_degrees();
@@ -494,7 +779,19 @@ fn recolor(p: [f32; 3], saturation: f32, selective: &[HueAdjust; 6]) -> [f32; 3]
         dl += w[k] * s.lightness;
     }
     let (sin, cos) = (dh * colored).to_radians().sin_cos();
-    let gain = ((1.0 + saturation) * (1.0 + ds)).max(0.0);
+    let muted = 1.0 - smoothstep(0.0, 0.4, chroma);
+    let vibrance = if vibrance > 0.0 {
+        let d = (hue - SKIN_HUE.0 + 180.0).rem_euclid(360.0) - 180.0;
+        let skin = if d.abs() < SKIN_HUE.1 {
+            0.5 * (1.0 + (PI * d / SKIN_HUE.1).cos())
+        } else {
+            0.0
+        };
+        vibrance * muted * (1.0 - 0.6 * skin)
+    } else {
+        vibrance * muted
+    };
+    let gain = ((1.0 + saturation) * (1.0 + ds) * (1.0 + vibrance)).max(0.0);
     let (u, v) = ((u * cos - v * sin) * gain, (u * sin + v * cos) * gain);
     let rgb = from_opponent([m, u, v]).map(|x| x.clamp(0.0, 1.0));
     let dl = (dl * colored).clamp(-1.0, 1.0);
@@ -647,13 +944,7 @@ fn gaussian_blur(src: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32> {
 /// every channel.
 fn sharpen(image: &mut Rgb16Image, s: &Sharpen, scale: f32) {
     let (w, h) = (image.width() as usize, image.height() as usize);
-    let light: Vec<f32> = image
-        .as_raw()
-        .as_chunks::<3>()
-        .0
-        .iter()
-        .map(|p| p.iter().map(|&v| f32::from(v)).sum::<f32>() / (3.0 * 65535.0))
-        .collect();
+    let light = brightness(image);
     let blurred = gaussian_blur(&light, w, h, (s.radius_px * scale).max(0.2));
     let (amount, t) = (s.amount.clamp(0.0, 3.0), s.threshold.max(0.0));
     par_pixels(image, |i, p| {

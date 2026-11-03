@@ -11,6 +11,10 @@ rust-version.workspace = true
 scan-core.workspace = true
 scan-film.workspace = true
 thiserror.workspace = true
+serde = { workspace = true, optional = true }
+
+[features]
+serde = ["dep:serde"]
 
 [lints]
 workspace = true

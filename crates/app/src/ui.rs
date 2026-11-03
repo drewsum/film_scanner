@@ -8,19 +8,26 @@ use scan_core::image::DynamicImage;
 use scan_core::mock::MockBackend;
 use scan_core::{BitDepth, ColorMode, DeviceRegistry, ScanSource};
 use scan_film::render::CONTRAST_RANGE;
-use scan_film::{Printing, Rendering};
+use scan_film::{Mono, Printing, Rendering, Toning};
 
 use crate::crop::{BedView, CropEditor};
-use crate::edit::Editor;
+use crate::edit::{self, Editor};
 use crate::export::{self, ExportSettings, FrameFormat};
-use crate::state::{self, Activity, AppState, EXTRA_EV, ViewChannel, WorkflowStep};
+use crate::history::Preset;
+use crate::session;
+use crate::state::{self, Activity, AppState, EXTRA_EV, FilmType, ViewChannel, WorkflowStep};
+use crate::strip::Filmstrip;
 use crate::view::{self, ImageView};
-use crate::worker::{ScanKind, Worker};
+use crate::worker::{Event, ScanKind, Worker};
 
 /// Where the scan's turn is remembered between sessions.
 const TURNS_KEY: &str = "quarter_turns";
-/// Where the film stock is remembered: the roll in the scanner is likely the same next time.
+/// Where the film stock and type are remembered: the roll in the scanner is likely the
+/// same next time.
 const STOCK_KEY: &str = "film_stock";
+const FILM_TYPE_KEY: &str = "film_type";
+/// The Adjust step's presets, as RON.
+const PRESETS_KEY: &str = "presets";
 
 /// Where the Export step's settings are remembered, with the camera fields under
 /// `export.<field>`: the same camera and folder are likely next time, not the same roll.
@@ -46,6 +53,7 @@ pub struct ScannerApp {
     view: ImageView,
     crop_editor: CropEditor,
     editor: Editor,
+    filmstrip: Filmstrip,
     /// The middle of the image view on the bed, in millimetres, as last shown.
     view_centre: Option<(f32, f32)>,
     /// The dust strength slider, applied when it is let go.
@@ -72,8 +80,17 @@ impl ScannerApp {
         {
             state.invert.stock = stock;
         }
+        if let Some(film_type) = cc
+            .storage
+            .and_then(|s| s.get_string(FILM_TYPE_KEY))
+            .and_then(|key| FilmType::from_key(&key))
+        {
+            state.invert.film_type = film_type;
+        }
         if let Some(storage) = cc.storage {
             restore_export(&mut state.export, storage);
+            state.presets =
+                eframe::get_value::<Vec<Preset>>(storage, PRESETS_KEY).unwrap_or_default();
         }
         worker.send(state.refresh_devices());
         Self {
@@ -83,6 +100,7 @@ impl ScannerApp {
             view: ImageView::default(),
             crop_editor: CropEditor::default(),
             editor: Editor::default(),
+            filmstrip: Filmstrip::default(),
             view_centre: None,
             thumbnail: None,
         }
@@ -90,8 +108,13 @@ impl ScannerApp {
 
     fn process_events(&mut self) {
         while let Some(event) = self.worker.try_recv() {
+            let opened = matches!(event, Event::RollOpened { result: Ok(_), .. });
             if let Some(command) = self.state.apply(event) {
                 self.worker.send(command);
+            }
+            if opened {
+                self.dust_strength = self.state.dust.strength;
+                self.thumbnail = None;
             }
         }
     }
@@ -108,7 +131,115 @@ impl ScannerApp {
                 ui.selectable_value(&mut self.state.step, step, label)
                     .on_hover_text(step.description());
             }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let busy = self.state.is_busy();
+                if ui
+                    .add_enabled(
+                        !busy && self.state.result.is_some(),
+                        egui::Button::new("Save roll..."),
+                    )
+                    .on_hover_text(
+                        "Saves the scan, its frames and every edit as a roll file, to open \
+                         again later (Ctrl+S)",
+                    )
+                    .clicked()
+                {
+                    self.save_roll(true);
+                }
+                if ui
+                    .add_enabled(!busy, egui::Button::new("Open roll..."))
+                    .on_hover_text("Opens a roll saved earlier, with its frames and edits (Ctrl+O)")
+                    .clicked()
+                {
+                    self.open_roll();
+                }
+            });
         });
+    }
+
+    /// Save the roll: to its file, if it has one and `ask` is false, else where the user
+    /// chooses.
+    fn save_roll(&mut self, ask: bool) {
+        let known = self
+            .state
+            .roll_file
+            .as_ref()
+            .filter(|(_, g)| *g == self.state.result_generation)
+            .map(|(p, _)| p.clone());
+        let path = match known {
+            Some(path) if !ask => Some(path),
+            known => {
+                let mut dialog = rfd::FileDialog::new()
+                    .add_filter("Film Scanner roll", &[session::EXTENSION])
+                    .set_file_name(format!(
+                        "{}.{}",
+                        self.state.export.prefix.trim(),
+                        session::EXTENSION
+                    ));
+                let folder = known
+                    .as_ref()
+                    .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                    .or(self.state.export.folder.clone());
+                if let Some(folder) = folder {
+                    dialog = dialog.set_directory(folder);
+                }
+                dialog.save_file()
+            }
+        };
+        if let Some(cmd) = path.and_then(|p| self.state.start_save_roll(p)) {
+            self.worker.send(cmd);
+        }
+    }
+
+    fn open_roll(&mut self) {
+        if let Some(cmd) = rfd::FileDialog::new()
+            .add_filter("Film Scanner roll", &[session::EXTENSION])
+            .pick_file()
+            .and_then(|p| self.state.start_open_roll(p))
+        {
+            self.worker.send(cmd);
+        }
+    }
+
+    /// Shortcuts for every step, then the Adjust step's.
+    fn shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.text_edit_focused() || self.state.is_busy() {
+            return;
+        }
+        let command = |key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, key));
+        if command(egui::Key::S) && self.state.result.is_some() {
+            self.save_roll(false);
+        }
+        if command(egui::Key::O) {
+            self.open_roll();
+        }
+        let step = self.state.step;
+        if !matches!(step, WorkflowStep::Adjust | WorkflowStep::Export) {
+            return;
+        }
+        // Arrows move a focused slider, so they step through frames only when none is.
+        let free = ctx.memory(|m| m.focused().is_none());
+        let key = |key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key));
+        let n = self.state.crop.frames.len();
+        let current = edit::target(&self.state);
+        let step_by = if key(egui::Key::PageDown) || (free && key(egui::Key::ArrowRight)) {
+            1
+        } else if key(egui::Key::PageUp) || (free && key(egui::Key::ArrowLeft)) {
+            -1
+        } else {
+            0
+        };
+        if step_by != 0 && n > 0 {
+            let next = match current {
+                Some(i) => (i as isize + step_by).clamp(0, n as isize - 1) as usize,
+                None if step_by > 0 => 0,
+                None => n - 1,
+            };
+            self.editor.select(&mut self.state, Some(next));
+        }
+        if step == WorkflowStep::Adjust {
+            self.editor.shortcuts(ctx, &mut self.state);
+        }
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
@@ -566,22 +697,67 @@ impl ScannerApp {
             return;
         }
         let invert = &mut self.state.invert;
-        ui.checkbox(&mut invert.enabled, "Invert color negative")
+        ui.checkbox(&mut invert.enabled, "Make positives")
             .on_hover_text("Off shows and saves the scan as it is");
         ui.add_enabled_ui(invert.enabled, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Film stock");
-                egui::ComboBox::from_id_salt("stock")
-                    .width(200.0)
-                    .selected_text(invert.stock.display_name())
-                    .show_ui(ui, |ui| {
-                        for &stock in scan_film::stock::all() {
-                            ui.selectable_value(&mut invert.stock, stock, stock.display_name())
-                                .on_hover_text(stock.provenance);
-                        }
-                    });
-            });
-            ui.label(RichText::new(invert.stock.provenance).weak().small());
+            egui::Grid::new("film")
+                .num_columns(2)
+                .spacing([12.0, 6.0])
+                .show(ui, |ui| {
+                    ui.label("Film");
+                    egui::ComboBox::from_id_salt("film_type")
+                        .width(200.0)
+                        .selected_text(invert.film_type.label())
+                        .show_ui(ui, |ui| {
+                            for t in FilmType::ALL {
+                                ui.selectable_value(&mut invert.film_type, t, t.label());
+                            }
+                        });
+                    ui.end_row();
+                    if invert.film_type == FilmType::ColorNegative {
+                        ui.label("Film stock");
+                        egui::ComboBox::from_id_salt("stock")
+                            .width(200.0)
+                            .selected_text(invert.stock.display_name())
+                            .show_ui(ui, |ui| {
+                                for &stock in scan_film::stock::all() {
+                                    ui.selectable_value(
+                                        &mut invert.stock,
+                                        stock,
+                                        stock.display_name(),
+                                    )
+                                    .on_hover_text(stock.provenance);
+                                }
+                            });
+                        ui.end_row();
+                    }
+                });
+            match invert.film_type {
+                FilmType::ColorNegative => {
+                    ui.label(RichText::new(invert.stock.provenance).weak().small());
+                }
+                FilmType::BlackAndWhite => {
+                    ui.label(
+                        RichText::new(
+                            "No film profile yet: inverted on a generic black-and-white \
+                             film's curve. Exposure and contrast set the print.",
+                        )
+                        .weak()
+                        .small(),
+                    );
+                    mono_controls(ui, &mut invert.mono);
+                }
+                FilmType::Slide => {
+                    ui.label(
+                        RichText::new(
+                            "No slide film profiles yet: the slide is shown as it is, with the \
+                             printing's exposure, balance and contrast.",
+                        )
+                        .weak()
+                        .small(),
+                    );
+                }
+            }
         });
         if !self.state.invert.enabled {
             ui.add_space(8.0);
@@ -591,8 +767,10 @@ impl ScannerApp {
         }
 
         ui.add_space(4.0);
+        let film_type = self.state.invert.film_type;
         let d_min = self.state.invert.stock.model().d_min();
         match self.state.current_film_base() {
+            _ if !film_type.is_negative() => {}
             Some(base) => {
                 let d = base.light.map(|l| -l.max(1e-6).log10());
                 ui.label(format!(
@@ -600,18 +778,23 @@ impl ScannerApp {
                     d[0], d[1], d[2]
                 ))
                 .on_hover_text(format!(
-                    "Red / green / blue, {}. The negative is inverted against it, which \
-                     removes the orange mask. The datasheet's D-min is {:.2} / {:.2} / {:.2} \
-                     (Status M); a scanner's channels see the mask a little differently.",
+                    "Red / green / blue, {}. The negative is inverted against it{}",
                     if base.measured {
                         "measured on the unexposed film between the frames and perforations"
                     } else {
                         "estimated from the clearest film on the scan, as no film strips \
                          were found: check the result"
                     },
-                    d_min[0],
-                    d_min[1],
-                    d_min[2]
+                    if film_type == FilmType::ColorNegative {
+                        format!(
+                            ", which removes the orange mask. The datasheet's D-min is \
+                             {:.2} / {:.2} / {:.2} (Status M); a scanner's channels see the \
+                             mask a little differently.",
+                            d_min[0], d_min[1], d_min[2]
+                        )
+                    } else {
+                        ".".to_owned()
+                    }
                 ));
                 if !base.measured {
                     ui.colored_label(
@@ -633,6 +816,7 @@ impl ScannerApp {
 
         ui.add_space(8.0);
         ui.heading("Printing");
+        let color = film_type != FilmType::BlackAndWhite;
         let printing = &mut self.state.invert.printing;
         egui::Grid::new("printing")
             .num_columns(2)
@@ -654,8 +838,9 @@ impl ScannerApp {
                 .into_iter()
                 .enumerate()
                 {
-                    ui.label(label);
-                    ui.add(
+                    ui.add_enabled(color, egui::Label::new(label));
+                    ui.add_enabled(
+                        color,
                         egui::Slider::new(&mut printing.balance_ev[c], -1.5..=1.5)
                             .step_by(0.01)
                             .suffix(" EV"),
@@ -667,6 +852,9 @@ impl ScannerApp {
                 ui.add(egui::Slider::new(&mut printing.contrast, CONTRAST_RANGE).step_by(0.05))
                     .on_hover_text("The print curve's contrast; grey stays grey");
                 ui.end_row();
+                if film_type != FilmType::ColorNegative {
+                    return;
+                }
                 ui.label("Color");
                 ui.horizontal(|ui| {
                     ui.radio_value(&mut printing.rendering, Rendering::Print, "Print")
@@ -717,6 +905,11 @@ impl ScannerApp {
         self.save_frames_button(ui, busy);
     }
 
+    /// The frames along the bottom, in the Adjust and Export steps.
+    fn filmstrip(&mut self, ui: &mut egui::Ui) {
+        self.filmstrip.show(ui, &mut self.state, &mut self.editor);
+    }
+
     fn adjust_controls(&mut self, ui: &mut egui::Ui) {
         let busy = self.state.is_busy();
         self.editor.controls(ui, &mut self.state);
@@ -735,7 +928,8 @@ impl ScannerApp {
         let busy = self.state.is_busy();
         self.state.fill_export_film();
         ui.heading("Export");
-        let frames = self.state.crop.frames.len();
+        let frames = self.state.exported_frames().count();
+        let skipped = self.state.crop.frames.len() - frames;
         let settings = &mut self.state.export;
         egui::Grid::new("export")
             .num_columns(2)
@@ -834,6 +1028,17 @@ impl ScannerApp {
         for problem in &problems {
             ui.label(RichText::new(problem).color(ui.visuals().warn_fg_color));
         }
+        if skipped > 0 {
+            ui.label(
+                RichText::new(format!(
+                    "{skipped} frame{} skipped: tick {} in the strip below to export {}.",
+                    if skipped == 1 { "" } else { "s" },
+                    if skipped == 1 { "it" } else { "them" },
+                    if skipped == 1 { "it" } else { "them" }
+                ))
+                .weak(),
+            );
+        }
         let paths = self.state.export_paths();
         let existing: Vec<_> = paths.iter().filter(|p| p.exists()).collect();
         if let Some(first) = existing.first() {
@@ -853,7 +1058,7 @@ impl ScannerApp {
             )
             .on_hover_text(
                 "Saves each frame straightened, inverted and with its own edits from the \
-                 Adjust step, turned like the view",
+                 Adjust step, turned like the view, tagged sRGB",
             )
             .clicked()
             && let Some(cmd) = self.state.start_export()
@@ -933,6 +1138,12 @@ impl ScannerApp {
                     let invert = &self.state.invert;
                     let p = &invert.printing;
                     invert.stock.id.hash(&mut h);
+                    invert.film_type.key().hash(&mut h);
+                    let m = &invert.mono;
+                    (m.toning.label(), m.toning_amount.to_bits()).hash(&mut h);
+                    for v in m.mix {
+                        v.to_bits().hash(&mut h);
+                    }
                     let base = self.state.current_film_base().map(|b| b.light);
                     for v in base.into_iter().flatten().chain(p.balance_ev) {
                         v.to_bits().hash(&mut h);
@@ -1002,6 +1213,8 @@ impl ScannerApp {
 impl eframe::App for ScannerApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.process_events();
+        let ctx = ui.ctx().clone();
+        self.shortcuts(&ctx);
 
         egui::Panel::top("workflow").show(ui, |ui| {
             ui.add_space(4.0);
@@ -1013,6 +1226,15 @@ impl eframe::App for ScannerApp {
             self.status_bar(ui);
             ui.add_space(2.0);
         });
+        if matches!(self.state.step, WorkflowStep::Adjust | WorkflowStep::Export)
+            && self.state.result.is_some()
+        {
+            egui::Panel::bottom("filmstrip").show(ui, |ui| {
+                ui.add_space(4.0);
+                self.filmstrip(ui);
+                ui.add_space(2.0);
+            });
+        }
         egui::Panel::left("controls")
             .default_size(340.0)
             .show(ui, |ui| {
@@ -1028,13 +1250,75 @@ impl eframe::App for ScannerApp {
                 });
             });
         egui::CentralPanel::default().show(ui, |ui| self.central(ui));
+        // A slider dragged, or a curve point, is one change once let go.
+        let settled = !ctx.input(|i| i.pointer.any_down());
+        self.state.track_history(settled);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string(TURNS_KEY, self.state.quarter_turns.to_string());
         storage.set_string(STOCK_KEY, self.state.invert.stock.id.to_owned());
+        storage.set_string(FILM_TYPE_KEY, self.state.invert.film_type.key().to_owned());
+        eframe::set_value(storage, PRESETS_KEY, &self.state.presets);
         remember_export(&mut self.state.export, storage);
     }
+}
+
+/// How black-and-white film is mixed to grey and toned.
+fn mono_controls(ui: &mut egui::Ui, mono: &mut Mono) {
+    egui::Grid::new("mono")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Grey from");
+            ui.horizontal(|ui| {
+                for (label, mix, hover) in [
+                    (
+                        "All",
+                        [1.0, 1.0, 1.0],
+                        "Every channel equally: the least noise",
+                    ),
+                    ("Red", [1.0, 0.0, 0.0], "The red channel alone"),
+                    ("Green", [0.0, 1.0, 0.0], "The green channel alone"),
+                    ("Blue", [0.0, 0.0, 1.0], "The blue channel alone"),
+                ] {
+                    let total: f32 = mix.iter().sum();
+                    let mix = mix.map(|m| m / total);
+                    let on = mono.mix.iter().zip(mix).all(|(a, b)| (a - b).abs() < 1e-3);
+                    if ui
+                        .add(egui::Button::selectable(on, label))
+                        .on_hover_text(hover)
+                        .clicked()
+                    {
+                        mono.mix = mix;
+                    }
+                }
+            })
+            .response
+            .on_hover_text(
+                "Which of the scan's channels make the grey: silver film is near neutral, so \
+                 this mostly picks the cleanest; chromogenic (C-41) black-and-white film differs \
+                 more",
+            );
+            ui.end_row();
+            ui.label("Toning");
+            egui::ComboBox::from_id_salt("toning")
+                .selected_text(mono.toning.label())
+                .show_ui(ui, |ui| {
+                    for t in Toning::ALL {
+                        ui.selectable_value(&mut mono.toning, t, t.label());
+                    }
+                });
+            ui.end_row();
+            ui.label("Strength");
+            ui.add_enabled(
+                mono.toning != Toning::None,
+                egui::Slider::new(&mut mono.toning_amount, 0.0..=1.0)
+                    .step_by(0.01)
+                    .fixed_decimals(2),
+            );
+            ui.end_row();
+        });
 }
 
 /// The roll, film and camera fields of the publisher's metadata. Required ones are marked.
