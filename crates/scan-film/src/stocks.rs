@@ -12,6 +12,7 @@ mod kodak_gold_100;
 mod kodak_gold_200;
 mod kodak_kodacolor_200;
 mod kodak_portra_400;
+mod kodak_pro_image_100;
 mod kodak_ultramax_400;
 mod reto_amber_d100;
 
@@ -28,6 +29,7 @@ pub use kodak_gold_100::KODAK_GOLD_100;
 pub use kodak_gold_200::KODAK_GOLD_200;
 pub use kodak_kodacolor_200::KODAK_KODACOLOR_200;
 pub use kodak_portra_400::KODAK_PORTRA_400;
+pub use kodak_pro_image_100::KODAK_PRO_IMAGE_100;
 pub use kodak_ultramax_400::KODAK_ULTRAMAX_400;
 pub use reto_amber_d100::RETO_AMBER_D100;
 
@@ -47,6 +49,7 @@ pub(crate) const ALL: &[&FilmStock] = &[
     &KODAK_GOLD_100,
     &KODAK_GOLD_200,
     &KODAK_PORTRA_400,
+    &KODAK_PRO_IMAGE_100,
     &KODAK_ULTRAMAX_400,
     &RETO_AMBER_D100,
 ];

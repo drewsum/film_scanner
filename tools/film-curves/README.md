@@ -20,6 +20,7 @@ cargo fmt
 | `kodak_e7022_2007_gold_100.json` | KODAK GOLD 100 and 200, E-7022, February 2007 | Gold 100 |
 | `kodak_e4046_ektar_100.json` | KODAK PROFESSIONAL EKTAR 100, E-4046, January 2025 | Ektar 100 |
 | `kodak_e4050_portra_400.json` | KODAK PROFESSIONAL PORTRA 400, E-4050, January 2025 | Portra 400 |
+| `kodak_e4l_pro_image_100.json` | KODAK PROFESSIONAL PRO IMAGE 100, E-4L, July 1997 | Pro Image 100 |
 | `kodak_e7023_ultramax_400.json` | KODAK ULTRAMAX 400, E-7023, February 2016 | UltraMax 400 |
 | `kodak_h1_5203_vision3_50d.json` | KODAK VISION3 50D 5203, H-1-5203t, July 2015 | CineStill 50D, Reto Amber D100 |
 | `kodak_h1_5207_vision3_250d.json` | KODAK VISION3 250D 5207, H-1-5207t, April 2009 | CineStill 400D |

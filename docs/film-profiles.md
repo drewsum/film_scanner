@@ -117,6 +117,9 @@ sheet's pages (`OUT-PAGE.png`): every new config should be checked this way, cur
   bar with no zero). The ISO relation of Kodak's sheets, `log10(0.8 / S) + 1.26`, places
   the grey card; the sensitivity axis is given an arbitrary zero, which the colorimetric
   fit doesn't see, since it normalises each layer to daylight on white.
+- **Older Kodak sheets** (Pro Image 100's E-4L, 1997) print no Log H ref either, and label
+  the exposure axis in bar notation (3̄.0 = −3.0). The ISO relation places the grey card,
+  and the sheet's exposure check confirms it.
 - **Aerial film** (AEROCOLOR) has no pictorial speed; Log H ref comes from the ISO relation
   for the speed it is sold at.
 - **Black-and-white** sheets (Ilford) plot relative log exposure; Log H ref is taken 1.01

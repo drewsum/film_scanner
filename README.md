@@ -182,6 +182,7 @@ the bare film base, which frame detection measures on every film scan.
 | Kodak Gold 100 | Its own datasheet, E-7022 (2007 edition) |
 | Kodak Gold 200 | Its own datasheet, E-7022 (2016) |
 | Kodak Portra 400 | Its own datasheet, E-4050 (2025) |
+| Kodak Pro Image 100 | Its own datasheet, E-4L (1997, from an archive; Kodak no longer publishes it) |
 | Kodak UltraMax 400 | Its own datasheet, E-7023 (2016) |
 | Reto Amber D100 | None published; uses Kodak VISION3 50D's (H-1-5203t), the film it is reported to be without rem-jet |
 | Ilford HP5 Plus (black-and-white) | Its own datasheet, Ilford technical information (2010 edition) |

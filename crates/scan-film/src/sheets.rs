@@ -19,6 +19,8 @@ pub mod kodak_e4046_ektar_100;
 #[allow(clippy::approx_constant)]
 pub mod kodak_e4050_portra_400;
 #[allow(clippy::approx_constant)]
+pub mod kodak_e4l_pro_image_100;
+#[allow(clippy::approx_constant)]
 pub mod kodak_e7022;
 #[allow(clippy::approx_constant)]
 pub mod kodak_e7022_2007_gold_100;
