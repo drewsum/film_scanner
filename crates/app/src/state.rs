@@ -222,6 +222,16 @@ impl FrameOrder {
         }
     }
 
+    /// This order's part of the frame order tooltip's drawing.
+    pub fn part(self) -> &'static str {
+        match (self.strips_reversed, self.along_reversed) {
+            (false, false) => "scanned",
+            (false, true) => "frames",
+            (true, false) => "strips",
+            (true, true) => "all",
+        }
+    }
+
     /// Where each frame goes, as indices into `rects`: strip by strip, by where the frames
     /// are on the bed. Frames whose middles are within half a frame's width across the
     /// strips are on the same strip.

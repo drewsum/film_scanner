@@ -25,6 +25,7 @@ serde = { version = "1", features = ["derive"] }
 ron = "0.12"
 tiff = "0.11"
 eframe = "0.37"
+egui_extras = { version = "0.37", default-features = false, features = ["svg", "svg_text"] }
 rfd = "0.17"
 libloading = "0.8"
 tempfile = "3"

@@ -17,6 +17,7 @@ use crate::history::Preset;
 use crate::session;
 use crate::state::{self, Activity, AppState, EXTRA_EV, FilmType, ViewChannel, WorkflowStep};
 use crate::strip::Filmstrip;
+use crate::tooltip_art::ArtTip;
 use crate::view::{self, ImageView};
 use crate::worker::{Event, ScanKind, Worker};
 
@@ -66,6 +67,8 @@ pub struct ScannerApp {
 
 impl ScannerApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // For the drawings in tooltips.
+        egui_extras::install_image_loaders(&cc.egui_ctx);
         let ctx = cc.egui_ctx.clone();
         let worker = Worker::spawn(default_registry(), move || ctx.request_repaint());
         let mut state = AppState::default();
@@ -384,10 +387,12 @@ impl ScannerApp {
                             format!("Extra {EXTRA_EV:+} EV pass"),
                         ),
                     )
-                    .on_hover_text(
+                    .on_hover_art(
                         "Scans again, brighter, and merges the two: less noise in the densest \
                          film (a negative's highlights, a slide's shadows). Takes about twice \
                          as long. Not used for previews.",
+                        "multi_exposure",
+                        &["extra"],
                     )
                     .on_disabled_hover_text("Not supported by this scanner/source");
                     ui.end_row();
@@ -480,7 +485,11 @@ impl ScannerApp {
             !busy,
             egui::Checkbox::new(&mut self.state.merge_exposures, "Merge exposures"),
         )
-        .on_hover_text("Off shows and saves the normal exposure alone, to compare");
+        .on_hover_art(
+            "Off shows and saves the normal exposure alone, to compare",
+            "multi_exposure",
+            &["merge"],
+        );
         if let Some(merged) = self.state.current_merged() {
             let details: Vec<String> = merged
                 .merge
@@ -510,14 +519,16 @@ impl ScannerApp {
         ui.add_enabled_ui(!busy, |ui| {
             let dust = &mut self.state.dust;
             ui.checkbox(&mut dust.enabled, "Remove dust and scratches")
-                .on_hover_text(
+                .on_hover_art(
                     "Finds defects in the infrared channel and fills them in. Not for \
                      black-and-white film or Kodachrome, which block infrared.",
+                    "dust",
+                    &["ir"],
                 );
             ui.add_enabled_ui(dust.enabled, |ui| {
                 let slider = ui
                     .add(egui::Slider::new(&mut self.dust_strength, 0.0..=1.0).text("Strength"))
-                    .on_hover_text("Higher also repairs fainter defects");
+                    .on_hover_art("Higher also repairs fainter defects", "dust", &["strength"]);
                 if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
                     dust.strength = self.dust_strength;
                 }
@@ -574,12 +585,14 @@ impl ScannerApp {
                         self.state.crop.order.label(),
                     ),
                 )
-                .on_hover_text(
+                .on_hover_art(
                     "Click to go through the four orders: as scanned, each strip's frames \
                      backwards, the strips backwards, and both (the other end of the film). \
                      For cameras that wind the film the other way, or strips put in the \
                      holder the other way round. Kept for later scans; each frame keeps its \
                      edits.",
+                    "frame_order",
+                    &[self.state.crop.order.part()],
                 )
                 .clicked()
             {
@@ -662,7 +675,11 @@ impl ScannerApp {
                             .fixed_decimals(2)
                             .suffix("°"),
                     )
-                    .on_hover_text("Clockwise, to straighten the frame");
+                    .on_hover_art(
+                        "Clockwise, to straighten the frame",
+                        "straighten",
+                        &["straighten"],
+                    );
                     ui.end_row();
                 });
             self.state.edit_frame(i, rect);
@@ -806,25 +823,29 @@ impl ScannerApp {
                     "Film base density: {:.2} / {:.2} / {:.2}",
                     d[0], d[1], d[2]
                 ))
-                .on_hover_text(format!(
-                    "Red / green / blue, {}. The negative is inverted against it{}",
-                    if base.measured {
-                        "measured on the unexposed film between the frames and perforations"
-                    } else {
-                        "estimated from the clearest film on the scan, as no film strips \
+                .on_hover_art(
+                    format!(
+                        "Red / green / blue, {}. The negative is inverted against it{}",
+                        if base.measured {
+                            "measured on the unexposed film between the frames and perforations"
+                        } else {
+                            "estimated from the clearest film on the scan, as no film strips \
                          were found: check the result"
-                    },
-                    if film_type == FilmType::ColorNegative {
-                        format!(
-                            ", which removes the orange mask. The datasheet's D-min is \
+                        },
+                        if film_type == FilmType::ColorNegative {
+                            format!(
+                                ", which removes the orange mask. The datasheet's D-min is \
                              {:.2} / {:.2} / {:.2} (Status M); a scanner's channels see the \
                              mask a little differently.",
-                            d_min[0], d_min[1], d_min[2]
-                        )
-                    } else {
-                        ".".to_owned()
-                    }
-                ));
+                                d_min[0], d_min[1], d_min[2]
+                            )
+                        } else {
+                            ".".to_owned()
+                        }
+                    ),
+                    "film_base",
+                    &["base"],
+                );
                 if !base.measured {
                     ui.colored_label(
                         ui.visuals().warn_fg_color,
@@ -859,10 +880,18 @@ impl ScannerApp {
                 )
                 .on_hover_text("Brighter or darker, in stops, as a printer's exposure");
                 ui.end_row();
-                for (c, (label, hover)) in [
-                    ("Cyan - Red", "More red (+) or cyan (-), in stops"),
-                    ("Magenta - Green", "More green (+) or magenta (-), in stops"),
-                    ("Yellow - Blue", "More blue (+) or yellow (-), in stops"),
+                for (c, (label, hover, part)) in [
+                    ("Cyan - Red", "More red (+) or cyan (-), in stops", "cr"),
+                    (
+                        "Magenta - Green",
+                        "More green (+) or magenta (-), in stops",
+                        "mg",
+                    ),
+                    (
+                        "Yellow - Blue",
+                        "More blue (+) or yellow (-), in stops",
+                        "yb",
+                    ),
                 ]
                 .into_iter()
                 .enumerate()
@@ -874,12 +903,16 @@ impl ScannerApp {
                             .step_by(0.01)
                             .suffix(" EV"),
                     )
-                    .on_hover_text(hover);
+                    .on_hover_art(hover, "balance", &[part]);
                     ui.end_row();
                 }
                 ui.label("Contrast");
                 ui.add(egui::Slider::new(&mut printing.contrast, CONTRAST_RANGE).step_by(0.05))
-                    .on_hover_text("The print curve's contrast; grey stays grey");
+                    .on_hover_art(
+                        "The print curve's contrast; grey stays grey",
+                        "contrast",
+                        &["contrast"],
+                    );
                 ui.end_row();
                 if film_type != FilmType::ColorNegative {
                     return;

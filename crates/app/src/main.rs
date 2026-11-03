@@ -11,6 +11,7 @@ mod icc;
 mod session;
 mod state;
 mod strip;
+mod tooltip_art;
 mod ui;
 mod view;
 mod worker;

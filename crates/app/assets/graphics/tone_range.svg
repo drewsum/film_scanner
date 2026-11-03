@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="280" height="150" viewBox="0 0 280 150">
+  <defs>
+    <linearGradient id="tones" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#000000"/>
+      <stop offset="1" stop-color="#ffffff"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="280" height="150" rx="8" fill="{bg}"/>
+  <g font-family="sans-serif" font-size="11">
+    <rect x="40" y="12" width="200" height="84" fill="{grid}"/>
+    <path d="M40,96 L240,12" stroke="{muted}" stroke-width="1" stroke-dasharray="4,3" fill="none"/>
+    <path d="M40,96 C60,72 100,62 140,54" stroke="{shadows}" stroke-width="2.4" fill="none"/>
+    <path d="M140,54 C180,46 205,38 240,12" stroke="{highlights}" stroke-width="2.4" fill="none"/>
+    <rect x="40" y="104" width="200" height="12" fill="url(#tones)"/>
+    <path d="M40,121 v4 h66 v-4" stroke="{shadows}" stroke-width="1.4" fill="none"/>
+    <path d="M174,121 v4 h66 v-4" stroke="{highlights}" stroke-width="1.4" fill="none"/>
+    <text x="73" y="140" fill="{shadows}" text-anchor="middle">shadows</text>
+    <text x="140" y="140" fill="{muted}" text-anchor="middle">midtones</text>
+    <text x="207" y="140" fill="{highlights}" text-anchor="middle">highlights</text>
+    <text x="48" y="28" fill="{shadows}" font-size="10">+ opened up</text>
+    <text x="232" y="88" fill="{highlights}" font-size="10" text-anchor="end">− recovered</text>
+  </g>
+</svg>

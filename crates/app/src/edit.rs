@@ -20,6 +20,7 @@ use scan_process::adjust::{
 use scan_process::{FrameRect, Rgb16Image};
 
 use crate::state::{AppState, Film};
+use crate::tooltip_art::{ArtTip, Tip, art};
 use crate::view::{ImageView, Placement};
 
 /// Longest side of the preview a frame is edited on.
@@ -300,12 +301,21 @@ impl Editor {
         let target = target(state);
         ui.horizontal(|ui| {
             ui.label(RichText::new(target_name(target)).strong());
-            ui.checkbox(&mut self.compare, "Before")
-                .on_hover_text("Shows it without any of its Adjust edits, to compare (B)");
+            ui.checkbox(&mut self.compare, "Before").on_hover_art(
+                "Shows it without any of its Adjust edits, to compare (B)",
+                "compare",
+                &["before"],
+            );
             ui.add_enabled(!self.compare, egui::Checkbox::new(&mut self.split, "Split"))
-                .on_hover_text("Before on the left, after on the right: drag the line (S)");
-            ui.checkbox(&mut self.clipping, "Clipping").on_hover_text(
+                .on_hover_art(
+                    "Before on the left, after on the right: drag the line (S)",
+                    "compare",
+                    &["split"],
+                );
+            ui.checkbox(&mut self.clipping, "Clipping").on_hover_art(
                 "Marks pixels clipped to white in any channel in red, and to black in blue (C)",
+                "clipping",
+                &[],
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Fit").clicked() {
@@ -781,31 +791,51 @@ impl Editor {
                     ui,
                     "Brightness",
                     &mut adj.brightness,
-                    "Midtones lighter or darker; black and white stay",
+                    art(
+                        "Midtones lighter or darker; black and white stay",
+                        "brightness",
+                        &["brightness"],
+                    ),
                 );
                 signed(
                     ui,
                     "Contrast",
                     &mut adj.contrast,
-                    "An S-curve about the middle, or flatter",
+                    art(
+                        "An S-curve about the middle, or flatter",
+                        "contrast",
+                        &["contrast"],
+                    ),
                 );
                 signed(
                     ui,
                     "Highlights",
                     &mut adj.highlights,
-                    "Light areas darker (-) to recover them, or lighter, keeping their detail",
+                    art(
+                        "Light areas darker (-) to recover them, or lighter, keeping their detail",
+                        "tone_range",
+                        &["highlights"],
+                    ),
                 );
                 signed(
                     ui,
                     "Shadows",
                     &mut adj.shadows,
-                    "Dark areas lighter (+) to open them up, or darker, keeping their detail",
+                    art(
+                        "Dark areas lighter (+) to open them up, or darker, keeping their detail",
+                        "tone_range",
+                        &["shadows"],
+                    ),
                 );
                 signed(
                     ui,
                     "Clarity",
                     &mut adj.clarity,
-                    "Local contrast in the midtones: crisper (+) or softer, without halos",
+                    art(
+                        "Local contrast in the midtones: crisper (+) or softer, without halos",
+                        "clarity",
+                        &["clarity"],
+                    ),
                 );
             });
         });
@@ -841,7 +871,11 @@ impl Editor {
                         .step_by(0.5)
                         .suffix("°"),
                 )
-                .on_hover_text("Towards the next hue round (+: reds towards yellow) or back");
+                .on_hover_art(
+                    "Towards the next hue round (+: reds towards yellow) or back",
+                    "hue_shift",
+                    &["hue"],
+                );
                 ui.end_row();
                 signed(
                     ui,
@@ -865,11 +899,19 @@ impl Editor {
             grid(ui, "noise", |ui| {
                 ui.label("Grain");
                 ui.add(egui::Slider::new(&mut n.grain, 0.0..=1.0).step_by(0.01))
-                    .on_hover_text("Smooths film grain in flat areas, keeping edges");
+                    .on_hover_art(
+                        "Smooths film grain in flat areas, keeping edges",
+                        "noise",
+                        &["grain"],
+                    );
                 ui.end_row();
                 ui.label("Color noise");
                 ui.add(egui::Slider::new(&mut n.color, 0.0..=1.0).step_by(0.01))
-                    .on_hover_text("Smooths blotches of color, keeping detail in brightness");
+                    .on_hover_art(
+                        "Smooths blotches of color, keeping detail in brightness",
+                        "noise",
+                        &["color"],
+                    );
                 ui.end_row();
                 ui.label("Size");
                 ui.add(
@@ -877,7 +919,11 @@ impl Editor {
                         .step_by(0.1)
                         .suffix(" px"),
                 )
-                .on_hover_text("How big the grain is, in pixels of the saved frame");
+                .on_hover_art(
+                    "How big the grain is, in pixels of the saved frame",
+                    "noise",
+                    &["size"],
+                );
                 ui.end_row();
             });
         });
@@ -886,7 +932,11 @@ impl Editor {
             grid(ui, "sharpen", |ui| {
                 ui.label("Amount");
                 ui.add(egui::Slider::new(&mut s.amount, 0.0..=3.0).step_by(0.01))
-                    .on_hover_text("Unsharp mask: how much the edges are steepened");
+                    .on_hover_art(
+                        "Unsharp mask: how much the edges are steepened",
+                        "sharpen",
+                        &["amount"],
+                    );
                 ui.end_row();
                 ui.label("Radius");
                 ui.add(
@@ -894,12 +944,18 @@ impl Editor {
                         .step_by(0.05)
                         .suffix(" px"),
                 )
-                .on_hover_text("How wide the edges are, in pixels of the saved frame");
+                .on_hover_art(
+                    "How wide the edges are, in pixels of the saved frame",
+                    "sharpen",
+                    &["radius"],
+                );
                 ui.end_row();
                 ui.label("Threshold");
                 ui.add(egui::Slider::new(&mut s.threshold, 0.0..=0.2).step_by(0.002))
-                    .on_hover_text(
+                    .on_hover_art(
                         "Differences smaller than this are left, so grain isn't sharpened",
+                        "sharpen",
+                        &["threshold"],
                     );
                 ui.end_row();
             });
@@ -926,9 +982,11 @@ impl Editor {
                             .step_by(1.0)
                             .suffix("%"),
                     )
-                    .on_hover_text(
+                    .on_hover_art(
                         "Brightens the edges and corners, for a scanner's or lens's light \
                          falling off towards them",
+                        "falloff",
+                        &["falloff"],
                     )
                     .changed()
                 {
@@ -939,7 +997,11 @@ impl Editor {
                     ui,
                     "Vignette",
                     &mut adj.vignette,
-                    "Darker (-) or lighter corners, for effect",
+                    art(
+                        "Darker (-) or lighter corners, for effect",
+                        "falloff",
+                        &["vignette"],
+                    ),
                 );
             });
         });
@@ -956,9 +1018,11 @@ impl Editor {
                                 .step_by(0.05)
                                 .suffix("°"),
                         )
-                        .on_hover_text(
+                        .on_hover_art(
                             "Turns the picture clockwise (+), cutting it just smaller so no \
                              corner is empty",
+                            "straighten",
+                            &["straighten"],
                         )
                         .changed()
                     {
@@ -971,9 +1035,11 @@ impl Editor {
                             .step_by(0.05)
                             .suffix(" mm"),
                     )
-                    .on_hover_text(
+                    .on_hover_art(
                         "Keeps this much film around the frame: its edges, rebate and \
                          sprocket holes",
+                        "border",
+                        &["border"],
                     );
                     ui.end_row();
                 });
@@ -981,7 +1047,11 @@ impl Editor {
                     let on = self.tool == Tool::Level;
                     if ui
                         .add(egui::Button::selectable(on, "Level"))
-                        .on_hover_text("Drag along a horizon or upright to straighten along it (L)")
+                        .on_hover_art(
+                            "Drag along a horizon or upright to straighten along it (L)",
+                            "straighten",
+                            &["level"],
+                        )
                         .clicked()
                     {
                         self.toggle(Tool::Level);
@@ -998,10 +1068,12 @@ impl Editor {
                 let on = self.tool == Tool::Heal;
                 if ui
                     .add(egui::Button::selectable(on, "Heal"))
-                    .on_hover_text(
+                    .on_hover_art(
                         "Click dust, hairs and scratches to fill them in from around them (H): \
                          for what the infrared pass misses, and for black-and-white film and \
                          Kodachrome, which infrared can't see through",
+                        "heal",
+                        &["heal"],
                     )
                     .clicked()
                 {
@@ -1012,8 +1084,11 @@ impl Editor {
                         .logarithmic(true)
                         .suffix(" mm"),
                 )
-                .on_hover_text(
-                    "The brush's radius, on the film: cover the whole speck, as it is filled                      in from what is just outside the brush",
+                .on_hover_art(
+                    "The brush's radius, on the film: cover the whole speck, as it is filled \
+                     in from what is just outside the brush",
+                    "heal",
+                    &["brush"],
                 );
             });
             let n = adj.spots.len();
@@ -1303,24 +1378,27 @@ fn grid(ui: &mut egui::Ui, id: &str, add: impl FnOnce(&mut egui::Ui)) {
 }
 
 /// A −1 to 1 slider, shown as a percentage, in a grid row.
-fn signed(ui: &mut egui::Ui, label: &str, value: &mut f32, hover: &str) {
+fn signed<'a>(ui: &mut egui::Ui, label: &str, value: &mut f32, hover: impl Into<Tip<'a>>) {
     signed_if(ui, true, label, value, hover);
 }
 
 /// [`signed`], greyed out unless `enabled`.
-fn signed_if(ui: &mut egui::Ui, enabled: bool, label: &str, value: &mut f32, hover: &str) {
+fn signed_if<'a>(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    label: &str,
+    value: &mut f32,
+    hover: impl Into<Tip<'a>>,
+) {
     ui.add_enabled(enabled, egui::Label::new(label));
     let mut percent = *value * 100.0;
-    if ui
-        .add_enabled(
-            enabled,
-            egui::Slider::new(&mut percent, -100.0..=100.0)
-                .step_by(1.0)
-                .suffix("%"),
-        )
-        .on_hover_text(hover)
-        .changed()
-    {
+    let slider = ui.add_enabled(
+        enabled,
+        egui::Slider::new(&mut percent, -100.0..=100.0)
+            .step_by(1.0)
+            .suffix("%"),
+    );
+    if hover.into().on(slider).changed() {
         *value = percent / 100.0;
     }
     ui.end_row();
@@ -1347,18 +1425,26 @@ fn color_controls(ui: &mut egui::Ui, adj: &mut Adjustments, film: bool, mono: bo
             !mono,
             "Temperature",
             &mut adj.temperature,
-            "Warmer (+, more amber) or cooler (more blue)",
+            art(
+                "Warmer (+, more amber) or cooler (more blue)",
+                "white_balance",
+                &["temperature"],
+            ),
         );
         signed_if(
             ui,
             !mono,
             "Tint",
             &mut adj.tint,
-            "More magenta (+) or more green",
+            art("More magenta (+) or more green", "white_balance", &["tint"]),
         );
-        for (c, label) in ["Cyan - Red", "Magenta - Green", "Yellow - Blue"]
-            .into_iter()
-            .enumerate()
+        for (c, (label, part)) in [
+            ("Cyan - Red", "cr"),
+            ("Magenta - Green", "mg"),
+            ("Yellow - Blue", "yb"),
+        ]
+        .into_iter()
+        .enumerate()
         {
             ui.add_enabled(!mono, egui::Label::new(label));
             ui.add_enabled(
@@ -1367,7 +1453,7 @@ fn color_controls(ui: &mut egui::Ui, adj: &mut Adjustments, film: bool, mono: bo
                     .step_by(0.01)
                     .suffix(" EV"),
             )
-            .on_hover_text(format!("In stops, {how}"));
+            .on_hover_art(format!("In stops, {how}"), "balance", &[part]);
             ui.end_row();
         }
     });
@@ -1398,12 +1484,12 @@ fn channel_picker(ui: &mut egui::Ui, channel: &mut usize, id: &str) {
 
 fn levels_controls(ui: &mut egui::Ui, l: &mut Levels) {
     // Shown 0–255, as levels usually are.
-    let level = |ui: &mut egui::Ui, label: &str, v: &mut f32, hover: &str| {
+    let level = |ui: &mut egui::Ui, label: &str, v: &mut f32, hover: &str, part: &str| {
         ui.label(label);
         let mut x = *v * 255.0;
         if ui
             .add(egui::Slider::new(&mut x, 0.0..=255.0).step_by(1.0))
-            .on_hover_text(hover)
+            .on_hover_art(hover, "levels", &[part])
             .changed()
         {
             *v = x / 255.0;
@@ -1416,24 +1502,37 @@ fn levels_controls(ui: &mut egui::Ui, l: &mut Levels) {
             "Black",
             &mut l.black,
             "Input that becomes the output black",
+            "black",
         );
         ui.label("Midtones");
         ui.add(egui::Slider::new(&mut l.gamma, 0.2..=5.0).logarithmic(true))
-            .on_hover_text("Gamma: above 1 lightens the midtones, below darkens them");
+            .on_hover_art(
+                "Gamma: above 1 lightens the midtones, below darkens them",
+                "levels",
+                &["gamma"],
+            );
         ui.end_row();
         level(
             ui,
             "White",
             &mut l.white,
             "Input that becomes the output white",
+            "white",
         );
         level(
             ui,
             "Output black",
             &mut l.out_black,
             "The darkest output: above 0 for a softer black",
+            "out_black",
         );
-        level(ui, "Output white", &mut l.out_white, "The lightest output");
+        level(
+            ui,
+            "Output white",
+            &mut l.out_white,
+            "The lightest output",
+            "out_white",
+        );
     });
     l.black = l.black.min(l.white - 0.02);
     if ui.small_button("Reset levels").clicked() {
