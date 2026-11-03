@@ -47,7 +47,10 @@ fn rolls_save_and_open_with_every_edit() {
     });
     a.curves[0].insert(0.5, 0.6);
     state.crop.frames[5].skip = true;
-    state.crop.reversed = true;
+    state.crop.order = FrameOrder {
+        strips_reversed: true,
+        along_reversed: false,
+    };
     state.quarter_turns = 3;
     state.invert.film_type = FilmType::BlackAndWhite;
     state.invert.mono_stock = scan_film::stock::mono_by_id("ilford-hp5-plus");
@@ -91,7 +94,8 @@ fn rolls_save_and_open_with_every_edit() {
     for (a, b) in back.crop.frames.iter().zip(&state.crop.frames) {
         assert_eq!((a.rect, &a.adjust, a.skip), (b.rect, &b.adjust, b.skip));
     }
-    assert!(back.crop.reversed && back.quarter_turns == 3);
+    assert_eq!(back.crop.order, state.crop.order);
+    assert_eq!(back.quarter_turns, 3);
     assert_eq!(back.invert.film_type, FilmType::BlackAndWhite);
     assert_eq!(
         back.invert.mono_stock.map(|s| s.id),
@@ -111,12 +115,20 @@ fn rolls_save_and_open_with_every_edit() {
         })
     );
     assert!(back.film().is_some());
-    assert_eq!(back.roll_file, Some((path, back.result_generation)));
+    assert_eq!(back.roll_file, Some((path.clone(), back.result_generation)));
     // Merging and dust removal are done again.
     assert!(matches!(
         back.update_processing(),
         Some(crate::worker::Command::MergeExposures { .. })
     ));
+
+    // An older file's `reversed` is the frames from the other end of the film.
+    let text = roll.to_text();
+    assert!(!text.contains(" reversed:"));
+    let old = Roll::from_text(&text.replacen("order:", "reversed: true, order:", 1)).unwrap();
+    let mut back = AppState::default();
+    old.restore(&mut back, Roll::open(&path).unwrap().1, path.clone());
+    assert_eq!(back.crop.order, FrameOrder::REVERSED);
 }
 
 #[test]

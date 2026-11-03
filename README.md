@@ -142,8 +142,11 @@ handle to turn it. The side panel sets the size and angle exactly, and adds or d
 found on a preview fit the full scan of the same film. Once edited, a new scan doesn't
 replace them.
 
-*Reverse order* numbers the frames from the other end of the film, for cameras that wind it
-the other way. It stays on for later scans and detections, and each frame keeps its edits.
+*Order* goes through four ways of numbering the frames: as scanned (strip by strip, each
+from its top or left end), each strip's frames backwards, the strips backwards, and both
+(from the other end of the film). That covers cameras that wind the film the other way and
+strips put in the holder the other way round. The order stays for later scans and
+detections, and each frame keeps its edits.
 
 *Save frames as TIFF* saves each frame straightened, at the scan's bit depth, as
 `<name>_01.tif`, `<name>_02.tif` and so on. It uses the cleaned and merged image when those
