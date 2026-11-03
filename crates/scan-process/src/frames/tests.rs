@@ -375,11 +375,12 @@ fn crops_are_straightened() {
     for (i, j) in [(0, 0), (59, 0), (30, 20), (12, 39)] {
         let (x, y) = frame.from_local((i as f32 + 0.5) / 10.0 - 3.0, (j as f32 + 0.5) / 10.0 - 2.0);
         let p = crop.get_pixel(i, j).0;
+        // Within 0.03 px: the Lanczos kernel follows a ramp closely, not exactly.
         assert!(
-            (p[0] as f32 - (x - area.x_mm) * 1000.0).abs() <= 1.0,
+            (p[0] as f32 - (x - area.x_mm) * 1000.0).abs() <= 3.0,
             "{p:?} at {x}"
         );
-        assert!((p[1] as f32 - y * 1000.0).abs() <= 1.0, "{p:?} at {y}");
+        assert!((p[1] as f32 - y * 1000.0).abs() <= 3.0, "{p:?} at {y}");
         assert_eq!(p[2], 7);
     }
 
@@ -388,6 +389,63 @@ fn crops_are_straightened() {
         crop_frame(&gray, dpi, area, &frame),
         DynamicImage::ImageLuma8(_)
     ));
+}
+
+/// Grain: independent noise, 16-bit, about mid-grey.
+fn grain(w: u32, h: u32) -> DynamicImage {
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    DynamicImage::ImageLuma16(ImageBuffer::from_fn(w, h, |_, _| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        Luma([30_000 + (state % 4_000) as u16])
+    }))
+}
+
+fn std_dev(v: &[u16]) -> f64 {
+    let mean = v.iter().map(|&p| f64::from(p)).sum::<f64>() / v.len() as f64;
+    (v.iter()
+        .map(|&p| (f64::from(p) - mean).powi(2))
+        .sum::<f64>()
+        / v.len() as f64)
+        .sqrt()
+}
+
+#[test]
+fn crops_on_whole_pixels_are_copies() {
+    // 10 pixels per millimetre; the frame's edges on pixel edges.
+    let image = grain(200, 200);
+    let area = ScanArea::full(20.0, 20.0);
+    let frame = FrameRect {
+        cx_mm: 8.0,
+        cy_mm: 11.0,
+        width_mm: 6.0,
+        height_mm: 4.0,
+        angle_deg: 0.0,
+    };
+    let crop = crop_frame(&image, 254, area, &frame).to_luma16();
+    let source = image.to_luma16();
+    for (i, j, p) in crop.enumerate_pixels() {
+        assert_eq!(p, source.get_pixel(50 + i, 90 + j), "at ({i}, {j})");
+    }
+}
+
+#[test]
+fn straightening_keeps_the_grain() {
+    // Half a pixel off and turned a little: a bilinear cut left about half the grain's
+    // deviation where it read halfway between pixels.
+    let image = grain(200, 200);
+    let area = ScanArea::full(20.0, 20.0);
+    let frame = FrameRect {
+        cx_mm: 10.05,
+        cy_mm: 10.05,
+        width_mm: 12.0,
+        height_mm: 12.0,
+        angle_deg: 0.3,
+    };
+    let crop = crop_frame(&image, 254, area, &frame).to_luma16();
+    let kept = std_dev(crop.as_raw()) / std_dev(image.to_luma16().as_raw());
+    assert!(kept > 0.8, "{kept}");
 }
 
 #[test]

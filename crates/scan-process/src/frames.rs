@@ -1173,20 +1173,19 @@ pub fn crop_frame(
     let px_per_mm = dpi as f32 / MM_PER_INCH;
     let out_w = ((frame.width_mm * px_per_mm).round() as u32).max(1);
     let out_h = ((frame.height_mm * px_per_mm).round() as u32).max(1);
-    // Output pixel (i, j)'s centre is at the scan pixel position origin + i·di + j·dj.
+    // Output pixel (i, j)'s centre is at the scan pixel position origin + i·di + j·dj. Output
+    // pixels are a scan pixel apart, about the frame's centre: a frame that isn't turned is
+    // read at one phase throughout, and one on whole pixels isn't resampled at all.
     let (ex, ey) = frame.axes();
-    let (sx, sy) = (
-        frame.width_mm / out_w as f32,
-        frame.height_mm / out_h as f32,
-    );
+    let step = 1.0 / px_per_mm;
     let (x0, y0) = frame.from_local(
-        -frame.width_mm / 2.0 + sx / 2.0,
-        -frame.height_mm / 2.0 + sy / 2.0,
+        (out_w - 1) as f32 / -2.0 * step,
+        (out_h - 1) as f32 / -2.0 * step,
     );
     let map = Affine {
         origin: [(x0 - area.x_mm) * px_per_mm, (y0 - area.y_mm) * px_per_mm],
-        di: [ex[0] * sx * px_per_mm, ex[1] * sx * px_per_mm],
-        dj: [ey[0] * sy * px_per_mm, ey[1] * sy * px_per_mm],
+        di: ex,
+        dj: ey,
     };
     let (w, h) = (image.width() as usize, image.height() as usize);
     let size = (out_w as usize, out_h as usize);
@@ -1267,9 +1266,34 @@ impl Sample for u16 {
     }
 }
 
-/// Bilinear resampling of an image with `channels` per pixel at the positions `map` gives
-/// each output pixel, clamped at the image's borders.
-fn resample<T: Sample>(
+/// Taps on each side of a sample position in [`resample`]'s Lanczos kernel.
+const LANCZOS_A: usize = 3;
+
+/// The Lanczos kernel's weights for the 2·[`LANCZOS_A`] samples about a position `t` (0–1)
+/// past the first sample left of it, normalized to sum to 1.
+fn lanczos_weights(t: f32) -> [f32; 2 * LANCZOS_A] {
+    let a = LANCZOS_A as f32;
+    let mut w = std::array::from_fn(|k| {
+        let x = t + (LANCZOS_A - 1) as f32 - k as f32;
+        if x.abs() < 1e-6 {
+            1.0
+        } else if x.abs() >= a {
+            0.0
+        } else {
+            let px = std::f32::consts::PI * x;
+            a * px.sin() * (px / a).sin() / (px * px)
+        }
+    });
+    let sum: f32 = w.iter().sum();
+    w.iter_mut().for_each(|v| *v /= sum);
+    w
+}
+
+/// Resampling of an image with `channels` per pixel at the positions `map` gives each output
+/// pixel, clamped at the image's borders. A Lanczos kernel keeps the grain and fine detail a
+/// bilinear one smooths away (straightening by a fraction of a degree reads most pixels
+/// between samples); it is exact on whole pixels.
+fn resample<T: Sample + Send + Sync>(
     raw: &[T],
     w: usize,
     h: usize,
@@ -1277,25 +1301,51 @@ fn resample<T: Sample>(
     (out_w, out_h): (usize, usize),
     map: &Affine,
 ) -> Vec<T> {
-    let mut out = Vec::with_capacity(out_w * out_h * channels);
-    for j in 0..out_h {
-        for i in 0..out_w {
-            let (i, j) = (i as f32, j as f32);
-            let x = map.origin[0] + map.di[0] * i + map.dj[0] * j - 0.5;
-            let y = map.origin[1] + map.di[1] * i + map.dj[1] * j - 0.5;
-            let fx = x.clamp(0.0, (w - 1) as f32);
-            let fy = y.clamp(0.0, (h - 1) as f32);
-            let (x0, y0) = (fx as usize, fy as usize);
-            let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
-            let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
-            for c in 0..channels {
-                let p = |x: usize, y: usize| raw[(y * w + x) * channels + c].to_f32();
-                let top = p(x0, y0) + (p(x1, y0) - p(x0, y0)) * tx;
-                let bottom = p(x0, y1) + (p(x1, y1) - p(x0, y1)) * tx;
-                out.push(T::from_f32(top + (bottom - top) * ty));
-            }
+    let row = out_w * channels;
+    let mut out = vec![T::from_f32(0.0); out_h * row];
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let rows = out_h.div_ceil(threads).max(16);
+    std::thread::scope(|s| {
+        for (b, band) in out.chunks_mut((rows * row).max(1)).enumerate() {
+            s.spawn(move || {
+                let mut acc = vec![0.0f32; channels];
+                for (dj, line) in band.chunks_mut(row.max(1)).enumerate() {
+                    let j = (b * rows + dj) as f32;
+                    for (i, px) in line.chunks_mut(channels).enumerate() {
+                        let i = i as f32;
+                        let x = map.origin[0] + map.di[0] * i + map.dj[0] * j - 0.5;
+                        let y = map.origin[1] + map.di[1] * i + map.dj[1] * j - 0.5;
+                        let (xf, yf) = (x.floor(), y.floor());
+                        let (wx, wy) = (lanczos_weights(x - xf), lanczos_weights(y - yf));
+                        let clamp = |v: f32, n: usize| (v.max(0.0) as usize).min(n - 1);
+                        let first = |f: f32| f - (LANCZOS_A - 1) as f32;
+                        let xs: [usize; 2 * LANCZOS_A] =
+                            std::array::from_fn(|k| clamp(first(xf) + k as f32, w));
+                        acc.iter_mut().for_each(|a| *a = 0.0);
+                        for (ky, &wy) in wy.iter().enumerate() {
+                            if wy == 0.0 {
+                                continue;
+                            }
+                            let sy = clamp(first(yf) + ky as f32, h);
+                            for (&sx, &wx) in xs.iter().zip(&wx) {
+                                let wgt = wx * wy;
+                                if wgt == 0.0 {
+                                    continue;
+                                }
+                                let base = (sy * w + sx) * channels;
+                                for (c, a) in acc.iter_mut().enumerate() {
+                                    *a += raw[base + c].to_f32() * wgt;
+                                }
+                            }
+                        }
+                        for (p, &a) in px.iter_mut().zip(&acc) {
+                            *p = T::from_f32(a);
+                        }
+                    }
+                }
+            });
         }
-    }
+    });
     out
 }
 
