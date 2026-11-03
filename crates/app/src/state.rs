@@ -162,22 +162,6 @@ impl CropFrame {
     pub fn cut(&self) -> FrameRect {
         adjust::framed(&self.rect, &self.adjust)
     }
-
-    /// The part of the frame Auto and Match roll measure: the picture alone, without its
-    /// border, and a little inside its edges, where a soft gate edge or a sliver of bare film
-    /// (black once printed) may show.
-    pub fn picture(&self) -> FrameRect {
-        let straightened = Adjustments {
-            straighten_deg: self.adjust.straighten_deg,
-            ..Adjustments::default()
-        };
-        let r = adjust::framed(&self.rect, &straightened);
-        FrameRect {
-            width_mm: (r.width_mm - 2.0 * AUTO_MARGIN_MM).max(r.width_mm / 2.0),
-            height_mm: (r.height_mm - 2.0 * AUTO_MARGIN_MM).max(r.height_mm / 2.0),
-            ..r
-        }
-    }
 }
 
 /// The frames on the scan, as detected and edited, in millimetres on the scanner bed: frames
@@ -903,7 +887,7 @@ impl AppState {
         };
         let rect = target
             .and_then(|i| self.crop.frames.get(i))
-            .map(CropFrame::picture);
+            .map(|f| f.cut());
         let film = self.film();
         let mut adj = self.adjustments(target).clone();
         let (preview, scale) = scan_process::preview_frame(
@@ -991,7 +975,7 @@ impl AppState {
             .frames
             .iter()
             .map(|frame| {
-                let rect = frame.picture();
+                let rect = frame.cut();
                 match &film {
                     Some(f) => scan_process::frame_levels(
                         image,
@@ -1159,7 +1143,7 @@ impl AppState {
         else {
             return;
         };
-        let frames: Vec<FrameRect> = self.crop.frames.iter().map(CropFrame::picture).collect();
+        let frames: Vec<FrameRect> = self.crop.frames.iter().map(|f| f.cut()).collect();
         if frames.is_empty() {
             self.error = Some("Auto needs frames: detect or add them in the Crop step".into());
             return;
@@ -1736,8 +1720,6 @@ impl AppState {
 
 /// How big a preview [`AppState::auto_adjust`] measures, on its longer side.
 const AUTO_PREVIEW_SIDE: u32 = 1024;
-/// How far inside a frame's edges Auto and Match roll measure it, in millimetres.
-const AUTO_MARGIN_MM: f32 = 0.5;
 
 /// How big a preview [`AppState::match_roll`] measures a positive's frames on.
 const MATCH_PREVIEW_SIDE: u32 = 512;
@@ -2696,7 +2678,7 @@ mod tests {
             result.gamma,
             result.dpi,
             result.area,
-            &[state.crop.frames[5].picture()],
+            &[state.crop.frames[5].rect],
             &film.neutral(),
         );
         let alone = scan_film::auto_printing(&levels, &film.printing);
@@ -2830,7 +2812,7 @@ mod tests {
                     result.gamma,
                     result.dpi,
                     result.area,
-                    &[f.picture()],
+                    &[f.cut()],
                     &film.neutral(),
                 )[0];
                 let ev = f.adjust.color_ev();
