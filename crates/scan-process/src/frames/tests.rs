@@ -35,6 +35,8 @@ struct Strip {
     length: f32,
     /// How much of the film's width the holder leaves visible, either side of its middle.
     visible: f32,
+    /// How far the image reaches either side of the middle.
+    image: f32,
     /// Where each frame starts along the strip, and what is on it.
     frames: Vec<(f32, Shot)>,
 }
@@ -48,6 +50,7 @@ impl Strip {
             vertical: true,
             length: end,
             visible: VISIBLE,
+            image: 12.0,
             frames: frames.to_vec(),
         }
     }
@@ -78,25 +81,29 @@ impl Strip {
         (dx * a[0] + dy * a[1], dx * n[0] + dy * n[1])
     }
 
-    /// The frames as they should be found, inset as the detection does.
+    /// The frames as they should be found, grown as the detection does, but kept off the
+    /// holder.
     fn truth(&self) -> Vec<(FrameRect, Shot)> {
         let (a, _) = self.axes();
-        let inset = DetectParams::default().inset_mm * 2.0;
+        let bleed = DetectParams::default().bleed_mm;
+        let on_film = self.visible - HOLDER_MARGIN_MM;
+        let across = 2.0 * (self.image + bleed).min(on_film);
+        let along = 36.0 + 2.0 * bleed;
         self.frames
             .iter()
             .filter(|f| f.1 != Shot::Blank)
             .map(|&(v, shot)| {
                 let c = v + 18.0;
                 let (w, h) = if self.vertical {
-                    (24.0, 36.0)
+                    (across, along)
                 } else {
-                    (36.0, 24.0)
+                    (along, across)
                 };
                 let rect = FrameRect {
                     cx_mm: self.start.0 + a[0] * c,
                     cy_mm: self.start.1 + a[1] * c,
-                    width_mm: w - inset,
-                    height_mm: h - inset,
+                    width_mm: w,
+                    height_mm: h,
                     angle_deg: self.angle_deg,
                 };
                 (rect, shot)
@@ -115,7 +122,7 @@ impl Strip {
         }
         for &(start, shot) in &self.frames {
             let fv = v - start;
-            if u.abs() <= 12.0 && (0.0..36.0).contains(&fv) {
+            if u.abs() <= self.image && (0.0..36.0).contains(&fv) {
                 let t: [f32; 3] = match shot {
                     Shot::Normal => std::array::from_fn(|c| {
                         let ph = c as f32 * 1.7 + start;
@@ -283,6 +290,22 @@ fn dark_frames_are_placed_by_the_spacing() {
 }
 
 #[test]
+fn frames_run_under_a_holder_covering_the_rebate() {
+    // The holder covers the film just past the image, which is a little wider than 24 mm
+    // and runs on under it: the frames reach the holder's edge, but not onto it.
+    let mut strips = [
+        Strip::evenly((17.0, 2.0), &six()),
+        Strip::evenly((51.5, 2.0), &six()),
+    ];
+    for s in &mut strips {
+        (s.visible, s.image) = (12.2, 12.4);
+    }
+    let found = detect(V500, &strips);
+    check(&found, &strips, 0.35);
+    assert!(found.frames.iter().all(|f| f.edges_seen == 4), "{found:#?}");
+}
+
+#[test]
 fn uneven_spacing_follows_the_edges() {
     let starts = [1.5, 40.1, 77.6, 116.3, 153.9, 192.4];
     let frames: Vec<_> = starts.iter().map(|&s| (s, Shot::Normal)).collect();
@@ -312,8 +335,8 @@ fn frames_of_the_mock_scanner() {
         let off = [
             r.cx_mm - (x + w / 2.0),
             r.cy_mm - (y + h / 2.0),
-            r.width_mm - (w - 0.6),
-            r.height_mm - (h - 0.6),
+            r.width_mm - (w + 0.4),
+            r.height_mm - (h + 0.4),
         ];
         assert!(off.iter().all(|d| d.abs() < 0.5), "frame {i}: {r:?}");
     }

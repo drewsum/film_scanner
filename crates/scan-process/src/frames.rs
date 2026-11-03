@@ -14,8 +14,11 @@
 //!    strip: the one whose gaps look most like bare film and whose frames least. A dark or
 //!    underexposed frame, whose edges look just like the film around it, still gets its
 //!    place from the frames around it. Each edge is then moved to where the scan shows it
-//!    nearby, if it does. Frames whose ends couldn't be seen are flagged for checking, and
-//!    frames as bare as the film base (the unexposed end of a roll) are left out.
+//!    nearby, if it does. Where the holder covers the film's edges, the image runs on under
+//!    it, so a frame's long edges are the holder's. Each frame is then grown a little past
+//!    its edges, so none of the image is cut off, but never onto the holder. Frames whose
+//!    ends couldn't be seen are flagged for checking, and frames as bare as the film base
+//!    (the unexposed end of a roll) are left out.
 //!
 //! Frames are [`FrameRect`]s in millimetres on the scanner bed, so frames found on a
 //! low-resolution preview fit a later full-resolution scan of the same film.
@@ -48,6 +51,9 @@ const EDGE_WINDOW_MM: f32 = 1.2;
 const EDGE_SIDE_MM: f32 = 0.5;
 /// Steps of the spacing search, in millimetres.
 const SEARCH_STEP_MM: f32 = 0.1;
+/// How far inside the holder's edge a frame stops, in millimetres, to keep the holder's
+/// soft shadow out of it.
+const HOLDER_MARGIN_MM: f32 = 0.1;
 
 /// A rectangle on the scanner bed in millimetres, turned about its centre.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -122,15 +128,17 @@ impl FilmFormat {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DetectParams {
     pub format: FilmFormat,
-    /// Trimmed off every side of a detected frame, so no border shows along its edges.
-    pub inset_mm: f32,
+    /// Added to every side of a detected frame, so the image's own soft or uneven edge is
+    /// kept whole, at the cost of a sliver of film base. Never past the film, onto the
+    /// holder.
+    pub bleed_mm: f32,
 }
 
 impl Default for DetectParams {
     fn default() -> Self {
         Self {
             format: FilmFormat::FILM_135,
-            inset_mm: 0.3,
+            bleed_mm: 0.2,
         }
     }
 }
@@ -174,7 +182,7 @@ pub fn detect_frames(
         return detection;
     };
     let format = Format::new(&params.format, work.mm);
-    let inset = params.inset_mm / work.mm;
+    let bleed = params.bleed_mm / work.mm;
     let mut bases = Vec::new();
     for strip in find_strips(&work, &levels, &format) {
         let Some(sampled) = Sampled::new(&work, &levels, &strip, &format) else {
@@ -182,12 +190,9 @@ pub fn detect_frames(
         };
         detection.strips += 1;
         bases.push(sampled.base);
-        for frame in sampled.frames(&format) {
-            let along = (frame.start + inset, frame.end - inset);
-            let across = (frame.left + inset, frame.right - inset);
-            if along.1 <= along.0 || across.1 <= across.0 {
-                continue;
-            }
+        for frame in sampled.frames(&format, bleed) {
+            let along = (frame.start, frame.end);
+            let across = (frame.left, frame.right);
             let v = sampled.v_start + (along.0 + along.1) / 2.0;
             let u = sampled.u_start + (across.0 + across.1) / 2.0;
             let [x, y] = strip.point(v, u);
@@ -645,6 +650,8 @@ struct Sampled {
     /// The frames' band across the strip, and the strip's middle, in samples.
     band: (usize, usize),
     middle: f32,
+    /// Half the width of film the holder leaves visible.
+    half: f32,
     /// The light through unexposed film.
     base: [f32; 3],
 }
@@ -740,6 +747,7 @@ impl Sampled {
             no_film,
             band,
             middle,
+            half: strip.half,
             base,
         })
     }
@@ -782,8 +790,8 @@ impl Sampled {
         best
     }
 
-    /// The frames along the strip.
-    fn frames(&self, format: &Format) -> Vec<Found> {
+    /// The frames along the strip, each grown by `bleed` on every side but kept on the film.
+    fn frames(&self, format: &Format, bleed: f32) -> Vec<Found> {
         let Some((first, last)) = self.film_rows(format) else {
             return Vec::new();
         };
@@ -848,6 +856,11 @@ impl Sampled {
                 .collect();
             let columns = Profile::new(&columns);
             let half = format.frame_width / 2.0;
+            // Where the holder covers the film's edges, no film base shows beside the frame
+            // and the image runs on under the holder: its edge is the holder's.
+            let visible = self.half - HOLDER_MARGIN_MM * format.mm;
+            let covered = self.half < half + EDGE_WINDOW_MM * format.mm;
+            let unseen = if covered { visible } else { half };
             let left = find_edge(
                 &columns,
                 self.middle - half,
@@ -865,13 +878,15 @@ impl Sampled {
                 false,
             );
             let edges_seen = along_seen.iter().filter(|&&s| s).count() as u8
-                + u8::from(left.is_some())
-                + u8::from(right.is_some());
+                + u8::from(covered || left.is_some())
+                + u8::from(covered || right.is_some());
+            let left = left.unwrap_or(self.middle - unseen) - bleed;
+            let right = right.unwrap_or(self.middle + unseen) + bleed;
             frames.push(Found {
-                start: s,
-                end: e,
-                left: left.unwrap_or(self.middle - half).max(0.0),
-                right: right.unwrap_or(self.middle + half).min(self.nu as f32),
+                start: (s - bleed).max(e0),
+                end: (e + bleed).min(e1),
+                left: left.max(self.middle - visible).max(0.0),
+                right: right.min(self.middle + visible).min(self.nu as f32),
                 edges_seen,
                 placed_by_spacing: !along_seen[0] && !along_seen[1],
             });
