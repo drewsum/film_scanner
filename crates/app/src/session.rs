@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use scan_core::image::{self, DynamicImage};
+use scan_core::image::DynamicImage;
 use scan_core::{Exposure, ScanArea, ScanPass, ScanResult, ScanSource};
 use scan_film::{Mono, Printing, Rendering, Toning};
 use scan_process::FrameRect;
@@ -216,7 +216,7 @@ impl Roll {
         let dir = path.parent().unwrap_or(Path::new("."));
         let load = |name: &str| -> Result<DynamicImage, String> {
             let file = dir.join(name);
-            image::open(&file).map_err(|e| format!("{}: {e}", file.display()))
+            scan_core::export::open_scan(&file).map_err(|e| format!("{}: {e}", file.display()))
         };
         let s = &roll.scan;
         let mut passes = vec![ScanPass {

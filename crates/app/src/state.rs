@@ -144,11 +144,15 @@ pub struct CropFrame {
 }
 
 impl CropFrame {
+    /// A frame at `rect`, unedited but for light sharpening ([`adjust::Sharpen::LIGHT`]).
     pub fn new(rect: FrameRect) -> Self {
         Self {
             rect,
             check: false,
-            adjust: Adjustments::default(),
+            adjust: Adjustments {
+                sharpen: adjust::Sharpen::LIGHT,
+                ..Adjustments::default()
+            },
             skip: false,
             history: History::default(),
         }
@@ -1518,17 +1522,25 @@ impl AppState {
                     if !self.crop.edited {
                         self.forget_settled();
                         let old = std::mem::take(&mut self.crop.frames);
-                        let mut frames: Vec<CropFrame> = detection
+                        // Frames with nothing in their place get Auto, as a photofinisher's
+                        // printer would print them.
+                        let mut frames: Vec<(CropFrame, bool)> = detection
                             .frames
                             .iter()
-                            .map(|f| CropFrame {
-                                check: f.placed_by_spacing,
-                                ..carried(&old, &f.rect)
+                            .map(|f| {
+                                let frame = carried(&old, &f.rect);
+                                let new = frame.is_none();
+                                let frame = CropFrame {
+                                    check: f.placed_by_spacing,
+                                    ..frame.unwrap_or_else(|| CropFrame::new(f.rect))
+                                };
+                                (frame, new)
                             })
                             .collect();
                         if self.crop.reversed {
                             frames.reverse();
                         }
+                        let (frames, new): (Vec<CropFrame>, Vec<bool>) = frames.into_iter().unzip();
                         self.crop = Crop {
                             frames,
                             selected: None,
@@ -1537,6 +1549,14 @@ impl AppState {
                             strips: detection.strips,
                             reversed: self.crop.reversed,
                         };
+                        let fresh: Vec<usize> = (0..new.len()).filter(|&i| new[i]).collect();
+                        for &i in &fresh {
+                            self.auto_adjust(Some(i));
+                        }
+                        self.status = detection_summary(&detection);
+                        if !fresh.is_empty() {
+                            self.status += &format!("; Auto on {} new frame(s)", fresh.len());
+                        }
                     }
                 }
                 self.update_processing()
@@ -1606,24 +1626,20 @@ const MATCH_PREVIEW_SIDE: u32 = 512;
 /// A frame at `rect`, with the edits, skipping and history of the frame of `old` it
 /// replaces: the one whose middle is nearest `rect`'s, within half its shorter side. A
 /// preview's frames and a later scan's are the same frames found again, a little more
-/// exactly.
-fn carried(old: &[CropFrame], rect: &FrameRect) -> CropFrame {
+/// exactly. `None` if it replaces none.
+fn carried(old: &[CropFrame], rect: &FrameRect) -> Option<CropFrame> {
     let reach = rect.width_mm.min(rect.height_mm) / 2.0;
-    let replaced = old
-        .iter()
+    old.iter()
         .map(|f| {
             let d = (f.rect.cx_mm - rect.cx_mm).hypot(f.rect.cy_mm - rect.cy_mm);
             (d, f)
         })
         .filter(|&(d, _)| d <= reach)
-        .min_by(|a, b| a.0.total_cmp(&b.0));
-    match replaced {
-        Some((_, f)) => CropFrame {
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, f)| CropFrame {
             rect: *rect,
             ..f.clone()
-        },
-        None => CropFrame::new(*rect),
-    }
+        })
 }
 
 /// A line on what a frame detection found.
@@ -1721,7 +1737,10 @@ mod tests {
         assert!(!state.is_busy());
         assert_eq!(state.crop.frames.len(), 12);
         assert_eq!((state.crop.detected, state.crop.strips), (Some(1), 2));
-        assert_eq!(state.status, "Found 12 frames on 2 strips");
+        assert_eq!(
+            state.status,
+            "Found 12 frames on 2 strips; Auto on 12 new frame(s)"
+        );
         assert!(state.crop.frames.iter().all(|f| !f.check));
 
         // A detection of an earlier scan is dropped.
@@ -2283,12 +2302,39 @@ mod tests {
     }
 
     /// A film preview with its frames found.
+    /// A film scan with its 12 frames found, unedited: what Auto gave them is taken back.
     fn film_with_frames() -> AppState {
         let mut state = with_mock_open();
         let cmd = preview(&mut state);
         detected(&mut state, cmd);
         assert_eq!(state.crop.frames.len(), 12);
+        for frame in &mut state.crop.frames {
+            frame.adjust = Adjustments::default();
+        }
         state
+    }
+
+    #[test]
+    fn new_frames_get_auto_and_found_again_keep_their_edits() {
+        let mut state = with_mock_open();
+        let cmd = preview(&mut state);
+        detected(&mut state, cmd);
+        assert!(
+            state.status.ends_with("Auto on 12 new frame(s)"),
+            "{}",
+            state.status
+        );
+        for frame in &state.crop.frames {
+            assert_ne!(frame.adjust.levels[adjust::MASTER], Levels::default());
+        }
+        // Found again, a frame keeps what it has, Auto's or not.
+        state.adjustments_mut(Some(2)).exposure_ev = 0.4;
+        let auto = state.adjustments(Some(5)).clone();
+        let cmd = preview(&mut state);
+        detected(&mut state, cmd);
+        assert_eq!(state.adjustments(Some(2)).exposure_ev, 0.4);
+        assert_eq!(state.adjustments(Some(5)), &auto);
+        assert!(!state.status.contains("Auto"), "{}", state.status);
     }
 
     #[test]

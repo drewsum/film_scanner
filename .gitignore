@@ -3,3 +3,4 @@
 *.tif
 *.tiff
 !tests/fixtures/**
+__pycache__/

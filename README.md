@@ -143,7 +143,11 @@ the other way. It stays on for later scans and detections, and each frame keeps 
 
 *Save frames as TIFF* saves each frame straightened, at the scan's bit depth, as
 `<name>_01.tif`, `<name>_02.tif` and so on. It uses the cleaned and merged image when those
-are on.
+are on. TIFFs carry the scan's resolution, an sRGB profile, and the software and time
+that made them; JPEGs carry the resolution and profile. Frames are cut with a Lanczos kernel, which keeps the grain a simpler one would
+smooth away. A frame that isn't turned is copied pixel for pixel. Each frame's red and blue
+are lined up with its green to a fraction of a pixel, measured from the frame itself. The
+V500's color rows put them 0.2–0.5 px apart along the carriage's travel.
 
 The **⟲ ⟳** buttons above the image turn the whole scan in quarter turns. Saved scans and
 frames are turned the same way, and the app remembers the turn between sessions, since film
@@ -218,7 +222,9 @@ The roll's printing in the Invert step stays the starting point. A frame's expos
 color balance are added to it **in the film's scene light, before the print curve**, the
 way a photofinisher corrects each frame's printer lights, so a frame's color correction
 uses the film's profile just like the roll's does. Its *Auto* balances the frame as the
-printer would on its own, then stretches it to full range. The rest edits the positive.
+printer would on its own, then stretches it to full range. Newly detected frames get Auto
+straight away. The rest edits the positive, starting from light sharpening that gives back
+the fine grain cutting a frame straightened softens.
 
 Each frame's edits are kept through a new scan of the same film (they follow the frame
 detection finds in their place), can be undone (Ctrl+Z), copied to other frames or saved
