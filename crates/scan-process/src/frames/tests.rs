@@ -431,6 +431,25 @@ fn crops_on_whole_pixels_are_copies() {
 }
 
 #[test]
+fn unturned_crops_move_onto_whole_pixels() {
+    // 0.3 px right and 0.4 px down of the pixel grid: copied from the nearest whole pixels.
+    let image = grain(200, 200);
+    let area = ScanArea::full(20.0, 20.0);
+    let frame = FrameRect {
+        cx_mm: 8.03,
+        cy_mm: 11.04,
+        width_mm: 6.0,
+        height_mm: 4.0,
+        angle_deg: 0.0,
+    };
+    let crop = crop_frame(&image, 254, area, &frame).to_luma16();
+    let source = image.to_luma16();
+    for (i, j, p) in crop.enumerate_pixels() {
+        assert_eq!(p, source.get_pixel(50 + i, 90 + j), "at ({i}, {j})");
+    }
+}
+
+#[test]
 fn straightening_keeps_the_grain() {
     // Half a pixel off and turned a little: a bilinear cut left about half the grain's
     // deviation where it read halfway between pixels.

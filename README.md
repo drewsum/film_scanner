@@ -143,7 +143,10 @@ the other way. It stays on for later scans and detections, and each frame keeps 
 
 *Save frames as TIFF* saves each frame straightened, at the scan's bit depth, as
 `<name>_01.tif`, `<name>_02.tif` and so on. It uses the cleaned and merged image when those
-are on.
+are on. Frames are cut with a Lanczos kernel, which keeps the grain a simpler one would
+smooth away. A frame that isn't turned is copied pixel for pixel. Each frame's red and blue
+are lined up with its green to a fraction of a pixel, measured from the frame itself. The
+V500's color rows put them 0.2–0.5 px apart along the carriage's travel.
 
 The **⟲ ⟳** buttons above the image turn the whole scan in quarter turns. Saved scans and
 frames are turned the same way, and the app remembers the turn between sessions, since film

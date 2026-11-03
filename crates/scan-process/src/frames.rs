@@ -24,7 +24,7 @@
 use scan_core::image::{DynamicImage, ImageBuffer, Luma, Rgb};
 use scan_core::{MM_PER_INCH, ScanArea};
 
-use crate::fit;
+use crate::{fit, lanczos};
 
 /// Resolution the detection works at; finer scans are averaged down to about this.
 const WORK_DPI: f32 = 200.0;
@@ -1170,6 +1170,19 @@ pub fn crop_frame(
     area: ScanArea,
     frame: &FrameRect,
 ) -> DynamicImage {
+    crop_frame_aligned(image, dpi, area, frame, &[[0.0; 2]; 3])
+}
+
+/// Like [`crop_frame`], with each color channel read `shifts` (red, green, blue; in scan
+/// pixels across and down) from where the others are, as [`crate::channel_shifts`] measures
+/// them: lines the channels up in the one resampling. Greyscale scans aren't shifted.
+pub fn crop_frame_aligned(
+    image: &DynamicImage,
+    dpi: u32,
+    area: ScanArea,
+    frame: &FrameRect,
+    shifts: &[[f32; 2]; 3],
+) -> DynamicImage {
     let px_per_mm = dpi as f32 / MM_PER_INCH;
     let out_w = ((frame.width_mm * px_per_mm).round() as u32).max(1);
     let out_h = ((frame.height_mm * px_per_mm).round() as u32).max(1);
@@ -1182,11 +1195,19 @@ pub fn crop_frame(
         (out_w - 1) as f32 / -2.0 * step,
         (out_h - 1) as f32 / -2.0 * step,
     );
-    let map = Affine {
+    let mut map = Affine {
         origin: [(x0 - area.x_mm) * px_per_mm, (y0 - area.y_mm) * px_per_mm],
         di: ex,
         dj: ey,
     };
+    // A frame that isn't turned is moved (by at most half a pixel) onto whole pixels: copied,
+    // not resampled.
+    let unit = |v: f32| v.abs() < 1e-5 || (v.abs() - 1.0).abs() < 1e-5;
+    if ex.iter().chain(&ey).all(|&v| unit(v)) {
+        map.di = ex.map(f32::round);
+        map.dj = ey.map(f32::round);
+        map.origin = map.origin.map(|o| (o - 0.5).round() + 0.5);
+    }
     let (w, h) = (image.width() as usize, image.height() as usize);
     let size = (out_w as usize, out_h as usize);
     match image {
@@ -1194,7 +1215,7 @@ pub fn crop_frame(
             ImageBuffer::<Rgb<u8>, _>::from_raw(
                 out_w,
                 out_h,
-                resample(b.as_raw(), w, h, 3, size, &map),
+                resample(b.as_raw(), (w, h), 3, size, &map, shifts),
             )
             .expect("size matches"),
         ),
@@ -1202,7 +1223,7 @@ pub fn crop_frame(
             ImageBuffer::<Luma<u8>, _>::from_raw(
                 out_w,
                 out_h,
-                resample(b.as_raw(), w, h, 1, size, &map),
+                resample(b.as_raw(), (w, h), 1, size, &map, &[[0.0; 2]]),
             )
             .expect("size matches"),
         ),
@@ -1210,7 +1231,7 @@ pub fn crop_frame(
             ImageBuffer::<Luma<u16>, _>::from_raw(
                 out_w,
                 out_h,
-                resample(b.as_raw(), w, h, 1, size, &map),
+                resample(b.as_raw(), (w, h), 1, size, &map, &[[0.0; 2]]),
             )
             .expect("size matches"),
         ),
@@ -1218,7 +1239,7 @@ pub fn crop_frame(
             ImageBuffer::<Rgb<u16>, _>::from_raw(
                 out_w,
                 out_h,
-                resample(b.as_raw(), w, h, 3, size, &map),
+                resample(b.as_raw(), (w, h), 3, size, &map, shifts),
             )
             .expect("size matches"),
         ),
@@ -1228,7 +1249,7 @@ pub fn crop_frame(
                 ImageBuffer::<Rgb<u16>, _>::from_raw(
                     out_w,
                     out_h,
-                    resample(rgb.as_raw(), w, h, 3, size, &map),
+                    resample(rgb.as_raw(), (w, h), 3, size, &map, shifts),
                 )
                 .expect("size matches"),
             )
@@ -1266,80 +1287,54 @@ impl Sample for u16 {
     }
 }
 
-/// Taps on each side of a sample position in [`resample`]'s Lanczos kernel.
-const LANCZOS_A: usize = 3;
-
-/// The Lanczos kernel's weights for the 2·[`LANCZOS_A`] samples about a position `t` (0–1)
-/// past the first sample left of it, normalized to sum to 1.
-fn lanczos_weights(t: f32) -> [f32; 2 * LANCZOS_A] {
-    let a = LANCZOS_A as f32;
-    let mut w = std::array::from_fn(|k| {
-        let x = t + (LANCZOS_A - 1) as f32 - k as f32;
-        if x.abs() < 1e-6 {
-            1.0
-        } else if x.abs() >= a {
-            0.0
-        } else {
-            let px = std::f32::consts::PI * x;
-            a * px.sin() * (px / a).sin() / (px * px)
-        }
-    });
-    let sum: f32 = w.iter().sum();
-    w.iter_mut().for_each(|v| *v /= sum);
-    w
-}
-
 /// Resampling of an image with `channels` per pixel at the positions `map` gives each output
-/// pixel, clamped at the image's borders. A Lanczos kernel keeps the grain and fine detail a
-/// bilinear one smooths away (straightening by a fraction of a degree reads most pixels
-/// between samples); it is exact on whole pixels.
+/// pixel, each channel moved by its offset in `offsets`, clamped at the image's borders. A
+/// Lanczos kernel keeps most of the grain and fine detail a bilinear one smooths away
+/// (straightening by a fraction of a degree reads most pixels between samples); it is exact
+/// on whole pixels.
 fn resample<T: Sample + Send + Sync>(
     raw: &[T],
-    w: usize,
-    h: usize,
+    (w, h): (usize, usize),
     channels: usize,
     (out_w, out_h): (usize, usize),
     map: &Affine,
+    offsets: &[[f32; 2]],
 ) -> Vec<T> {
     let row = out_w * channels;
     let mut out = vec![T::from_f32(0.0); out_h * row];
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     let rows = out_h.div_ceil(threads).max(16);
+    let clamp = |v: isize, n: usize| v.clamp(0, n as isize - 1) as usize;
     std::thread::scope(|s| {
         for (b, band) in out.chunks_mut((rows * row).max(1)).enumerate() {
             s.spawn(move || {
-                let mut acc = vec![0.0f32; channels];
                 for (dj, line) in band.chunks_mut(row.max(1)).enumerate() {
                     let j = (b * rows + dj) as f32;
                     for (i, px) in line.chunks_mut(channels).enumerate() {
                         let i = i as f32;
                         let x = map.origin[0] + map.di[0] * i + map.dj[0] * j - 0.5;
                         let y = map.origin[1] + map.di[1] * i + map.dj[1] * j - 0.5;
-                        let (xf, yf) = (x.floor(), y.floor());
-                        let (wx, wy) = (lanczos_weights(x - xf), lanczos_weights(y - yf));
-                        let clamp = |v: f32, n: usize| (v.max(0.0) as usize).min(n - 1);
-                        let first = |f: f32| f - (LANCZOS_A - 1) as f32;
-                        let xs: [usize; 2 * LANCZOS_A] =
-                            std::array::from_fn(|k| clamp(first(xf) + k as f32, w));
-                        acc.iter_mut().for_each(|a| *a = 0.0);
-                        for (ky, &wy) in wy.iter().enumerate() {
-                            if wy == 0.0 {
-                                continue;
-                            }
-                            let sy = clamp(first(yf) + ky as f32, h);
-                            for (&sx, &wx) in xs.iter().zip(&wx) {
-                                let wgt = wx * wy;
-                                if wgt == 0.0 {
+                        for (c, p) in px.iter_mut().enumerate() {
+                            let (x0, tx) = lanczos::split(x + offsets[c][0]);
+                            let (y0, ty) = lanczos::split(y + offsets[c][1]);
+                            let (wx, wy) = (lanczos::weights(tx), lanczos::weights(ty));
+                            let xs: [usize; lanczos::TAPS] =
+                                std::array::from_fn(|k| clamp(x0 + k as isize, w));
+                            let mut acc = 0.0;
+                            for (ky, &wy) in wy.iter().enumerate() {
+                                if wy == 0.0 {
                                     continue;
                                 }
-                                let base = (sy * w + sx) * channels;
-                                for (c, a) in acc.iter_mut().enumerate() {
-                                    *a += raw[base + c].to_f32() * wgt;
+                                let base = clamp(y0 + ky as isize, h) * w;
+                                let mut sum = 0.0;
+                                for (&sx, &wx) in xs.iter().zip(wx) {
+                                    if wx != 0.0 {
+                                        sum += raw[(base + sx) * channels + c].to_f32() * wx;
+                                    }
                                 }
+                                acc += sum * wy;
                             }
-                        }
-                        for (p, &a) in px.iter_mut().zip(&acc) {
-                            *p = T::from_f32(a);
+                            *p = T::from_f32(acc);
                         }
                     }
                 }

@@ -356,7 +356,15 @@ fn run(
                     .into_iter()
                     .map(|(frame, adj, target)| {
                         let cut = adjust::framed(&frame, &adj);
-                        let crop = scan_process::crop_frame(image, result.dpi, result.area, &cut);
+                        let shifts =
+                            scan_process::channel_shifts(image, result.dpi, result.area, &cut);
+                        let crop = scan_process::crop_frame_aligned(
+                            image,
+                            result.dpi,
+                            result.area,
+                            &cut,
+                            &shifts,
+                        );
                         let spots =
                             adjust::spot_pixels(&adj.spots, Some(&cut), &result.area, px_per_mm);
                         let crop = adjust::heal(&crop, &spots);

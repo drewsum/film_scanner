@@ -7,6 +7,15 @@ use image::{DynamicImage, ImageFormat};
 
 use crate::{ScanError, ScanResult};
 
+/// Read an image [`save_tiff`] wrote. Without the decoder's memory limit: a 16-bit scan of the
+/// V500's whole film area at 1,600 dpi is about 390 MB, past the default 512 MB allowance
+/// once decoding needs its own buffers.
+pub fn open_scan(path: &Path) -> image::ImageResult<DynamicImage> {
+    let mut reader = image::ImageReader::open(path)?.with_guessed_format()?;
+    reader.no_limits();
+    reader.decode()
+}
+
 /// Save a scan as TIFF files, preserving bit depth.
 ///
 /// The primary pass is written to `path` (with a `.tif` extension). Extra exposure passes
