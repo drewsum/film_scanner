@@ -25,6 +25,7 @@ env_logger.workspace = true
 jiff.workspace = true
 serde.workspace = true
 ron.workspace = true
+tiff.workspace = true
 
 [build-dependencies]
 winresource = "0.1"

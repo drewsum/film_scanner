@@ -8,9 +8,8 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 
-use scan_core::image::codecs::jpeg::JpegEncoder;
+use scan_core::image::codecs::jpeg::{JpegEncoder, PixelDensity};
 use scan_core::image::codecs::png::PngEncoder;
-use scan_core::image::codecs::tiff::TiffEncoder;
 use scan_core::image::{DynamicImage, ImageEncoder, ImageError};
 use scan_core::{
     CancelToken, Capabilities, DeviceInfo, DeviceRegistry, MM_PER_INCH, ProgressSink, ScanError,
@@ -370,9 +369,14 @@ fn run(
                         let crop = adjust::heal(&crop, &spots);
                         let crop = developed(&crop, result.gamma, film.as_ref(), &adj);
                         let turns = (quarter_turns + adj.quarter_turns) % 4;
-                        save_frame(&adjust::orient(&crop, turns, adj.mirror), format, &target)
-                            .map_err(|e| format!("{}: {e}", target.display()))
-                            .map(|()| target)
+                        save_frame(
+                            &adjust::orient(&crop, turns, adj.mirror),
+                            format,
+                            result.dpi,
+                            &target,
+                        )
+                        .map_err(|e| format!("{}: {e}", target.display()))
+                        .map(|()| target)
                     })
                     .collect::<Result<Vec<_>, _>>();
                 let saved = saved.and_then(|mut written| match metadata {
@@ -439,16 +443,58 @@ fn developed<'a>(
 }
 
 /// Write `image` (16-bit) to `path` in `format`, as 8 bits for JPEG and PNG, with an sRGB
-/// profile.
-fn save_frame(image: &DynamicImage, format: FrameFormat, path: &Path) -> Result<(), ImageError> {
+/// profile and (TIFF and JPEG) the scan's resolution, `dpi`.
+fn save_frame(
+    image: &DynamicImage,
+    format: FrameFormat,
+    dpi: u32,
+    path: &Path,
+) -> Result<(), ImageError> {
     let file = BufWriter::new(File::create(path)?);
     let eight = || DynamicImage::ImageRgb8(image.to_rgb8());
     match format {
         FrameFormat::Jpeg(quality) => {
-            write_tagged(&eight(), JpegEncoder::new_with_quality(file, quality))
+            let mut encoder = JpegEncoder::new_with_quality(file, quality);
+            encoder.set_pixel_density(PixelDensity::dpi(dpi.min(u32::from(u16::MAX)) as u16));
+            write_tagged(&eight(), encoder)
         }
         FrameFormat::Png => write_tagged(&eight(), PngEncoder::new(file)),
-        FrameFormat::Tiff => write_tagged(image, TiffEncoder::new(file)),
+        FrameFormat::Tiff => write_tiff(image, dpi, file)
+            .map_err(|e| ImageError::IoError(std::io::Error::other(format!("writing TIFF: {e}")))),
+    }
+}
+
+/// Write `image` as an uncompressed TIFF at its bit depth, tagged with an sRGB profile, its
+/// resolution, and the software and time that made it.
+fn write_tiff(
+    image: &DynamicImage,
+    dpi: u32,
+    file: impl std::io::Write + std::io::Seek,
+) -> tiff::TiffResult<()> {
+    use tiff::encoder::{Rational, TiffEncoder, colortype};
+    use tiff::tags::{ResolutionUnit, Tag};
+
+    let mut encoder = TiffEncoder::new(file)?;
+    let (w, h) = (image.width(), image.height());
+    let software = format!("Film Scanner {}", env!("CARGO_PKG_VERSION"));
+    let time = jiff::Zoned::now().strftime("%Y:%m:%d %H:%M:%S").to_string();
+    macro_rules! write {
+        ($color:ty, $data:expr) => {{
+            let mut tiff = encoder.new_image::<$color>(w, h)?;
+            tiff.resolution(ResolutionUnit::Inch, Rational { n: dpi, d: 1 });
+            let tags = tiff.encoder();
+            tags.write_tag(Tag::IccProfile, crate::icc::srgb())?;
+            tags.write_tag(Tag::Software, software.as_str())?;
+            tags.write_tag(Tag::DateTime, time.as_str())?;
+            tiff.write_data($data)
+        }};
+    }
+    match image {
+        DynamicImage::ImageRgb16(i) => write!(colortype::RGB16, i.as_raw()),
+        DynamicImage::ImageRgb8(i) => write!(colortype::RGB8, i.as_raw()),
+        DynamicImage::ImageLuma16(i) => write!(colortype::Gray16, i.as_raw()),
+        DynamicImage::ImageLuma8(i) => write!(colortype::Gray8, i.as_raw()),
+        other => write!(colortype::RGB16, other.to_rgb16().as_raw()),
     }
 }
 
@@ -728,6 +774,25 @@ mod tests {
             scan_core::image::open(&paths[2]).unwrap(),
             DynamicImage::ImageRgb16(_)
         ));
+        // The scan's resolution, and what made the file.
+        let mut tags = tiff::decoder::Decoder::new(File::open(&paths[2]).unwrap()).unwrap();
+        let tag = |t: &mut tiff::decoder::Decoder<File>, tag| t.get_tag(tag).unwrap();
+        let res = tag(&mut tags, tiff::tags::Tag::XResolution);
+        assert!(format!("{res:?}").contains("150"), "{res:?}");
+        assert_eq!(
+            tag(&mut tags, tiff::tags::Tag::ResolutionUnit)
+                .into_u16()
+                .unwrap(),
+            2
+        );
+        let software = tag(&mut tags, tiff::tags::Tag::Software)
+            .into_string()
+            .unwrap();
+        assert!(software.starts_with("Film Scanner"), "{software}");
+        // JFIF: units (1, dots per inch) at byte 13, then the densities.
+        let jpeg = std::fs::read(&paths[0]).unwrap();
+        assert_eq!(&jpeg[6..11], b"JFIF ");
+        assert_eq!((jpeg[13], &jpeg[14..18]), (1, &[0, 150, 0, 150][..]));
     }
 
     #[test]
