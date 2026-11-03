@@ -222,7 +222,9 @@ The roll's printing in the Invert step stays the starting point. A frame's expos
 color balance are added to it **in the film's scene light, before the print curve**, the
 way a photofinisher corrects each frame's printer lights, so a frame's color correction
 uses the film's profile just like the roll's does. Its *Auto* balances the frame as the
-printer would on its own, then stretches it to full range. The rest edits the positive.
+printer would on its own, then stretches it to full range. Newly detected frames get Auto
+straight away. The rest edits the positive, starting from light sharpening that gives back
+the fine grain cutting a frame straightened softens.
 
 Each frame's edits are kept through a new scan of the same film (they follow the frame
 detection finds in their place), can be undone (Ctrl+Z), copied to other frames or saved

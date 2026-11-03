@@ -327,6 +327,17 @@ impl Default for Sharpen {
     }
 }
 
+impl Sharpen {
+    /// Light sharpening, which new frames start with: it gives back the grain and fine
+    /// detail that cutting a frame straightened softens (a 1,600 dpi frame's finest detail
+    /// doubles; the grain's deviation rises a quarter, still below SilverFast's default).
+    pub const LIGHT: Sharpen = Sharpen {
+        amount: 0.6,
+        radius_px: 1.0,
+        threshold: 0.005,
+    };
+}
+
 /// A spot to heal (dust or a hair the infrared pass missed, or any speck on film infrared
 /// can't see through), on the scanner bed: it stays put when its frame is moved,
 /// straightened or given a border.

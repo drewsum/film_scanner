@@ -68,7 +68,9 @@ in from just outside it, the way dust removal fills its defects.
 8. **Vignette:** the corners darkened or lightened, for effect.
 9. **Sharpening.** An unsharp mask of brightness alone, added equally to every channel, so
    it adds no color fringes. A soft threshold leaves differences smaller than the threshold
-   alone, so grain isn't sharpened.
+   alone, so grain isn't sharpened. New frames start with light sharpening (amount 0.6,
+   radius 1 px, threshold 0.005, low enough to sharpen grain), which gives back the fine
+   grain and detail that cutting a frame straightened softens. *Reset* turns it off.
 10. **Orientation.** The frame is mirrored first if asked, then turned: the scan's own turn
     and then the frame's.
 
@@ -105,6 +107,9 @@ printing's contrast steepens or flattens it about grey. Slides have no profiles 
 - **Black and white pickers:** set each channel's levels black or white point to the
   clicked color, before levels. That makes the point black (or white) and neutral.
 - **Auto all** runs Auto on every frame, each on its own.
+- **New frames get Auto.** When frame detection finds a frame with no frame in its place
+  before, it runs Auto on it. A frame found again keeps its edits. *Reset* takes Auto's
+  edits back off like any others.
 - **Match roll** pulls every frame to the roll's typical frame instead: each frame's
   average color, measured through the film at neutral printing, is moved to the median
   frame's. Frames shot in the same light then print alike, rather than each being made
