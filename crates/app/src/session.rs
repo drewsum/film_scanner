@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::export::RollMetadata;
 use crate::history::History;
-use crate::state::{AppState, CropFrame, FilmBase, FilmType};
+use crate::state::{AppState, CropFrame, FilmBase, FilmType, FrameOrder};
 use crate::worker::ScanKind;
 
 /// A roll file's extension.
@@ -37,8 +37,11 @@ pub struct Roll {
     pub frames_edited: bool,
     #[serde(default)]
     pub strips: usize,
-    #[serde(default)]
+    /// Older files' `reversed`: the frames from the other end of the film.
+    #[serde(default, skip_serializing)]
     pub reversed: bool,
+    #[serde(default)]
+    pub order: FrameOrder,
     #[serde(default)]
     pub quarter_turns: u8,
     #[serde(default)]
@@ -166,7 +169,8 @@ impl Roll {
                 .collect(),
             frames_edited: state.crop.edited,
             strips: state.crop.strips,
-            reversed: state.crop.reversed,
+            reversed: false,
+            order: state.crop.order,
             quarter_turns: state.quarter_turns,
             scan_adjust: state.scan_adjust.clone(),
             invert: SavedInvert {
@@ -295,7 +299,11 @@ impl Roll {
         state.crop.edited = self.frames_edited || state.film_base.is_none();
         state.crop.detected = state.film_base.map(|_| generation);
         state.crop.strips = self.strips;
-        state.crop.reversed = self.reversed;
+        state.crop.order = if self.reversed {
+            FrameOrder::REVERSED
+        } else {
+            self.order
+        };
         state.quarter_turns = self.quarter_turns % 4;
         state.scan_adjust = self.scan_adjust;
         state.scan_history = History::default();

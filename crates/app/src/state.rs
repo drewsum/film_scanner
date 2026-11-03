@@ -176,9 +176,97 @@ pub struct Crop {
     pub detected: Option<u64>,
     /// Film strips the last detection found.
     pub strips: usize,
-    /// Number the frames from the other end of the film: for cameras that wind the film
-    /// the other way. Kept for later detections.
-    pub reversed: bool,
+    /// The order the frames are numbered in. Kept for later detections.
+    pub order: FrameOrder,
+}
+
+/// The order frames are numbered in. As detected, frames go strip by strip (left to right,
+/// or top to bottom), each strip from its top or left end. Cameras that wind the film the
+/// other way, and strips put in the holder the other way round, need the frames along each
+/// strip, the strips, or both turned around.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FrameOrder {
+    /// The strips from the last to the first.
+    pub strips_reversed: bool,
+    /// Each strip's frames from its bottom or right end.
+    pub along_reversed: bool,
+}
+
+impl FrameOrder {
+    /// Both: the frames from the other end of the film.
+    pub const REVERSED: FrameOrder = FrameOrder {
+        strips_reversed: true,
+        along_reversed: true,
+    };
+
+    /// The next of the four orders.
+    pub fn next(self) -> Self {
+        let (strips_reversed, along_reversed) = match (self.strips_reversed, self.along_reversed) {
+            (false, false) => (false, true),
+            (false, true) => (true, false),
+            (true, false) => (true, true),
+            (true, true) => (false, false),
+        };
+        Self {
+            strips_reversed,
+            along_reversed,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match (self.strips_reversed, self.along_reversed) {
+            (false, false) => "Order: as scanned",
+            (false, true) => "Order: frames backwards",
+            (true, false) => "Order: strips backwards",
+            (true, true) => "Order: all backwards",
+        }
+    }
+
+    /// Where each frame goes, as indices into `rects`: strip by strip, by where the frames
+    /// are on the bed. Frames whose middles are within half a frame's width across the
+    /// strips are on the same strip.
+    pub fn arrange(self, rects: &[FrameRect]) -> Vec<usize> {
+        // Strips run along the frames' long sides: down the bed when most of those do.
+        let down = rects
+            .iter()
+            .filter(|r| {
+                let (s, c) = r.angle_deg.to_radians().sin_cos();
+                let long = if r.height_mm >= r.width_mm {
+                    [-s, c]
+                } else {
+                    [c, s]
+                };
+                long[1].abs() >= long[0].abs()
+            })
+            .count()
+            * 2
+            >= rects.len();
+        let across = |r: &FrameRect| if down { r.cx_mm } else { r.cy_mm };
+        let along = |r: &FrameRect| if down { r.cy_mm } else { r.cx_mm };
+        let mut by_across: Vec<usize> = (0..rects.len()).collect();
+        by_across.sort_by(|&a, &b| across(&rects[a]).total_cmp(&across(&rects[b])));
+        let mut strips: Vec<Vec<usize>> = Vec::new();
+        let mut last = f32::NEG_INFINITY;
+        for i in by_across {
+            let r = &rects[i];
+            let x = across(r);
+            if x - last > r.width_mm.min(r.height_mm) / 2.0 || strips.is_empty() {
+                strips.push(Vec::new());
+            }
+            last = x;
+            strips.last_mut().unwrap().push(i);
+        }
+        if self.strips_reversed {
+            strips.reverse();
+        }
+        for strip in &mut strips {
+            strip.sort_by(|&a, &b| along(&rects[a]).total_cmp(&along(&rects[b])));
+            if self.along_reversed {
+                strip.reverse();
+            }
+        }
+        strips.concat()
+    }
 }
 
 /// What film is in the holder, which decides how it is turned into a positive.
@@ -1306,15 +1394,25 @@ impl AppState {
         }
     }
 
-    /// Number the frames from the other end of the film, now and for later detections. The
+    /// Number the frames in the next of the four orders, now and for later detections. The
     /// selection and each frame's edits go with their frames.
-    pub fn reverse_frames(&mut self) {
+    pub fn cycle_frame_order(&mut self) {
         self.forget_settled();
         let crop = &mut self.crop;
-        crop.reversed = !crop.reversed;
-        crop.frames.reverse();
-        let n = crop.frames.len();
-        crop.selected = crop.selected.filter(|&i| i < n).map(|i| n - 1 - i);
+        crop.order = crop.order.next();
+        let rects: Vec<FrameRect> = crop.frames.iter().map(|f| f.rect).collect();
+        let arranged = crop.order.arrange(&rects);
+        let mut frames: Vec<Option<CropFrame>> = std::mem::take(&mut crop.frames)
+            .into_iter()
+            .map(Some)
+            .collect();
+        crop.frames = arranged
+            .iter()
+            .map(|&i| frames[i].take().unwrap())
+            .collect();
+        crop.selected = crop
+            .selected
+            .and_then(|s| arranged.iter().position(|&i| i == s));
     }
 
     pub fn delete_frame(&mut self, index: usize) {
@@ -1537,8 +1635,11 @@ impl AppState {
                                 (frame, new)
                             })
                             .collect();
-                        if self.crop.reversed {
-                            frames.reverse();
+                        if self.crop.order != FrameOrder::default() {
+                            let rects: Vec<FrameRect> = frames.iter().map(|f| f.0.rect).collect();
+                            let arranged = self.crop.order.arrange(&rects);
+                            let mut taken: Vec<_> = frames.into_iter().map(Some).collect();
+                            frames = arranged.iter().map(|&i| taken[i].take().unwrap()).collect();
                         }
                         let (frames, new): (Vec<CropFrame>, Vec<bool>) = frames.into_iter().unzip();
                         self.crop = Crop {
@@ -1547,7 +1648,7 @@ impl AppState {
                             edited: false,
                             detected: Some(generation),
                             strips: detection.strips,
-                            reversed: self.crop.reversed,
+                            order: self.crop.order,
                         };
                         let fresh: Vec<usize> = (0..new.len()).filter(|&i| new[i]).collect();
                         for &i in &fresh {
@@ -2447,30 +2548,55 @@ mod tests {
     }
 
     #[test]
-    fn frames_can_be_numbered_from_the_other_end() {
+    fn frames_can_be_numbered_in_four_orders() {
         let mut state = film_with_frames();
+        // Two strips down the scan, each from its top.
         let rects: Vec<FrameRect> = state.crop.frames.iter().map(|f| f.rect).collect();
+        let order = |state: &AppState| -> Vec<usize> {
+            state
+                .crop
+                .frames
+                .iter()
+                .map(|f| rects.iter().position(|r| *r == f.rect).unwrap())
+                .collect()
+        };
         state.adjustments_mut(Some(0)).exposure_ev = 0.5;
         state.crop.selected = Some(1);
-        state.reverse_frames();
-        assert!(state.crop.reversed && !state.crop.edited);
-        assert_eq!(state.crop.frames[0].rect, rects[11]);
+
+        // Each strip's frames backwards.
+        state.cycle_frame_order();
+        assert_eq!(state.crop.order.label(), "Order: frames backwards");
+        assert!(!state.crop.edited);
+        assert_eq!(order(&state), [5, 4, 3, 2, 1, 0, 11, 10, 9, 8, 7, 6]);
         assert_eq!(
-            state.crop.frames[11].adjust.exposure_ev, 0.5,
+            state.crop.frames[5].adjust.exposure_ev, 0.5,
             "edits go with the frame"
         );
+        assert_eq!(state.crop.selected, Some(4));
+        // The strips backwards.
+        state.cycle_frame_order();
+        assert_eq!(order(&state), [6, 7, 8, 9, 10, 11, 0, 1, 2, 3, 4, 5]);
+        // Both: the other end of the film.
+        state.cycle_frame_order();
+        assert_eq!(state.crop.order, FrameOrder::REVERSED);
+        assert_eq!(order(&state), (0..12).rev().collect::<Vec<_>>());
+        assert_eq!(state.crop.frames[11].adjust.exposure_ev, 0.5);
         assert_eq!(state.crop.selected, Some(10));
 
-        // Later detections come out reversed too, and back the other way when turned off.
+        // Later detections come out in the same order.
         let cmd = preview(&mut state);
         detected(&mut state, cmd);
-        assert!(state.crop.reversed);
-        assert_eq!(state.crop.frames[0].rect, rects[11]);
+        assert_eq!(state.crop.order, FrameOrder::REVERSED);
+        assert_eq!(order(&state), (0..12).rev().collect::<Vec<_>>());
         assert_eq!(state.crop.frames[11].adjust.exposure_ev, 0.5);
-        state.reverse_frames();
+
+        // And back to as scanned.
+        state.cycle_frame_order();
+        assert_eq!(order(&state), (0..12).collect::<Vec<_>>());
+        state.cycle_frame_order();
         let cmd = state.redetect_frames();
         detected(&mut state, cmd);
-        assert_eq!(state.crop.frames[0].rect, rects[0]);
+        assert_eq!(order(&state), [5, 4, 3, 2, 1, 0, 11, 10, 9, 8, 7, 6]);
     }
 
     #[test]
@@ -2609,7 +2735,11 @@ mod tests {
 
         // Frames moved around aren't recorded as edits: each keeps its own history.
         let last = state.crop.frames[11].history.clone();
-        state.reverse_frames();
+        state.crop.order = FrameOrder {
+            strips_reversed: true,
+            along_reversed: false,
+        };
+        state.cycle_frame_order();
         state.track_history(true);
         assert_eq!(state.crop.frames[0].history, last);
     }

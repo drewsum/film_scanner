@@ -569,15 +569,21 @@ impl ScannerApp {
             if ui
                 .add_enabled(
                     self.state.crop.frames.len() > 1,
-                    egui::Button::selectable(self.state.crop.reversed, "Reverse order"),
+                    egui::Button::selectable(
+                        self.state.crop.order != state::FrameOrder::default(),
+                        self.state.crop.order.label(),
+                    ),
                 )
                 .on_hover_text(
-                    "Numbers the frames from the other end of the film, for cameras that wind \
-                     it the other way. Kept for later scans; each frame keeps its edits.",
+                    "Click to go through the four orders: as scanned, each strip's frames \
+                     backwards, the strips backwards, and both (the other end of the film). \
+                     For cameras that wind the film the other way, or strips put in the \
+                     holder the other way round. Kept for later scans; each frame keeps its \
+                     edits.",
                 )
                 .clicked()
             {
-                self.state.reverse_frames();
+                self.state.cycle_frame_order();
             }
         });
 
