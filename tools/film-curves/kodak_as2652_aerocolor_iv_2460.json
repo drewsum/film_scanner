@@ -1,0 +1,53 @@
+{
+  "source": {
+    "film": "KODAK AEROCOLOR IV Negative Film 2460",
+    "publication": "AS-2652",
+    "edition": "October 2009",
+    "url": "https://web.archive.org/web/20260107194118/https://www.kodak.com/content/pdfs/KODAK-AEROCOLOR-IV-Negative-Film-2460-datasheet-en.pdf",
+    "sha256": "de0bbc31dcde97f53f8a736e1e5e7becf8ead15911613936410ed2d3a5287adf"
+  },
+  "notes": [
+    "Kodak's own URL for this sheet now gives 404; the URL is the Internet Archive's copy.",
+    "",
+    "An aerial film with no integral color masking (the sheet's words). It prints three",
+    "characteristic curves for three development times; these are \"Developed for Low",
+    "Contrast\": Process C-41 with its standard 3:15 development (or AN-6, 137 s, 38.9 °C),",
+    "daylight exposure, Status M densitometry. The sheet gives this development a gamma of",
+    "0.63 and an aerial film speed (EAFS) of 80.",
+    "",
+    "The sheet gives no Log H ref: aerial film speeds aren't pictorial ones. -0.84 is assumed,",
+    "where Kodak's ISO 100 still films put a grey card (Gold 100, Ektar 100): log10(0.8 / 100)",
+    "+ 1.26. Rebranded as a pictorial film, it is sold rated ISO 100.",
+    "",
+    "Spectral sensitivity (page 5): effective exposure 1/25 s, Status M, density 0.3 above",
+    "D-min. Spectral dye density (page 6): typical densities of a midscale neutral subject and",
+    "D-min.",
+    "",
+    "Page coordinates: the plots' axes are calibrated from their tick marks."
+  ],
+  "page": 5,
+  "log_h_ref": -0.84,
+  "sensitivity_density": 0.3,
+  "plots": {
+    "characteristic": {
+      "x": [[118.431, -3.0], [229.076, 0.0]],
+      "y": [[475.212, 1.0], [382.987, 3.0]],
+      "curves": { "blue": [37], "green": [35], "red": [36] },
+      "sample": { "start": -3.1, "step": 0.05, "end": 0.85 }
+    },
+    "sensitivity": {
+      "page": 4,
+      "x": [[382.676, 300.0], [543.267, 700.0]],
+      "y": [[417.875, 1.0], [342.168, 3.0]],
+      "floor": 0.0,
+      "curves": { "yellow": [90], "magenta": [89], "cyan": [88] },
+      "sample": { "start": 360.0, "step": 5.0, "end": 700.0 }
+    },
+    "dye_density": {
+      "x": [[109.321, 450.0], [241.116, 700.0]],
+      "y": [[231.392, 0.5], [121.005, 2.0]],
+      "curves": { "midscale": [25], "minimum": [24] },
+      "sample": { "start": 400.0, "step": 5.0, "end": 750.0 }
+    }
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "source": {
+    "publisher": "FUJIFILM",
+    "film": "FUJIFILM 400 Color Negative Film",
+    "publication": "AF3-0262E",
+    "edition": "1 April 2023",
+    "url": "https://www.ishootfujifilm.com/uploads/SUPERIA%20400%20Data%20Sheet.pdf",
+    "sha256": "7bbbf25ef56eb83a3319999d00c015e7dceb74102c8c5553f5d139337fc031a2"
+  },
+  "notes": [
+    "Fujifilm's US product page links this sheet for FUJIFILM 400 (the file is named for",
+    "Superia 400; the sheet is titled FUJIFILM 400).",
+    "",
+    "Characteristic curves: daylight, 1/125 s, Process CN-16 (Fujifilm's C-41), Status M",
+    "densitometry. Fujifilm draws each as a few smooth Bézier segments. The sheet gives no",
+    "Log H ref: -1.44 is assumed, where Kodak's ISO 400 sheets put a grey card (log10(0.8 /",
+    "400) + 1.26). The sheet's exposure check, a grey card reading 0.75 to 0.95 in red, is",
+    "a test.",
+    "",
+    "Spectral sensitivity: CN-16, Status M, density 1.0 above D-min, plotted relative (a 1.0",
+    "scale bar, no zero: the gridlines are numbered 2 and 3 here, arbitrarily). Only the",
+    "curves' shapes and offsets are used. This plot, and the dye density plot, are the same",
+    "drawings as on Fujifilm's FUJIFILM 200 sheet (AF3-0261E), path for path: the two",
+    "sheets publish the same spectral data.",
+    "",
+    "Spectral dye density: typical densities of a mid-scale neutral subject and D-min. The",
+    "700 nm gridline is drawn 1.6 pt off the others' spacing; the axis is calibrated from 400",
+    "and 600 nm.",
+    "",
+    "Page coordinates: the plots' axes are calibrated from their gridlines."
+  ],
+  "page": 5,
+  "log_h_ref": -1.44,
+  "sensitivity_density": 1.0,
+  "plots": {
+    "characteristic": {
+      "x": [[110.733, -3.0], [262.640, 0.0]],
+      "y": [[300.159, 0.0], [97.618, 4.0]],
+      "curves": { "blue": [59], "green": [57], "red": [58] },
+      "sample": { "start": -3.6, "step": 0.05, "end": 0.25 }
+    },
+    "sensitivity": {
+      "x": [[374.573, 400.0], [572.102, 700.0]],
+      "y": [[230.268, 2.0], [164.425, 3.0]],
+      "curves": { "yellow": [82], "magenta": [80], "cyan": [81] },
+      "sample": { "start": 360.0, "step": 5.0, "end": 700.0 }
+    },
+    "dye_density": {
+      "x": [[71.090, 400.0], [207.870, 600.0]],
+      "y": [[545.785, 0.0], [412.342, 2.0]],
+      "curves": { "midscale": [33], "minimum": [34] },
+      "sample": { "start": 405.0, "step": 5.0, "end": 715.0 }
+    }
+  }
+}

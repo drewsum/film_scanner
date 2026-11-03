@@ -15,12 +15,12 @@
 //!    film's spectral sensitivities.
 //! 5. **Tone.** A print-like curve (see [`Tone`]) for display, then sRGB encoding.
 //!
-//! Black-and-white negatives ([`Inverter::black_and_white`]) and slides
-//! ([`Inverter::positive`]) go through the same steps without a film profile: a generic
-//! black-and-white film's straight line in place of the film's curves, its channels mixed
-//! to grey (see [`Mono`]); or, for a slide, the light through it taken as the scene's.
+//! Black-and-white negatives ([`Inverter::black_and_white`]) go through the same steps on
+//! their film's one curve (see [`MonoModel`]), or a generic film's straight line when there
+//! is no profile, their channels mixed to grey (see [`Mono`]). Slides
+//! ([`Inverter::positive`]) have no profile: the light through one is taken as the scene's.
 
-use crate::model::{FilmModel, GREY};
+use crate::model::{FilmModel, GREY, MonoModel};
 use crate::spectral::{self, Mat3};
 
 /// How the film's layers become color.
@@ -166,8 +166,11 @@ enum Kind {
         model: Box<FilmModel>,
         matrix: Option<[[f32; 3]; 3]>,
     },
-    /// A black-and-white negative, on a generic straight line.
-    Mono(Mono),
+    /// A black-and-white negative, on its film's curve, or a generic straight line.
+    Mono {
+        mono: Mono,
+        film: Option<Box<MonoModel>>,
+    },
     /// A slide: the light through it is the scene's. `power` is its contrast about grey.
     Positive { power: f32 },
 }
@@ -204,11 +207,16 @@ impl Inverter {
         }
     }
 
-    /// For a black-and-white negative, without a profile: each channel turned back into
-    /// light on a generic film's straight line ([`BW_GREY_DENSITY`], [`BW_GAMMA`]), mixed
-    /// to grey, printed, then toned. The printing's color balance and rendering don't
-    /// apply.
-    pub fn black_and_white(base: [f32; 3], printing: &Printing, mono: &Mono) -> Self {
+    /// For a black-and-white negative: each channel turned back into light on the film's
+    /// curve, or without a profile on a generic film's straight line ([`BW_GREY_DENSITY`],
+    /// [`BW_GAMMA`]), mixed to grey, printed, then toned. The printing's color balance and
+    /// rendering don't apply.
+    pub fn black_and_white(
+        base: [f32; 3],
+        printing: &Printing,
+        mono: &Mono,
+        film: Option<&MonoModel>,
+    ) -> Self {
         let total: f32 = mono.mix.iter().map(|m| m.max(0.0)).sum();
         let mix = if total > 0.0 {
             mono.mix.map(|m| m.max(0.0) / total)
@@ -216,7 +224,10 @@ impl Inverter {
             [1.0 / 3.0; 3]
         };
         Self {
-            kind: Kind::Mono(Mono { mix, ..*mono }),
+            kind: Kind::Mono {
+                mono: Mono { mix, ..*mono },
+                film: film.map(|f| Box::new(f.clone())),
+            },
             base: base.map(|b| b.max(1e-6)),
             gain: [2f32.powf(printing.exposure_ev); 3],
             tone: Tone::new(printing.contrast),
@@ -250,7 +261,12 @@ impl Inverter {
         let density = (base / light.max(base * 1e-5)).log10();
         let e = match &self.kind {
             Kind::Color { model, .. } => model.exposure(c, density),
-            Kind::Mono(_) => GREY * 10f32.powf((density - BW_GREY_DENSITY) / BW_GAMMA),
+            Kind::Mono {
+                film: Some(film), ..
+            } => film.exposure(density),
+            Kind::Mono { film: None, .. } => {
+                GREY * 10f32.powf((density - BW_GREY_DENSITY) / BW_GAMMA)
+            }
             Kind::Positive { .. } => light.max(0.0),
         };
         e * self.gain[c]
@@ -261,14 +277,14 @@ impl Inverter {
     pub fn separable(&self) -> bool {
         match &self.kind {
             Kind::Color { matrix, .. } => matrix.is_none(),
-            Kind::Mono(_) => false,
+            Kind::Mono { .. } => false,
             Kind::Positive { .. } => true,
         }
     }
 
     /// Whether this makes a black-and-white image, so color balance means nothing.
     pub fn is_mono(&self) -> bool {
-        matches!(self.kind, Kind::Mono(_))
+        matches!(self.kind, Kind::Mono { .. })
     }
 
     /// The display value (sRGB encoded, 0–1) of scene light `e`, for a separable inverter.
@@ -290,7 +306,7 @@ impl Inverter {
                 let e: [f32; 3] = std::array::from_fn(|r| (0..3).map(|k| m[r][k] * e[k]).sum());
                 e.map(|v| self.display_channel(v))
             }
-            Kind::Mono(mono) => {
+            Kind::Mono { mono, .. } => {
                 let grey: f32 = (0..3).map(|c| mono.mix[c] * e[c]).sum();
                 let v = self.display_channel(grey);
                 let amount = mono.toning_amount.clamp(0.0, 1.0);

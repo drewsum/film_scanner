@@ -50,6 +50,7 @@ fn rolls_save_and_open_with_every_edit() {
     state.crop.reversed = true;
     state.quarter_turns = 3;
     state.invert.film_type = FilmType::BlackAndWhite;
+    state.invert.mono_stock = scan_film::stock::mono_by_id("ilford-hp5-plus");
     state.invert.mono.toning = Toning::Sepia;
     state.invert.printing.contrast = 1.7;
     state.export.metadata.name = "Halloween".into();
@@ -92,6 +93,10 @@ fn rolls_save_and_open_with_every_edit() {
     }
     assert!(back.crop.reversed && back.quarter_turns == 3);
     assert_eq!(back.invert.film_type, FilmType::BlackAndWhite);
+    assert_eq!(
+        back.invert.mono_stock.map(|s| s.id),
+        Some("ilford-hp5-plus")
+    );
     assert_eq!(back.invert.mono.toning, Toning::Sepia);
     assert_eq!(back.invert.printing.contrast, 1.7);
     assert_eq!(back.export.metadata.name, "Halloween");

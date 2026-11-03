@@ -121,7 +121,8 @@ fn problems_the_publisher_would_refuse_are_found() {
 #[test]
 fn film_is_filled_from_the_profile() {
     let mut meta = RollMetadata::default();
-    meta.fill_film(scan_film::stock::by_id("kodak-gold-200").unwrap());
+    let gold = scan_film::stock::by_id("kodak-gold-200").unwrap();
+    meta.fill_film(gold.manufacturer, gold.name, gold.iso);
     assert_eq!(
         (&*meta.manufacturer, &*meta.stock, &*meta.iso),
         ("Kodak", "Gold", "200")

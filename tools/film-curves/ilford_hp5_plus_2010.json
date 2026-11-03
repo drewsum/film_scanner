@@ -1,0 +1,40 @@
+{
+  "kind": "mono",
+  "source": {
+    "publisher": "ILFORD",
+    "film": "ILFORD HP5 PLUS",
+    "publication": "Technical Information",
+    "edition": "April 2010",
+    "url": "https://mail.kennethleegallery.com/pdf/HP5Plus.pdf",
+    "sha256": "f163f78517ddbc21b9572b1c57e8530c37603dcaddb10b6f854e8eb748a39200"
+  },
+  "notes": [
+    "The URL is a copy of Ilford's sheet. Ilford's current edition (November 2018) prints the",
+    "same curve, for the same development, as a picture, which can't be read exactly; this",
+    "edition draws it as a vector path.",
+    "",
+    "Characteristic curve: HP5 Plus 35 mm developed in ILFORD ILFOTEC HC (1+31) for 6 1/2",
+    "minutes at 20 °C with intermittent agitation, which the sheet says represents roll and",
+    "sheet film too. Its exposure axis is relative (log exposure from an arbitrary zero).",
+    "",
+    "Log H ref, the grey card's exposure on that axis, is not printed. It is taken 1.01",
+    "(log10(8.125 / 0.8)) above the speed point, where the curve reaches 0.1 above base plus",
+    "fog (0.17, at its lowest exposure): 1.08, so 2.09. That is where ISO 6 puts a metered",
+    "midtone for a film whose speed is its foot speed; Ilford rates HP5 Plus at ISO 400 by",
+    "practical evaluation rather than foot speed, so this is approximate.",
+    "",
+    "Page coordinates: the axes are calibrated from the plot's tick marks."
+  ],
+  "page": 4,
+  "log_h_ref": 2.09,
+  "densitometry": "Diffuse visual",
+  "exposure_axis": "relative log exposure",
+  "plots": {
+    "characteristic": {
+      "x": [[367.620, 1.0], [490.920, 4.0]],
+      "y": [[394.980, 1.0], [354.720, 2.0]],
+      "curves": { "neutral": [122] },
+      "sample": { "start": 0.0, "step": 0.05, "end": 4.1 }
+    }
+  }
+}

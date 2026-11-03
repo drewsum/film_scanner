@@ -1,0 +1,41 @@
+{
+  "source": {
+    "film": "KODAK ULTRAMAX 400 Film",
+    "publication": "E-7023",
+    "edition": "February 2016",
+    "url": "https://kodakprofessional.com/sites/default/files/wysiwyg/pro/resources/E7023_max_400.pdf",
+    "sha256": "598f44c39c2cd420554d9e7395ce7213e8bf9f1815fbf550dadaeb625826c77d"
+  },
+  "notes": [
+    "Characteristic curves: daylight exposure, Process C-41, Status M densitometry, Log H ref",
+    "-1.44. Spectral sensitivity: daylight, effective exposure 1/100 s, Status M, density 0.2",
+    "above D-min. Spectral dye density: typical densities of a midscale neutral subject (drawn",
+    "dashed, as one continuous path) and D-min.",
+    "",
+    "Page coordinates: the plots' axes are calibrated from their tick marks (the `x` and `y`",
+    "pairs in the config), which agree with the plot frames to 0.02 pt."
+  ],
+  "page": 3,
+  "log_h_ref": -1.44,
+  "plots": {
+    "characteristic": {
+      "x": [[118.036, -3.0], [228.915, 0.0]],
+      "y": [[251.216, 1.0], [158.881, 3.0]],
+      "curves": { "blue": [33], "green": [34], "red": [35] },
+      "sample": { "start": -3.4, "step": 0.05, "end": 0.55 }
+    },
+    "sensitivity": {
+      "x": [[96.713, 300.0], [257.483, 700.0]],
+      "y": [[484.724, 1.0], [408.908, 3.0]],
+      "floor": 0.0,
+      "curves": { "yellow": [50], "magenta": [51], "cyan": [52] },
+      "sample": { "start": 360.0, "step": 5.0, "end": 700.0 }
+    },
+    "dye_density": {
+      "x": [[387.924, 450.0], [510.736, 650.0]],
+      "y": [[260.368, 0.5], [149.852, 2.0]],
+      "curves": { "midscale": [66], "minimum": [65] },
+      "sample": { "start": 400.0, "step": 5.0, "end": 695.0 }
+    }
+  }
+}

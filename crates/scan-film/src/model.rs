@@ -1,5 +1,5 @@
 //! A color negative film as its datasheet describes it, run forwards (scene to negative)
-//! and backwards (negative to scene).
+//! and backwards (negative to scene); and a black-and-white one ([`MonoModel`]).
 //!
 //! Exposure is measured as `e`, scene-linear light relative to a grey card: a grey card
 //! (18% reflectance) exposed as the film's speed asks for is `e = 0.18`, and lands at the
@@ -7,7 +7,7 @@
 //! the characteristic curves give in Status M: the densitometry that sees a negative as
 //! color print paper does, one dye per channel.
 
-use crate::sheet::{Curve, Datasheet};
+use crate::sheet::{Curve, Datasheet, MonoDatasheet};
 use crate::spectral::{self, Mat3, SAMPLES, wavelengths};
 
 /// A grey card's reflectance: `e` of a normally exposed midtone.
@@ -146,6 +146,46 @@ impl FilmModel {
     /// [`colorimetric_matrix`]). White stays white.
     pub fn colorimetric(&self) -> &Mat3 {
         &self.colorimetric
+    }
+}
+
+/// A black-and-white film: one curve of silver, which every channel of a scan sees alike.
+#[derive(Clone, Debug)]
+pub struct MonoModel {
+    layer: Layer,
+    log_h_ref: f32,
+}
+
+impl MonoModel {
+    pub fn new(sheet: &MonoDatasheet) -> Self {
+        Self {
+            layer: Layer::new(&sheet.characteristic),
+            log_h_ref: sheet.log_h_ref,
+        }
+    }
+
+    pub fn layer(&self) -> &Layer {
+        &self.layer
+    }
+
+    /// Density of unexposed, processed film: base plus fog.
+    pub fn d_min(&self) -> f32 {
+        self.layer.d_min()
+    }
+
+    /// The density above base plus fog of a negative exposed to scene light `e`.
+    pub fn negative(&self, e: f32) -> f32 {
+        let log_h = self.log_h_ref + (e.max(1e-12) / GREY).log10();
+        (self.layer.density(log_h) - self.layer.d_min()).max(0.0)
+    }
+
+    /// The scene light `e` from a density above base plus fog: [`MonoModel::negative`]
+    /// backwards.
+    pub fn exposure(&self, density_above_d_min: f32) -> f32 {
+        let log_h = self
+            .layer
+            .log_exposure(self.layer.d_min() + density_above_d_min);
+        GREY * 10f32.powf(log_h - self.log_h_ref)
     }
 }
 

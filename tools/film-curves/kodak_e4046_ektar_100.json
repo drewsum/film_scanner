@@ -1,0 +1,40 @@
+{
+  "source": {
+    "film": "KODAK PROFESSIONAL EKTAR 100 Film",
+    "publication": "E-4046",
+    "edition": "January 2025",
+    "url": "https://www.kodakprofessional.com/sites/default/files/2025-07/e4046.pdf",
+    "sha256": "38a41d47ad006cd563793033f83c8f9ef6cdd3c8300695c31facfc71d368f8db"
+  },
+  "notes": [
+    "Characteristic curves: daylight exposure, Status M densitometry, Log H ref -0.84.",
+    "Spectral sensitivity: daylight, effective exposure 1/25 s, Status M, density 0.2 above",
+    "D-min. Spectral dye density: typical densities of a midscale neutral subject and D-min.",
+    "",
+    "Page coordinates: the plots' axes are calibrated from their tick marks (the `x` and `y`",
+    "pairs in the config), which agree with the plot frames to 0.02 pt."
+  ],
+  "page": 3,
+  "log_h_ref": -0.84,
+  "plots": {
+    "characteristic": {
+      "x": [[118.086, -2.0], [228.805, 1.0]],
+      "y": [[246.303, 1.0], [154.030, 3.0]],
+      "curves": { "blue": [31], "green": [32], "red": [33] },
+      "sample": { "start": -2.8, "step": 0.05, "end": 1.15 }
+    },
+    "sensitivity": {
+      "x": [[94.251, 300.0], [254.590, 700.0]],
+      "y": [[457.561, 1.0], [407.034, 2.0]],
+      "floor": 0.0,
+      "curves": { "yellow": [48], "magenta": [49], "cyan": [50] },
+      "sample": { "start": 360.0, "step": 5.0, "end": 700.0 }
+    },
+    "dye_density": {
+      "x": [[388.184, 450.0], [511.045, 650.0]],
+      "y": [[253.544, 0.5], [142.872, 2.0]],
+      "curves": { "midscale": [67], "minimum": [68] },
+      "sample": { "start": 400.0, "step": 5.0, "end": 685.0 }
+    }
+  }
+}

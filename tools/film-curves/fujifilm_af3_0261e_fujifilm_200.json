@@ -1,0 +1,51 @@
+{
+  "source": {
+    "publisher": "FUJIFILM",
+    "film": "FUJIFILM 200 Color Negative Film",
+    "publication": "AF3-0261E",
+    "edition": "9 February 2022",
+    "url": "https://www.ishootfujifilm.com/uploads/FUJIFILM%20200%20Data%20Sheet.pdf",
+    "sha256": "afd2ef317d21e119545b4401f10b6438312f61dcab82e28ee609724a8b0dcc02"
+  },
+  "notes": [
+    "Characteristic curves: daylight, 1/125 s, Process CN-16 (Fujifilm's C-41), Status M",
+    "densitometry. Fujifilm draws each as a few smooth Bézier segments. The sheet gives no",
+    "Log H ref: -1.14 is assumed, where Kodak's ISO 200 sheets put a grey card (log10(0.8 /",
+    "200) + 1.26).",
+    "",
+    "Spectral sensitivity: CN-16, Status M, density 1.0 above D-min. Fujifilm plots it",
+    "relative: the log axis has a 1.0 scale bar but no zero, so its gridlines are numbered 2",
+    "and 3 here, arbitrarily. Only the curves' shapes and their offsets from each other are",
+    "used (each layer is normalised to daylight on white). The curves stop where Fujifilm",
+    "stops drawing them.",
+    "",
+    "Spectral dye density: typical densities of a mid-scale neutral subject and D-min. The",
+    "700 nm gridline is drawn 1.6 pt off the others' spacing; the axis is calibrated from 400",
+    "and 600 nm.",
+    "",
+    "Page coordinates: the plots' axes are calibrated from their gridlines."
+  ],
+  "page": 4,
+  "log_h_ref": -1.14,
+  "sensitivity_density": 1.0,
+  "plots": {
+    "characteristic": {
+      "x": [[110.910, -3.0], [263.124, 0.0]],
+      "y": [[304.584, 0.0], [101.633, 4.0]],
+      "curves": { "blue": [37], "green": [35], "red": [36] },
+      "sample": { "start": -3.6, "step": 0.05, "end": 0.25 }
+    },
+    "sensitivity": {
+      "x": [[374.817, 400.0], [572.115, 700.0]],
+      "y": [[229.190, 2.0], [163.425, 3.0]],
+      "curves": { "yellow": [67], "magenta": [65], "cyan": [66] },
+      "sample": { "start": 360.0, "step": 5.0, "end": 700.0 }
+    },
+    "dye_density": {
+      "x": [[71.090, 400.0], [207.870, 600.0]],
+      "y": [[545.785, 0.0], [412.342, 2.0]],
+      "curves": { "midscale": [53], "minimum": [54] },
+      "sample": { "start": 405.0, "step": 5.0, "end": 715.0 }
+    }
+  }
+}

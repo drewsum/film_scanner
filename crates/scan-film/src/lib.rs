@@ -3,8 +3,8 @@
 //!
 //! - [`sheet`] holds a datasheet's curves as published, and [`sheets`] the datasheets,
 //!   generated from their PDFs.
-//! - [`stock`] is the films offered, each pointing at the data that describes it (see
-//!   [`stocks`] for their provenance).
+//! - [`stock`] is the films offered (color, and black-and-white as [`MonoStock`]), each
+//!   pointing at the data that describes it (see [`stocks`] for their provenance).
 //! - [`model`] runs a film forwards and backwards through its characteristic curves, and
 //!   fits its color from its spectral sensitivities ([`spectral`] has the color science).
 //! - [`render`] turns a scan of a negative into a positive.
@@ -22,9 +22,9 @@ pub mod spectral;
 pub mod stock;
 pub mod stocks;
 
-pub use model::FilmModel;
+pub use model::{FilmModel, MonoModel};
 pub use render::{Inverter, Mono, Printing, Rendering, Tone, Toning, auto_printing};
-pub use stock::{FilmKind, FilmStock};
+pub use stock::{FilmKind, FilmStock, MonoStock};
 
 #[cfg(test)]
 mod tests;

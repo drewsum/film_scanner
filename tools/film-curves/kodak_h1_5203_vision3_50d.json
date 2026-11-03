@@ -1,0 +1,50 @@
+{
+  "source": {
+    "film": "KODAK VISION3 50D Color Negative Film 5203 / 7203",
+    "publication": "H-1-5203t",
+    "edition": "July 2015",
+    "url": "https://juneleung.github.io/filmdoc/Kodak/CrNeg/5203_ti2657.pdf",
+    "sha256": "adf0dedd974323b4e5d53a54023cd72bc85f447f5f814eb7882774c145d10eeb"
+  },
+  "notes": [
+    "Kodak's own servers carry this edition only in Spanish and Portuguese (TI-2657); the URL",
+    "is an archive of the English one.",
+    "",
+    "Sensitometric curves: 5500 K daylight, 1/50 s, Process ECN-2, Status M densitometry. The",
+    "exposure axis is calibrated from the camera-stop ticks, one stop being 0.301 log H, with",
+    "stop 0 at log H -0.515 as labelled: the grey card's exposure at EI 50, so Log H ref. The",
+    "plot's lux-second labels at its ends (-3.03 and 2.006) would make a stop 0.315: they are",
+    "not used. -0.515 agrees with the ISO relation of Kodak's still films (log10(0.8 / 50) +",
+    "1.26 = -0.54) to 0.03.",
+    "",
+    "Spectral sensitivity (page 4): effective exposure 1/10 s, Process ECN-2, Status M, density",
+    "0.2 above D-min. Spectral dye density (page 5): ECN-2, D-mins subtracted; a midscale",
+    "neutral and the minimum density (drawn dashed, as one continuous path).",
+    "",
+    "Page coordinates: the plots' axes are calibrated from their tick marks."
+  ],
+  "page": 3,
+  "log_h_ref": -0.515,
+  "plots": {
+    "characteristic": {
+      "x": [[367.636, -2.62221], [529.052, 1.59221]],
+      "y": [[244.705, 1.0], [182.554, 2.0]],
+      "curves": { "blue": [76], "green": [75], "red": [74] },
+      "sample": { "start": -2.9, "step": 0.05, "end": 1.85 }
+    },
+    "sensitivity": {
+      "x": [[372.710, 300.0], [533.204, 700.0]],
+      "y": [[627.829, 1.0], [552.105, 3.0]],
+      "floor": 0.0,
+      "curves": { "yellow": [93], "magenta": [91], "cyan": [92] },
+      "sample": { "start": 360.0, "step": 5.0, "end": 700.0 }
+    },
+    "dye_density": {
+      "page": 4,
+      "x": [[104.437, 450.0], [242.734, 750.0]],
+      "y": [[338.819, 0.0], [191.324, 1.6]],
+      "curves": { "midscale": [33], "minimum": [32] },
+      "sample": { "start": 400.0, "step": 5.0, "end": 750.0 }
+    }
+  }
+}

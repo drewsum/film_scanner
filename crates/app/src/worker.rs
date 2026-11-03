@@ -573,6 +573,7 @@ mod tests {
         let film = Film {
             film_type: crate::state::FilmType::ColorNegative,
             stock: scan_film::stock::default_stock(),
+            mono_stock: None,
             base,
             printing: Default::default(),
             mono: Default::default(),

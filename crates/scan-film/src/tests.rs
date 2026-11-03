@@ -1,8 +1,14 @@
+use std::ops::RangeInclusive;
+
 use crate::model::{FilmModel, GREY, MIN_GAMMA};
 use crate::render::{
     BW_GAMMA, BW_GREY_DENSITY, Inverter, Mono, Printing, Rendering, Tone, Toning, auto_printing,
 };
+use crate::sheet::Datasheet;
 use crate::sheets::kodak_e7022::SHEET;
+use crate::sheets::{
+    generic_c41, kodak_e4046_ektar_100, kodak_e4050_portra_400, kodak_e7023_ultramax_400,
+};
 use crate::stock;
 
 fn model() -> &'static FilmModel {
@@ -20,7 +26,7 @@ fn scanned(model: &FilmModel, base: [f32; 3], e: [f32; 3]) -> [f32; 3] {
 fn black_and_white_negatives_print_grey_and_in_order() {
     let base = [0.7, 0.68, 0.66];
     let mono = Mono::default();
-    let inverter = Inverter::black_and_white(base, &Printing::default(), &mono);
+    let inverter = Inverter::black_and_white(base, &Printing::default(), &mono, None);
     assert!(inverter.is_mono() && !inverter.separable());
     // A grey card's density above base prints as a grey card does.
     let card: [f32; 3] = std::array::from_fn(|c| base[c] * 10f32.powf(-BW_GREY_DENSITY));
@@ -39,7 +45,7 @@ fn black_and_white_negatives_print_grey_and_in_order() {
         balance_ev: [0.5, 0.0, -0.5],
         ..Printing::default()
     };
-    let t = Inverter::black_and_white(base, &tinted, &mono).pixel(card);
+    let t = Inverter::black_and_white(base, &tinted, &mono, None).pixel(card);
     assert!((t[0] - t[2]).abs() < 1e-6);
 }
 
@@ -51,7 +57,7 @@ fn black_and_white_mixes_and_tones() {
         mix: [2.0, 0.0, 0.0],
         ..Mono::default()
     };
-    let inverter = Inverter::black_and_white(base, &Printing::default(), &red);
+    let inverter = Inverter::black_and_white(base, &Printing::default(), &red, None);
     let a = inverter.pixel([0.1, 0.3, 0.05]);
     let b = inverter.pixel([0.1, 0.02, 0.6]);
     assert!((a[0] - b[0]).abs() < 1e-6);
@@ -61,7 +67,7 @@ fn black_and_white_mixes_and_tones() {
         toning_amount: 1.0,
         ..Mono::default()
     };
-    let toned = Inverter::black_and_white(base, &Printing::default(), &sepia);
+    let toned = Inverter::black_and_white(base, &Printing::default(), &sepia, None);
     let mid = toned.pixel([0.7 * 10f32.powf(-BW_GREY_DENSITY); 3]);
     assert!(mid[0] > mid[1] && mid[1] > mid[2], "{mid:?}");
     let white = toned.display([1e6; 3]);
@@ -99,33 +105,85 @@ fn slides_pass_their_light_through() {
     assert!((punchy.pixel([GREY; 3])[0] - grey).abs() < 1e-5);
 }
 
+/// The red density of a grey card exposed at a sheet's Log H ref, and of the lightest step
+/// of a paper grey scale (about 90% reflectance, five times the card).
+fn card_and_white(sheet: &Datasheet) -> (f32, f32) {
+    let red = &sheet.characteristic[0];
+    (
+        red.at(sheet.log_h_ref),
+        red.at(sheet.log_h_ref + (0.9f32 / GREY).log10()),
+    )
+}
+
 #[test]
-fn extracted_curves_agree_with_kodaks_exposure_check() {
-    // E-7022, "Judging negative exposures": what a normally exposed grey card, and the
-    // lightest step of a paper grey scale (about 90% reflectance, five times the card),
-    // read through the Status M red filter.
+fn extracted_curves_agree_with_the_sheets_exposure_checks() {
+    // Each sheet's "Judging negative exposures": what a normally exposed grey card, and
+    // the lightest step of a paper grey scale, read through the Status M red filter. The
+    // last column is how far outside them the sheet's own curves may be: E-4046 and E-4050
+    // print the same check word for word, and their curves sit 0.02 to 0.09 denser (see
+    // the stocks' modules); AF3-0262E's Log H ref is assumed, and lands 0.01 off its check.
     let checks = [
-        ("kodak-kodacolor-200", 0.85..=1.05, 1.25..=1.45),
-        ("kodak-gold-200", 0.85..=1.05, 1.25..=1.45),
-        ("kodak-gold-100", 0.90..=1.10, 1.30..=1.50),
+        ("kodak-kodacolor-200", 0.85..=1.05, Some(1.25..=1.45), 0.0),
+        ("kodak-gold-200", 0.85..=1.05, Some(1.25..=1.45), 0.0),
+        ("kodak-gold-100", 0.90..=1.10, Some(1.30..=1.50), 0.0),
+        ("kodak-ektar-100", 0.77..=0.87, Some(1.13..=1.23), 0.09),
+        ("kodak-portra-400", 0.77..=0.87, Some(1.13..=1.23), 0.05),
+        ("kodak-ultramax-400", 0.80..=1.00, Some(1.20..=1.40), 0.0),
+        ("fujifilm-400", 0.75..=0.95, None, 0.02),
     ];
-    for (id, card_range, white_range) in checks {
-        let sheet = stock::by_id(id).unwrap().sheet;
-        let red = &sheet.characteristic[0];
-        let card = red.at(sheet.log_h_ref);
-        let white = red.at(sheet.log_h_ref + (0.9f32 / GREY).log10());
-        assert!(card_range.contains(&card), "{id}: grey card {card}");
-        assert!(white_range.contains(&white), "{id}: paper white {white}");
+    let within = |range: &RangeInclusive<f32>, v: f32, slack: f32| {
+        (*range.start() - slack..=*range.end() + slack).contains(&v)
+    };
+    for (id, card_range, white_range, slack) in &checks {
+        let (card, white) = card_and_white(stock::by_id(id).unwrap().sheet);
+        assert!(within(card_range, card, *slack), "{id}: grey card {card}");
+        if let Some(range) = white_range {
+            assert!(within(range, white, *slack), "{id}: paper white {white}");
+        }
     }
-    assert_eq!(
-        stock::all().len(),
-        3,
-        "a new stock needs its exposure check here"
-    );
+    // Sheets without such a check: Log H ref within a third of a stop of where Kodak's
+    // still-film sheets put a grey card for the sheet's own speed S, log10(0.8 / S) + 1.26
+    // (Gold 200: -1.14 at 200; Portra 400: -1.44 at 400).
+    let by_speed = [
+        ("cinestill-50d", 50.0),
+        ("reto-amber-d100", 50.0),
+        ("cinestill-400d", 250.0),
+        ("cinestill-800t", 500.0),
+        ("flic-film-elektra-100", 100.0),
+        ("fujifilm-200", 200.0),
+        ("harman-phoenix-200", 200.0),
+        ("harman-phoenix-ii-200", 200.0),
+    ];
+    for (id, speed) in by_speed {
+        let sheet = stock::by_id(id).unwrap().sheet;
+        let expected = (0.8f32 / speed).log10() + 1.26;
+        assert!(
+            (sheet.log_h_ref - expected).abs() < 0.1,
+            "{id}: Log H ref {} against {expected}",
+            sheet.log_h_ref
+        );
+        let (card, white) = card_and_white(sheet);
+        assert!((0.8..=1.05).contains(&card), "{id}: grey card {card}");
+        assert!(white > card + 0.3, "{id}: paper white {white}");
+    }
+    for stock in stock::all() {
+        assert!(
+            checks.iter().any(|c| c.0 == stock.id) || by_speed.iter().any(|c| c.0 == stock.id),
+            "{} needs its exposure check here",
+            stock.id
+        );
+    }
 }
 
 #[test]
 fn layers_peak_where_their_colors_are() {
+    // Films without an orange mask: Aerocolor (Elektra 100), whose sheet says so, and
+    // Harman's, on the generic profile.
+    let unmasked = [
+        "flic-film-elektra-100",
+        "harman-phoenix-200",
+        "harman-phoenix-ii-200",
+    ];
     for stock in stock::all() {
         let sheet = stock.sheet;
         let peak = |c: usize| {
@@ -136,13 +194,93 @@ fn layers_peak_where_their_colors_are() {
                 .unwrap()
                 .1
         };
-        assert!((630.0..=670.0).contains(&peak(0)), "red {}", peak(0));
-        assert!((530.0..=570.0).contains(&peak(1)), "green {}", peak(1));
-        assert!((430.0..=480.0).contains(&peak(2)), "blue {}", peak(2));
-        // D-min is the orange mask: blue densest, red least.
+        let id = stock.id;
+        assert!((630.0..=670.0).contains(&peak(0)), "{id}: red {}", peak(0));
+        assert!(
+            (530.0..=570.0).contains(&peak(1)),
+            "{id}: green {}",
+            peak(1)
+        );
+        // Tungsten film's blue layer peaks lower, where tungsten light has least.
+        assert!((395.0..=480.0).contains(&peak(2)), "{id}: blue {}", peak(2));
         let d = sheet.d_min();
-        assert!(d[2] > d[1] && d[1] > d[0], "{}: {d:?}", stock.id);
+        if unmasked.contains(&id) {
+            // Without a mask, the base is near neutral.
+            assert!(d[2] - d[0] < 0.2, "{id}: {d:?}");
+        } else {
+            // D-min is the orange mask: blue densest, red least.
+            assert!(d[2] > d[1] && d[1] > d[0], "{id}: {d:?}");
+        }
     }
+}
+
+#[test]
+fn the_generic_film_is_the_kodak_sheets_typical_curve() {
+    let generic = &generic_c41::SHEET;
+    let members = [
+        &SHEET,
+        &kodak_e4046_ektar_100::SHEET,
+        &kodak_e4050_portra_400::SHEET,
+        &kodak_e7023_ultramax_400::SHEET,
+    ];
+    let g = &generic.characteristic[0];
+    for c in 1..3 {
+        assert_eq!(generic.characteristic[c].values, g.values);
+    }
+    // Its density, stop by stop from a grey card's, is the members' mean.
+    for stops in [-5, -2, 2, 5] {
+        let rel = stops as f32 * std::f32::consts::LOG10_2;
+        let mine = g.at(generic.log_h_ref + rel) - g.at(generic.log_h_ref);
+        let mean = members
+            .iter()
+            .flat_map(|s| {
+                s.characteristic
+                    .iter()
+                    .map(move |c| c.at(s.log_h_ref + rel) - c.at(s.log_h_ref))
+            })
+            .sum::<f32>()
+            / 12.0;
+        assert!((mine - mean).abs() < 2e-3, "{stops}: {mine} vs {mean}");
+    }
+}
+
+#[test]
+fn black_and_white_film_inverts_on_its_curve() {
+    let hp5 = stock::mono_by_id("ilford-hp5-plus").unwrap();
+    assert_eq!(hp5.display_name(), "Ilford HP5 Plus");
+    assert!(stock::mono_by_id("nonesuch").is_none());
+    let film = hp5.model();
+    // Base plus fog as printed, and the film runs back to the scene.
+    assert!((film.d_min() - 0.17).abs() < 0.01, "{}", film.d_min());
+    for e in [0.01, 0.05, GREY, 0.9, 5.0] {
+        let d = film.negative(e);
+        assert!((film.exposure(d) / e - 1.0).abs() < 1e-3, "{e} -> {d}");
+    }
+    let card = film.negative(GREY);
+    assert!((0.5..0.75).contains(&card), "{card}");
+    // HP5's gamma on its straight line, about 0.65.
+    let gamma = (film.negative(GREY * 4.0) - card) / 4f32.log10();
+    assert!((0.55..0.75).contains(&gamma), "{gamma}");
+    // A grey card on the film prints as a grey card does.
+    let base = [0.7, 0.68, 0.66];
+    let inverter =
+        Inverter::black_and_white(base, &Printing::default(), &Mono::default(), Some(film));
+    assert!(inverter.is_mono());
+    let lights: [f32; 3] = std::array::from_fn(|c| base[c] * 10f32.powf(-card));
+    let grey = Inverter::new(model(), [0.5; 3], &Printing::default()).display_channel(GREY);
+    for v in inverter.pixel(lights) {
+        assert!((v - grey).abs() < 1e-3, "{v} vs {grey}");
+    }
+}
+
+#[test]
+fn every_stock_has_its_own_id() {
+    let mut ids: Vec<&str> = stock::all().iter().map(|s| s.id).collect();
+    ids.extend(stock::mono_all().iter().map(|s| s.id));
+    let n = ids.len();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), n);
 }
 
 #[test]
