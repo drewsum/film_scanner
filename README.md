@@ -164,8 +164,23 @@ the bare film base, which frame detection measures on every film scan.
 | Film stock | Data |
 |---|---|
 | Kodak Kodacolor 200 | No datasheet exists (it is reported to be ColorPlus 200 renamed, which has none either); uses Kodak Gold 200's, E-7022 |
+| CineStill 50D | None published; uses Kodak VISION3 50D's (H-1-5203t), the film it is reported to be without rem-jet |
+| CineStill 400D | None published; uses Kodak VISION3 250D's (H-1-5207t), which it is reported to be built on |
+| CineStill 800T | None published; uses Kodak VISION3 500T's (H-1-5219t), the film it is reported to be without rem-jet |
+| Flic Film Elektra 100 | None published; uses Kodak AEROCOLOR IV 2460's (AS-2652), the aerial film it is reported to be. No orange mask |
+| Fujifilm 200 | Its own datasheet, AF3-0261E (2022) |
+| Fujifilm 400 | Its own datasheet, AF3-0262E (2023) |
+| Harman Phoenix 200, Phoenix II 200 | None published: **generic**, a typical C-41 film averaged from four Kodak datasheets |
+| Kodak Ektar 100 | Its own datasheet, E-4046 (2025) |
 | Kodak Gold 100 | Its own datasheet, E-7022 (2007 edition) |
 | Kodak Gold 200 | Its own datasheet, E-7022 (2016) |
+| Kodak Portra 400 | Its own datasheet, E-4050 (2025) |
+| Kodak UltraMax 400 | Its own datasheet, E-7023 (2016) |
+| Reto Amber D100 | None published; uses Kodak VISION3 50D's (H-1-5203t), the film it is reported to be without rem-jet |
+| Ilford HP5 Plus (black-and-white) | Its own datasheet, Ilford technical information (2010 edition) |
+
+The motion picture films' curves are for ECN-2; developed in C-41, as CineStill and Reto
+sell them, they have more contrast than the curves predict.
 
 The step has the film stock, exposure and color balance in stops (like a photofinisher's
 printer), contrast, and *Print* or *Colorimetric* color. *Auto* balances the roll as a
@@ -173,13 +188,15 @@ printer does: each frame's average is taken as grey, and the roll gets the media
 frames' corrections. The view, *Save as TIFF* and *Save frames as TIFF* all give positives
 (16-bit sRGB) while *Make positives* is on.
 
-Two other kinds of film have no profiles yet, and are printed without one:
+Two other kinds of film are inverted differently:
 
-- **Black-and-white negatives** are inverted on a generic black-and-white film's straight
-  line, against the measured film base. *Grey from* picks which of the scan's channels
-  make the grey (all of them is the least noisy), and *Toning* tints the print sepia,
-  selenium or blue.
-- **Slides** are printed as they are, with the printing's exposure, balance and contrast.
+- **Black-and-white negatives** are inverted against the measured film base on their
+  film's characteristic curve (Ilford HP5 Plus), or a generic black-and-white film's
+  straight line for any other film. *Grey from* picks which of the scan's channels make
+  the grey (all of them is the least noisy), and *Toning* tints the print sepia, selenium
+  or blue.
+- **Slides** have no profiles yet: they are printed as they are, with the printing's
+  exposure, balance and contrast.
 
 How profiles work, and how to add a stock, is in
 [docs/film-profiles.md](docs/film-profiles.md). `cargo run -p scan-film --example profile`

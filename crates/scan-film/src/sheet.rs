@@ -91,6 +91,22 @@ impl Datasheet {
     }
 }
 
+/// What a black-and-white film's technical datasheet tells: one characteristic curve, of
+/// silver, which every color sees alike.
+#[derive(Clone, Copy, Debug)]
+pub struct MonoDatasheet {
+    pub film: &'static str,
+    pub publication: &'static str,
+    pub edition: &'static str,
+    pub url: &'static str,
+    /// The exposure of a normally exposed grey card, on the curve's exposure axis.
+    pub log_h_ref: f32,
+    /// Density against log exposure, for the development the sheet states. The exposure
+    /// axis may be relative (from an arbitrary zero), as many black-and-white sheets draw
+    /// it: only differences from `log_h_ref` are used.
+    pub characteristic: Curve,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

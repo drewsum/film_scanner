@@ -6,6 +6,9 @@ is made of, and how to add one. The code is in `crates/scan-film`; the image-lev
 
 The rule for every profile: **its numbers come from the manufacturer's published data, read
 exactly, and every assumption is written down in the stock's module.** Nothing is tuned by eye.
+The one exception is labelled as such: films whose makers publish no curves at all, and that
+aren't reported to be any documented film (Harman Phoenix), get a **generic** profile, the
+mean of several published sheets (see below).
 
 ## What a color negative is
 
@@ -71,15 +74,23 @@ full resolution: the whole scan, or each frame after it is cut out and straighte
 
 ## Reading a datasheet: `tools/film-curves`
 
-Kodak's datasheets draw their curves as vector paths in the PDF, so they can be read back to a
-fraction of the line width instead of being traced off a picture.
+Kodak's, Fujifilm's and Ilford's datasheets draw their curves as vector paths in the PDF
+(in most editions), so they can be read back to a fraction of the line width instead of being
+traced off a picture. Where a maker's current edition prints its curves as pictures, an older
+edition that draws them as vectors is used, if its curves are for the same film and process.
 `tools/film-curves/extract_curves.py` does this from a JSON config per datasheet edition:
 
-- `source`: the film, publication, edition, URL and the PDF's SHA-256. The script refuses a
-  PDF with any other hash, so the tables can only come from the edition the config describes.
+- `source`: the film, publication, edition, URL and the PDF's SHA-256, and the `publisher`
+  (KODAK unless given). The script refuses a PDF with any other hash, so the tables can only
+  come from the edition the config describes.
 - `notes`: what the sheet says about its conditions, and anything we had to interpret.
-- `page`, `log_h_ref`.
-- `plots`: for each of `characteristic`, `sensitivity` and `dye_density`:
+- `page`, `log_h_ref`; optionally `exposure` (the characteristic curves' light, `daylight`
+  unless given) and `sensitivity_density` (the density the spectral sensitivities are for,
+  0.2 unless given).
+- `kind: "mono"` for a black-and-white sheet: one characteristic curve, `neutral`, written
+  as a `MonoDatasheet`, with `densitometry` and `exposure_axis` describing its axes.
+- `plots`: for each of `characteristic`, `sensitivity` and `dye_density`, with its own `page`
+  if it isn't on the config's:
   - `x` and `y`: two `[page coordinate, value]` pairs per axis, taken from **tick marks**.
   - `curves`: which paths are which curve. A path is given as its index, a range
     `[first, last]` of consecutive paths (Kodak draws the sensitivity curves in short
@@ -90,17 +101,47 @@ fraction of the line width instead of being traced off a picture.
     `None`.
   - `sample`: the grid the curve is written on (0.05 log H; 5 nm).
 
-The datasheet PDFs themselves are Kodak's and are not in the repository; the config's URL and
-hash say exactly which file to fetch.
+The datasheet PDFs themselves are the manufacturers' and are not in the repository; the
+config's URL and hash say exactly which file to fetch.
+
+`overlay CONFIG.json SHEET.pdf OUT` draws every sample `rust` would write as a dot over the
+sheet's pages (`OUT-PAGE.png`): every new config should be checked this way, curve by curve.
+
+### Sheets that aren't Kodak's still-film layout
+
+- **Motion picture (VISION3) sheets** label the exposure axis in lux-seconds at a few
+  points, not always evenly; their camera-stop ticks are even. The axis is calibrated from
+  the stop ticks (one stop = log10 2), with Log H ref at stop 0, where the sheet's own
+  label puts the grey card at the film's exposure index. Their curves are for ECN-2.
+- **Fujifilm** sheets give no Log H ref, and plot spectral sensitivity relative (a 1.0 scale
+  bar with no zero). The ISO relation of Kodak's sheets, `log10(0.8 / S) + 1.26`, places
+  the grey card; the sensitivity axis is given an arbitrary zero, which the colorimetric
+  fit doesn't see, since it normalises each layer to daylight on white.
+- **Aerial film** (AEROCOLOR) has no pictorial speed; Log H ref comes from the ISO relation
+  for the speed it is sold at.
+- **Black-and-white** sheets (Ilford) plot relative log exposure; Log H ref is taken 1.01
+  above the speed point (0.1 above base plus fog), where ISO 6 puts a metered midtone.
+
+### The generic film
+
+`generic CONFIG.json PDF_DIR` averages several sheets into a typical film, for films with no
+published curves and no documented relative (`generic_c41.json`): every layer of every sheet
+as density above its D-min, against log exposure from its Log H ref, averaged into one curve
+shared by all three layers, placed at the config's Log H ref; the spectral curves are the
+sheets' means. Its module says so, and so does every stock that uses it.
 
 ### Checks to make on a new sheet
 
 - **The axes:** the ticks used must agree with the plot frame (the extractor's `list` command
   prints every straight line and frame), to a few hundredths of a point.
 - **The sheet's own numbers:** Kodak's "Judging negative exposures" table gives the red
-  density of a normally exposed grey card and of a white paper grey-scale step. The extracted
-  red curve at Log H ref, and 0.70 above it, must fall in those ranges. This is a test in
-  `crates/scan-film/src/tests.rs`, one row per stock.
+  density of a normally exposed grey card and of a white paper grey-scale step (Fujifilm's
+  gives the card). The extracted red curve at Log H ref, and 0.70 above it, must fall in
+  those ranges. This is a test in `crates/scan-film/src/tests.rs`, one row per stock. Not
+  every sheet agrees with itself: Ektar 100's and Portra 400's curves sit up to 0.09 denser
+  than the check their sheets share; such a row says how far, and the stock's module why.
+  Sheets with no check (motion picture, aerial, Fujifilm 200, the generic film) are held to
+  the ISO relation for their speed instead, within a third of a stop.
 - **Another edition**, if there is one: reading the same film from a different layout must
   give the same curves. Gold 200's 2007 and 2016 editions agree to 0.003.
 - `cargo run -p scan-film --example profile STOCK_ID` prints the profile: density by stops
@@ -122,8 +163,9 @@ hash say exactly which file to fetch.
    where every number comes from, what is measured instead of assumed, and what differences
    to watch for. `id` is kept in users' settings: never change it once released. Add it to
    `ALL` in `stocks.rs`.
-5. **Add its exposure check** to `extracted_curves_agree_with_kodaks_exposure_check`, run the
-   tests, and look at the `profile` example's output.
+5. **Add its exposure check** to `extracted_curves_agree_with_the_sheets_exposure_checks`,
+   run the tests, and look at the `profile` example's output.
+   A black-and-white stock is a `MonoStock`, added to `MONO` in `stocks.rs`.
 6. **Try it on real film** if you have some, and record what the app shows for the film base
    density next to the datasheet's D-min.
 
@@ -144,4 +186,5 @@ It prints the film base against D-min, each frame's densities above base against
 stock's grey card and white, each frame's color offsets, and how much they change with
 level (crossover).
 - **Print paper isn't modelled:** the tone curve is print-like, not a particular paper's.
-- **Color negative only:** black-and-white and slide film need their own models.
+- **Black-and-white** films have one curve and no spectral data: every channel of the scan
+  is inverted on the same curve, then mixed to grey. **Slides** have no profiles yet.

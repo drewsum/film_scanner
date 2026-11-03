@@ -1,0 +1,40 @@
+{
+  "source": {
+    "film": "KODAK PROFESSIONAL PORTRA 400 Film",
+    "publication": "E-4050",
+    "edition": "January 2025",
+    "url": "https://kodakprofessional.com/sites/default/files/2025-07/e4050.pdf",
+    "sha256": "70b15171673c5d01505f58ace448995ad72acbe5e401d1966563a61ac0712838"
+  },
+  "notes": [
+    "Characteristic curves: daylight exposure, Status M densitometry, Log H ref -1.44.",
+    "Spectral sensitivity: daylight, effective exposure 1/50 s, Status M, density 0.2 above",
+    "D-min. Spectral dye density: typical densities of a midscale neutral subject and D-min.",
+    "",
+    "Page coordinates: the plots' axes are calibrated from their tick marks (the `x` and `y`",
+    "pairs in the config), which agree with the plot frames to 0.02 pt."
+  ],
+  "page": 3,
+  "log_h_ref": -1.44,
+  "plots": {
+    "characteristic": {
+      "x": [[118.047, -3.0], [228.742, 0.0]],
+      "y": [[241.254, 1.0], [148.966, 3.0]],
+      "curves": { "blue": [34], "green": [35], "red": [36] },
+      "sample": { "start": -3.4, "step": 0.05, "end": 0.55 }
+    },
+    "sensitivity": {
+      "x": [[96.248, 300.0], [256.651, 700.0]],
+      "y": [[456.668, 1.0], [380.946, 3.0]],
+      "floor": 0.0,
+      "curves": { "yellow": [52], "magenta": [54], "cyan": [53] },
+      "sample": { "start": 360.0, "step": 5.0, "end": 700.0 }
+    },
+    "dye_density": {
+      "x": [[387.937, 450.0], [510.993, 650.0]],
+      "y": [[251.204, 0.5], [140.568, 2.0]],
+      "curves": { "midscale": [68], "minimum": [69] },
+      "sample": { "start": 400.0, "step": 5.0, "end": 695.0 }
+    }
+  }
+}

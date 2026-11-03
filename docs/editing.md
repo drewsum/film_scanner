@@ -79,14 +79,15 @@ sized by the frame instead, so they look the same at any size.
 
 ## Black-and-white negatives and slides
 
-Neither has a film profile yet. A **black-and-white negative** is inverted against its
-measured film base on a generic black-and-white film's straight line (a grey card at
-density 0.75 above base, gamma 0.62), each channel on its own, then mixed to grey by
+A **black-and-white negative** is inverted against its measured film base on its film's
+characteristic curve when the film has a profile (Ilford HP5 Plus), or otherwise on a
+generic black-and-white film's straight line (a grey card at density 0.75 above base,
+gamma 0.62), each channel on its own, then mixed to grey by
 *Grey from*, printed through the same tone curve as color film, and toned: each channel's
 print value is raised to a power, so black and white stay and the midtones take the tint.
 Color balance, temperature and tint don't apply. A **slide** is printed as it is: the
 light through it, with the printing's exposure and balance, is the scene's, and the
-printing's contrast steepens or flattens it about grey.
+printing's contrast steepens or flattens it about grey. Slides have no profiles yet.
 
 ## Auto and the pickers
 

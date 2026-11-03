@@ -1,0 +1,28 @@
+{
+  "source": {
+    "film": "Typical C-41 color negative film",
+    "publication": "E-7022, E-4046, E-4050 and E-7023, averaged",
+    "edition": "2016 to 2025",
+    "url": "https://github.com/drewsum/film_scanner/blob/main/tools/film-curves/generic_c41.json"
+  },
+  "notes": [
+    "The four are the current daylight still films of one maker, made for the same process",
+    "and papers, from 100 to 400 speed, consumer and professional.",
+    "",
+    "Log H ref -1.14 places the curve for an ISO 200 film, as Kodak's sheets do (log10(0.8 /",
+    "200) + 1.26, as on Gold 200's). Every layer has the same curve and D-min, as a film with",
+    "no orange mask has. The spectral sensitivities are the sheets' mean, so the colorimetric",
+    "rendering is a typical film's. The dye densities are the masked films' mean, which an",
+    "unmasked film doesn't have; nothing uses them yet."
+  ],
+  "log_h_ref": -1.14,
+  "average_of": [
+    { "config": "kodak_e7022.json", "pdf": "E7022_Gold_200.pdf" },
+    { "config": "kodak_e4046_ektar_100.json", "pdf": "e4046.pdf" },
+    { "config": "kodak_e4050_portra_400.json", "pdf": "e4050.pdf" },
+    { "config": "kodak_e7023_ultramax_400.json", "pdf": "E7023_max_400.pdf" }
+  ],
+  "characteristic": { "start": -1.85, "step": 0.05, "end": 1.95 },
+  "sensitivity": { "start": 360.0, "step": 5.0, "end": 700.0 },
+  "dye_density": { "start": 400.0, "step": 5.0, "end": 695.0 }
+}

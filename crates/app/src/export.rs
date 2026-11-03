@@ -5,7 +5,6 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use jiff::civil::Date;
-use scan_film::FilmStock;
 
 /// The file the publisher reads the roll's metadata from, in the folder it uploads.
 pub const METADATA_FILE: &str = "metadata.yml";
@@ -152,14 +151,14 @@ impl RollMetadata {
         ]
     }
 
-    /// Fill in the film from `stock`'s profile. The publisher names films by stock and
-    /// speed apart (`Kodak Gold 200`: stock `Gold`, speed 200), so a speed at the end of
-    /// the profile's name is left off the stock.
-    pub fn fill_film(&mut self, stock: &FilmStock) {
-        let speed = format!(" {}", stock.iso);
-        self.manufacturer = stock.manufacturer.into();
-        self.stock = stock.name.strip_suffix(&speed).unwrap_or(stock.name).into();
-        self.iso = stock.iso.to_string();
+    /// Fill in the film from a profile's maker, name and speed. The publisher names films
+    /// by stock and speed apart (`Kodak Gold 200`: stock `Gold`, speed 200), so a speed at
+    /// the end of the profile's name is left off the stock.
+    pub fn fill_film(&mut self, manufacturer: &str, name: &str, iso: u32) {
+        let speed = format!(" {iso}");
+        self.manufacturer = manufacturer.into();
+        self.stock = name.strip_suffix(&speed).unwrap_or(name).into();
+        self.iso = iso.to_string();
     }
 
     /// Every problem the publisher would refuse the file for, or mangle: none means it

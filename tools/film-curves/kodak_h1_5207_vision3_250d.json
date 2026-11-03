@@ -1,0 +1,49 @@
+{
+  "source": {
+    "film": "KODAK VISION3 250D Color Negative Film 5207 / 7207 / SO-207",
+    "publication": "H-1-5207t",
+    "edition": "April 2009",
+    "url": "https://juneleung.github.io/filmdoc/Kodak/CrNeg/5207-Vision3-250D.pdf",
+    "sha256": "f700fc0e600dcbb27dc08baeffaa18b369e5d43006e730d80b88debf0e7822e6"
+  },
+  "notes": [
+    "The URL is an archive. Kodak's current edition (July 2015) prints its curves as pictures,",
+    "which can't be read exactly; this 2009 edition draws them as vector paths.",
+    "",
+    "Sensitometric curves: 5500 K daylight, 1/50 s, Process ECN-2, Status M densitometry. The",
+    "exposure axis is calibrated from the camera-stop ticks, one stop being 0.301 log H, with",
+    "stop 0 at log H -1.3 as labelled: the grey card's exposure at EI 250, so Log H ref. The",
+    "plot's lux-second ticks agree (-3.1 sits at stop -6, where this calibration puts -3.106).",
+    "",
+    "Spectral sensitivity (page 4): Process ECN-2, Status M, density 0.2 above D-min. Spectral",
+    "dye density (page 4): ECN-2, D-mins subtracted; a midscale neutral and the minimum",
+    "density (drawn dashed, as one continuous path).",
+    "",
+    "Page coordinates: the plots' axes are calibrated from their tick marks."
+  ],
+  "page": 2,
+  "log_h_ref": -1.3,
+  "plots": {
+    "characteristic": {
+      "x": [[380.569, -3.40721], [542.091, 0.80721]],
+      "y": [[213.223, 1.0], [151.725, 2.0]],
+      "curves": { "blue": [31], "green": [30], "red": [32] },
+      "sample": { "start": -3.7, "step": 0.05, "end": 1.1 }
+    },
+    "sensitivity": {
+      "page": 3,
+      "x": [[372.744, 300.0], [533.173, 700.0]],
+      "y": [[170.744, 1.0], [94.916, 3.0]],
+      "floor": 0.0,
+      "curves": { "yellow": [108], "magenta": [109], "cyan": [110] },
+      "sample": { "start": 360.0, "step": 5.0, "end": 700.0 }
+    },
+    "dye_density": {
+      "page": 3,
+      "x": [[400.343, 500.0], [492.539, 700.0]],
+      "y": [[508.122, 0.0], [360.777, 1.6]],
+      "curves": { "midscale": [131], "minimum": [132] },
+      "sample": { "start": 400.0, "step": 5.0, "end": 750.0 }
+    }
+  }
+}

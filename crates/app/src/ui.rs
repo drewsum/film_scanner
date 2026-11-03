@@ -26,6 +26,8 @@ const TURNS_KEY: &str = "quarter_turns";
 /// same next time.
 const STOCK_KEY: &str = "film_stock";
 const FILM_TYPE_KEY: &str = "film_type";
+/// The black-and-white stock's id; empty for the generic curve.
+const MONO_STOCK_KEY: &str = "mono_stock";
 /// The Adjust step's presets, as RON.
 const PRESETS_KEY: &str = "presets";
 
@@ -80,6 +82,10 @@ impl ScannerApp {
         {
             state.invert.stock = stock;
         }
+        state.invert.mono_stock = cc
+            .storage
+            .and_then(|s| s.get_string(MONO_STOCK_KEY))
+            .and_then(|id| scan_film::stock::mono_by_id(&id));
         if let Some(film_type) = cc
             .storage
             .and_then(|s| s.get_string(FILM_TYPE_KEY))
@@ -731,20 +737,37 @@ impl ScannerApp {
                             });
                         ui.end_row();
                     }
+                    if invert.film_type == FilmType::BlackAndWhite {
+                        ui.label("Film stock");
+                        egui::ComboBox::from_id_salt("mono_stock")
+                            .width(200.0)
+                            .selected_text(
+                                invert
+                                    .mono_stock
+                                    .map_or(GENERIC_BW.into(), |s| s.display_name()),
+                            )
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut invert.mono_stock, None, GENERIC_BW)
+                                    .on_hover_text(GENERIC_BW_NOTE);
+                                for &stock in scan_film::stock::mono_all() {
+                                    ui.selectable_value(
+                                        &mut invert.mono_stock,
+                                        Some(stock),
+                                        stock.display_name(),
+                                    )
+                                    .on_hover_text(stock.provenance);
+                                }
+                            });
+                        ui.end_row();
+                    }
                 });
             match invert.film_type {
                 FilmType::ColorNegative => {
                     ui.label(RichText::new(invert.stock.provenance).weak().small());
                 }
                 FilmType::BlackAndWhite => {
-                    ui.label(
-                        RichText::new(
-                            "No film profile yet: inverted on a generic black-and-white \
-                             film's curve. Exposure and contrast set the print.",
-                        )
-                        .weak()
-                        .small(),
-                    );
+                    let note = invert.mono_stock.map_or(GENERIC_BW_NOTE, |s| s.provenance);
+                    ui.label(RichText::new(note).weak().small());
                     mono_controls(ui, &mut invert.mono);
                 }
                 FilmType::Slide => {
@@ -1019,7 +1042,8 @@ impl ScannerApp {
              them to Immich with: run it in the export folder",
         );
         if settings.write_metadata {
-            metadata_fields(ui, &mut self.state.export, self.state.invert.stock);
+            let profile = self.state.invert.profile_film();
+            metadata_fields(ui, &mut self.state.export, profile);
         }
 
         ui.add_space(8.0);
@@ -1138,6 +1162,7 @@ impl ScannerApp {
                     let invert = &self.state.invert;
                     let p = &invert.printing;
                     invert.stock.id.hash(&mut h);
+                    invert.mono_stock.map(|s| s.id).hash(&mut h);
                     invert.film_type.key().hash(&mut h);
                     let m = &invert.mono;
                     (m.toning.label(), m.toning_amount.to_bits()).hash(&mut h);
@@ -1259,10 +1284,17 @@ impl eframe::App for ScannerApp {
         storage.set_string(TURNS_KEY, self.state.quarter_turns.to_string());
         storage.set_string(STOCK_KEY, self.state.invert.stock.id.to_owned());
         storage.set_string(FILM_TYPE_KEY, self.state.invert.film_type.key().to_owned());
+        let mono_stock = self.state.invert.mono_stock.map_or("", |s| s.id);
+        storage.set_string(MONO_STOCK_KEY, mono_stock.to_owned());
         eframe::set_value(storage, PRESETS_KEY, &self.state.presets);
         remember_export(&mut self.state.export, storage);
     }
 }
+
+/// The black-and-white stock choice without a profile, and what it does.
+const GENERIC_BW: &str = "Generic black-and-white";
+const GENERIC_BW_NOTE: &str = "No film profile: inverted on a generic black-and-white film's \
+                               curve. Exposure and contrast set the print.";
 
 /// How black-and-white film is mixed to grey and toned.
 fn mono_controls(ui: &mut egui::Ui, mono: &mut Mono) {
@@ -1325,7 +1357,7 @@ fn mono_controls(ui: &mut egui::Ui, mono: &mut Mono) {
 fn metadata_fields(
     ui: &mut egui::Ui,
     settings: &mut ExportSettings,
-    stock: &'static scan_film::FilmStock,
+    profile: Option<state::ProfileFilm>,
 ) {
     let text = |ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str| {
         ui.label(label);
@@ -1381,12 +1413,13 @@ fn metadata_fields(
                 text(ui, "ISO *", &mut m.iso, "200");
                 text(ui, "Development", &mut m.development_notes, "Lab, C-41");
             });
-            if ui
-                .small_button("From the film profile")
-                .on_hover_text(format!("Fill in {}", stock.display_name()))
-                .clicked()
+            if let Some(p) = profile
+                && ui
+                    .small_button("From the film profile")
+                    .on_hover_text(format!("Fill in {}", p.display_name()))
+                    .clicked()
             {
-                m.fill_film(stock);
+                m.fill_film(p.manufacturer, p.name, p.iso);
             }
         });
     egui::CollapsingHeader::new("Camera")

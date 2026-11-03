@@ -103,6 +103,9 @@ pub struct SavedInvert {
     pub film_type: String,
     /// A film stock's id.
     pub stock: String,
+    /// A black-and-white stock's id, empty for the generic curve.
+    #[serde(default)]
+    pub mono_stock: String,
     pub exposure_ev: f32,
     pub balance_ev: [f32; 3],
     pub contrast: f32,
@@ -170,6 +173,7 @@ impl Roll {
                 enabled: invert.enabled,
                 film_type: invert.film_type.key().into(),
                 stock: invert.stock.id.into(),
+                mono_stock: invert.mono_stock.map_or("", |s| s.id).into(),
                 exposure_ev: p.exposure_ev,
                 balance_ev: p.balance_ev,
                 contrast: p.contrast,
@@ -302,6 +306,7 @@ impl Roll {
         if let Some(stock) = scan_film::stock::by_id(&i.stock) {
             invert.stock = stock;
         }
+        invert.mono_stock = scan_film::stock::mono_by_id(&i.mono_stock);
         invert.printing = Printing {
             exposure_ev: i.exposure_ev,
             balance_ev: i.balance_ev,
@@ -324,7 +329,7 @@ impl Roll {
         state.dust.enabled = self.remove_dust;
         state.dust.strength = self.dust_strength;
         state.export.metadata = self.metadata;
-        state.export.film_from = Some(state.invert.stock.id);
+        state.export.film_from = state.invert.profile_film().map(|p| p.id);
         state.roll_file = Some((path, generation));
         state.forget_settled();
     }

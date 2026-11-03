@@ -1,0 +1,49 @@
+{
+  "source": {
+    "film": "KODAK VISION3 500T Color Negative Film 5219 / 7219 / SO-219",
+    "publication": "H-1-5219t",
+    "edition": "July 2015",
+    "url": "https://www.kodak.com/content/products-brochures/Film/VISION3-500T-Color-Negative-Film-7219-TECHNICAL-DATA.pdf",
+    "sha256": "06eca2287fbaf57a1aeacbb8151bbd48e23aefb30af2114b412e9c1c63f4d1db"
+  },
+  "notes": [
+    "Sensitometric curves: 3200 K tungsten, 1/50 s, Process ECN-2. The plot labels its",
+    "densitometry \"ECN-2\"; the sheet's other plots, and every VISION3 sheet, use Status M.",
+    "The exposure axis is calibrated from the camera-stop ticks, one stop being 0.301 log H,",
+    "with stop 0 at the middle of the plot. The plot's lux-second ticks are spaced unevenly",
+    "and are not used; its end labels (-4.0 and 1.0) put the middle at log H -1.5: the grey",
+    "card's exposure at EI 500, so Log H ref. That agrees with the ISO relation of Kodak's",
+    "still films (log10(0.8 / 500) + 1.26 = -1.54) to 0.04.",
+    "",
+    "Spectral sensitivity: effective exposure 1/25 s, Process ECN-2, Status M, density 0.2",
+    "above D-min. Spectral dye density (page 5): ECN-2, D-mins subtracted; a midscale neutral",
+    "and the minimum density (drawn dashed, as one continuous path).",
+    "",
+    "Page coordinates: the plots' axes are calibrated from their tick marks."
+  ],
+  "page": 3,
+  "log_h_ref": -1.5,
+  "exposure": "tungsten (3200 K)",
+  "plots": {
+    "characteristic": {
+      "x": [[365.129, -3.60721], [526.651, 0.60721]],
+      "y": [[245.294, 1.0], [183.797, 2.0]],
+      "curves": { "blue": [94], "green": [93], "red": [95] },
+      "sample": { "start": -3.9, "step": 0.05, "end": 0.9 }
+    },
+    "sensitivity": {
+      "x": [[372.700, 300.0], [533.106, 700.0]],
+      "y": [[631.916, 1.0], [556.211, 3.0]],
+      "floor": 0.0,
+      "curves": { "yellow": [110], "magenta": [111], "cyan": [112] },
+      "sample": { "start": 360.0, "step": 5.0, "end": 700.0 }
+    },
+    "dye_density": {
+      "page": 4,
+      "x": [[104.565, 450.0], [242.836, 750.0]],
+      "y": [[321.515, 0.0], [173.928, 1.6]],
+      "curves": { "midscale": [31], "minimum": [32] },
+      "sample": { "start": 400.0, "step": 5.0, "end": 750.0 }
+    }
+  }
+}

@@ -5,6 +5,28 @@
 //! otherwise take for a mistyped constant.
 
 #[allow(clippy::approx_constant)]
+pub mod fujifilm_af3_0261e_fujifilm_200;
+#[allow(clippy::approx_constant)]
+pub mod fujifilm_af3_0262e_fujifilm_400;
+#[allow(clippy::approx_constant)]
+pub mod generic_c41;
+#[allow(clippy::approx_constant)]
+pub mod ilford_hp5_plus_2010;
+#[allow(clippy::approx_constant)]
+pub mod kodak_as2652_aerocolor_iv_2460;
+#[allow(clippy::approx_constant)]
+pub mod kodak_e4046_ektar_100;
+#[allow(clippy::approx_constant)]
+pub mod kodak_e4050_portra_400;
+#[allow(clippy::approx_constant)]
 pub mod kodak_e7022;
 #[allow(clippy::approx_constant)]
 pub mod kodak_e7022_2007_gold_100;
+#[allow(clippy::approx_constant)]
+pub mod kodak_e7023_ultramax_400;
+#[allow(clippy::approx_constant)]
+pub mod kodak_h1_5203_vision3_50d;
+#[allow(clippy::approx_constant)]
+pub mod kodak_h1_5207_vision3_250d;
+#[allow(clippy::approx_constant)]
+pub mod kodak_h1_5219_vision3_500t;

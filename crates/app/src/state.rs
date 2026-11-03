@@ -8,7 +8,7 @@ use scan_core::{
 };
 
 use scan_core::image::DynamicImage;
-use scan_film::{FilmStock, Inverter, Mono, Printing};
+use scan_film::{FilmStock, Inverter, Mono, MonoStock, Printing};
 use scan_process::adjust::{self, Adjustments, Levels};
 use scan_process::{DustRemoval, ExposureMerge, FrameDetection, FrameRect};
 
@@ -183,7 +183,8 @@ pub enum FilmType {
     /// Inverted with the film stock's profile, which removes the orange mask.
     #[default]
     ColorNegative,
-    /// Inverted on a generic black-and-white film's curve, mixed to grey and toned.
+    /// Inverted on its film's curve (or a generic black-and-white film's), mixed to grey
+    /// and toned.
     BlackAndWhite,
     /// A positive already: printed as it is, with the roll's exposure and balance.
     Slide,
@@ -224,7 +225,7 @@ impl FilmType {
 }
 
 /// Turning film scans into positives: color negatives with a film stock's profile,
-/// black-and-white negatives and slides without one.
+/// black-and-white negatives with one or without, slides without one.
 #[derive(Clone, Copy, Debug)]
 pub struct InvertSettings {
     /// Show and save film scans as positives.
@@ -232,6 +233,8 @@ pub struct InvertSettings {
     pub film_type: FilmType,
     /// The color negative film's profile.
     pub stock: &'static FilmStock,
+    /// The black-and-white film's profile; `None` inverts on a generic film's curve.
+    pub mono_stock: Option<&'static MonoStock>,
     pub printing: Printing,
     /// How black-and-white film is made grey and toned.
     pub mono: Mono,
@@ -243,9 +246,52 @@ impl Default for InvertSettings {
             enabled: true,
             film_type: FilmType::ColorNegative,
             stock: scan_film::stock::default_stock(),
+            mono_stock: None,
             printing: Printing::default(),
             mono: Mono::default(),
         }
+    }
+}
+
+impl InvertSettings {
+    /// The film whose profile inverts this film type: the color stock for a color negative,
+    /// the black-and-white stock for a black-and-white negative if one is chosen. Slides
+    /// have none.
+    pub fn profile_film(&self) -> Option<ProfileFilm> {
+        match self.film_type {
+            FilmType::ColorNegative => {
+                let s = self.stock;
+                Some(ProfileFilm {
+                    id: s.id,
+                    manufacturer: s.manufacturer,
+                    name: s.name,
+                    iso: s.iso,
+                })
+            }
+            FilmType::BlackAndWhite => self.mono_stock.map(|s| ProfileFilm {
+                id: s.id,
+                manufacturer: s.manufacturer,
+                name: s.name,
+                iso: s.iso,
+            }),
+            FilmType::Slide => None,
+        }
+    }
+}
+
+/// A film profile's stock, as the roll's metadata names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProfileFilm {
+    pub id: &'static str,
+    pub manufacturer: &'static str,
+    pub name: &'static str,
+    pub iso: u32,
+}
+
+impl ProfileFilm {
+    /// "Kodak Gold 200".
+    pub fn display_name(&self) -> String {
+        format!("{} {}", self.manufacturer, self.name)
     }
 }
 
@@ -256,6 +302,7 @@ impl Default for InvertSettings {
 pub struct Film {
     pub film_type: FilmType,
     pub stock: &'static FilmStock,
+    pub mono_stock: Option<&'static MonoStock>,
     /// Linear light through the bare film base, per channel (1 for a slide).
     pub base: [f32; 3],
     pub printing: Printing,
@@ -281,7 +328,12 @@ impl Film {
     fn with_printing(&self, printing: &Printing) -> Inverter {
         match self.film_type {
             FilmType::ColorNegative => Inverter::new(self.stock.model(), self.base, printing),
-            FilmType::BlackAndWhite => Inverter::black_and_white(self.base, printing, &self.mono),
+            FilmType::BlackAndWhite => Inverter::black_and_white(
+                self.base,
+                printing,
+                &self.mono,
+                self.mono_stock.map(MonoStock::model),
+            ),
             FilmType::Slide => Inverter::positive(printing),
         }
     }
@@ -614,6 +666,7 @@ impl AppState {
         Some(Film {
             film_type,
             stock: self.invert.stock,
+            mono_stock: self.invert.mono_stock,
             base,
             printing: self.invert.printing,
             mono: self.invert.mono,
@@ -1118,16 +1171,19 @@ impl AppState {
     }
 
     /// Fill in the roll's film from the Invert step's profile, unless it was already filled
-    /// in from that profile (and perhaps edited since). Film not inverted has no profile.
+    /// in from that profile (and perhaps edited since). Film not inverted has no profile,
+    /// nor does black-and-white film on the generic curve.
     pub fn fill_export_film(&mut self) {
-        let stock = self.invert.stock;
-        if self
-            .film()
-            .is_some_and(|f| f.film_type == FilmType::ColorNegative)
-            && self.export.film_from != Some(stock.id)
+        if self.film().is_none() {
+            return;
+        }
+        if let Some(p) = self.invert.profile_film()
+            && self.export.film_from != Some(p.id)
         {
-            self.export.metadata.fill_film(stock);
-            self.export.film_from = Some(stock.id);
+            self.export
+                .metadata
+                .fill_film(p.manufacturer, p.name, p.iso);
+            self.export.film_from = Some(p.id);
         }
     }
 
@@ -2642,6 +2698,21 @@ mod tests {
         // The export's film isn't filled in from the color profile.
         state.fill_export_film();
         assert!(state.export.metadata.manufacturer.is_empty());
+        // With a black-and-white stock, it inverts on that film's curve, and the export's
+        // film comes from it.
+        let generic = film.inverter(&Adjustments::default());
+        state.invert.mono_stock = scan_film::stock::mono_by_id("ilford-hp5-plus");
+        let hp5 = state.film().unwrap().inverter(&Adjustments::default());
+        assert!(hp5.is_mono());
+        let light = film.base.map(|b| b * 0.05);
+        assert_ne!(hp5.pixel(light), generic.pixel(light));
+        state.fill_export_film();
+        let m = &state.export.metadata;
+        assert_eq!(
+            (&*m.manufacturer, &*m.stock, &*m.iso),
+            ("Ilford", "HP5 Plus", "400")
+        );
+        state.invert.mono_stock = None;
 
         state.invert.film_type = FilmType::Slide;
         state.film_base = None;
