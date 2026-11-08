@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="280" height="130" viewBox="0 0 280 130">
+  <defs>
+    <clipPath id="left"><rect x="150" y="15" width="55" height="70"/></clipPath>
+    <clipPath id="right"><rect x="205" y="15" width="55" height="70"/></clipPath>
+  </defs>
+  <rect x="0" y="0" width="280" height="130" rx="8" fill="{bg}"/>
+  <g font-family="sans-serif" font-size="11">
+    <rect x="20" y="15" width="110" height="70" fill="{grid}"/>
+    <path d="M20,85 L50,45 L72,65 L98,35 L130,85 z" fill="{muted}"/>
+    <circle cx="110" cy="30" r="7" fill="{muted}"/>
+    <text x="75" y="104" fill="{before}" text-anchor="middle">Before: no edits</text>
+    <g clip-path="url(#left)">
+      <rect x="150" y="15" width="110" height="70" fill="{grid}"/>
+      <path d="M150,85 L180,45 L202,65 L228,35 L260,85 z" fill="{muted}"/>
+      <circle cx="240" cy="30" r="7" fill="{muted}"/>
+    </g>
+    <g clip-path="url(#right)">
+      <rect x="150" y="15" width="110" height="70" fill="#7aa6d8"/>
+      <path d="M150,85 L180,45 L202,65 L228,35 L260,85 z" fill="#4f8a4a"/>
+      <circle cx="240" cy="30" r="7" fill="{yellow}"/>
+    </g>
+    <path d="M205,10 V90" stroke="{split}" stroke-width="2"/>
+    <circle cx="205" cy="50" r="5" fill="{split}"/>
+    <text x="177" y="104" fill="{split}" text-anchor="middle" font-size="10">before</text>
+    <text x="233" y="104" fill="{split}" text-anchor="middle" font-size="10">after</text>
+    <text x="205" y="122" fill="{muted}" text-anchor="middle" font-size="10">Split: drag the line</text>
+  </g>
+</svg>

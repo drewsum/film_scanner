@@ -26,6 +26,7 @@ jiff.workspace = true
 serde.workspace = true
 ron.workspace = true
 tiff.workspace = true
+egui_extras.workspace = true
 
 [build-dependencies]
 winresource = "0.1"
@@ -34,5 +35,6 @@ winresource = "0.1"
 workspace = true
 
 [dev-dependencies]
+resvg = { version = "0.45", default-features = false, features = ["text", "system-fonts"] }
 tempfile.workspace = true
 yaml-rust2 = "0.13.0"
