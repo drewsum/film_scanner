@@ -1,7 +1,7 @@
 //! Raw scan data to an image.
 
 use scan_core::Gray16Image;
-use scan_core::image::{ImageBuffer, Luma, Pixel, Rgb, RgbImage};
+use scan_core::image::{ImageBuffer, Pixel, Rgb, RgbImage};
 
 use crate::geometry::{FlatbedPlan, skew_lines};
 use crate::tables;
@@ -63,36 +63,123 @@ pub fn flatbed_rgb16(raw: &[u8], layout: RawLayout, plan: &FlatbedPlan) -> Rgb16
 
 /// Decode a 16-bit linear read (flatbed or film) into `out`, with the tone curve applied.
 pub fn rgb16(raw: &[u8], layout: RawLayout, out: Resample) -> Rgb16Image {
-    let curve: Vec<u16> = (0..=u16::MAX)
-        .map(|v| (65535.0 * tables::tone(f64::from(v) / 65535.0)).round() as u16)
-        .collect();
-    resample(
-        layout,
-        out,
-        |i| {
-            raw.get(2 * i..2 * i + 2)
-                .map_or(0, |b| u16::from_le_bytes([b[0], b[1]]).into())
-        },
-        |mean| curve[mean.round() as usize],
-    )
+    let mut stream = Stream::rgb16(layout, out);
+    stream.push(raw);
+    stream.into_rgb16()
 }
 
 /// Decode an infrared read: all three CCD rows see the infrared, so realign them like color
 /// and average them into one linear plane.
 pub fn infrared(raw: &[u8], layout: RawLayout, out: Resample) -> Gray16Image {
-    let rgb: Rgb16Image = resample(
-        layout,
-        out,
-        |i| {
-            raw.get(2 * i..2 * i + 2)
-                .map_or(0, |b| u16::from_le_bytes([b[0], b[1]]).into())
-        },
-        |mean| mean.round() as u16,
-    );
-    ImageBuffer::from_fn(out.width, out.height, |x, y| {
-        let p = rgb.get_pixel(x, y).0;
-        Luma([((u32::from(p[0]) + u32::from(p[1]) + u32::from(p[2]) + 1) / 3) as u16])
-    })
+    let mut stream = Stream::infrared(layout, out);
+    stream.push(raw);
+    stream.into_infrared()
+}
+
+/// A 16-bit read decoded as it arrives, like [`rgb16`] or [`infrared`]: each output row is
+/// made once the raw lines behind it are in, and lines no row needs any more are let go,
+/// so a read far bigger than memory allows can be decoded.
+pub struct Stream {
+    grid: Grid,
+    kind: Kind,
+    /// Raw lines from `base` on, as received.
+    buf: Vec<u8>,
+    base: usize,
+    /// The next output row, and the rows so far: 3 channels, or 1 for infrared.
+    row: u32,
+    pixels: Vec<u16>,
+}
+
+enum Kind {
+    /// Color, through the tone curve, as a table of every 16-bit value.
+    Tone(Vec<u16>),
+    /// The channels averaged, linear.
+    Infrared,
+}
+
+impl Stream {
+    pub fn rgb16(layout: RawLayout, out: Resample) -> Self {
+        let curve = (0..=u16::MAX)
+            .map(|v| (65535.0 * tables::tone(f64::from(v) / 65535.0)).round() as u16)
+            .collect();
+        Self::new(layout, out, Kind::Tone(curve))
+    }
+
+    pub fn infrared(layout: RawLayout, out: Resample) -> Self {
+        Self::new(layout, out, Kind::Infrared)
+    }
+
+    fn new(layout: RawLayout, out: Resample, kind: Kind) -> Self {
+        let channels = if matches!(kind, Kind::Infrared) { 1 } else { 3 };
+        Self {
+            grid: Grid::new(layout, out),
+            kind,
+            buf: Vec::new(),
+            base: 0,
+            row: 0,
+            pixels: Vec::with_capacity(out.width as usize * out.height as usize * channels),
+        }
+    }
+
+    /// The read's next bytes.
+    pub fn push(&mut self, data: &[u8]) {
+        self.buf.extend_from_slice(data);
+        self.rows(false);
+    }
+
+    pub fn into_rgb16(mut self) -> Rgb16Image {
+        self.rows(true);
+        let out = self.grid.plan;
+        ImageBuffer::from_raw(out.width, out.height, self.pixels).expect("whole image")
+    }
+
+    pub fn into_infrared(mut self) -> Gray16Image {
+        self.rows(true);
+        let out = self.grid.plan;
+        ImageBuffer::from_raw(out.width, out.height, self.pixels).expect("whole image")
+    }
+
+    /// Make the rows whose lines are in (all of them at the `end`, with 0 past the read),
+    /// then let go of the lines behind them.
+    fn rows(&mut self, end: bool) {
+        let line_len = self.grid.width * 6;
+        let out = self.grid.plan;
+        while self.row < out.height {
+            let lines = self.grid.lines(self.row);
+            if !end && self.base + self.buf.len() / line_len < lines.end {
+                break;
+            }
+            let (buf, start) = (&self.buf, 2 * self.base * self.grid.width * 3);
+            let sample = |i: usize| {
+                let at = 2 * i - start;
+                buf.get(at..at + 2)
+                    .map_or(0, |b| u32::from(u16::from_le_bytes([b[0], b[1]])))
+            };
+            for x in 0..out.width {
+                let mean = self.grid.pixel(x, self.row, sample);
+                match &self.kind {
+                    Kind::Tone(curve) => {
+                        self.pixels.extend(mean.map(|m| curve[m.round() as usize]))
+                    }
+                    Kind::Infrared => {
+                        let m = mean.map(|m| u32::from(m.round() as u16));
+                        self.pixels.push(((m[0] + m[1] + m[2] + 1) / 3) as u16);
+                    }
+                }
+            }
+            self.row += 1;
+        }
+        // Rows only go down the read, so lines above the next row's are done with. Let them
+        // go a half buffer at a time, not to move the rest for every block.
+        if self.row < out.height {
+            let done = (self.grid.lines(self.row).start - self.base) * line_len;
+            if done > 0 && done >= self.buf.len() / 2 {
+                let done = done.min(self.buf.len() / line_len * line_len);
+                self.buf.drain(..done);
+                self.base += done / line_len;
+            }
+        }
+    }
 }
 
 /// Realign, crop and box-filter the raw samples (`sample(i)` is the `i`th, pixel-interleaved
@@ -107,35 +194,70 @@ fn resample<S>(
 where
     Rgb<S>: Pixel<Subpixel = S>,
 {
-    let width = layout.width as usize;
-    let skew = skew_lines(plan.hw_dpi) as usize;
-    let first = plan.first_line as usize;
-    let scale = |hw: u32| f64::from(hw) / f64::from(plan.dpi);
-    let (scale_x, scale_y) = (scale(plan.hw_x_dpi), scale(plan.hw_dpi));
-    // Raw lines/columns covered by output index `i`.
-    let span = |i: u32, scale: f64| {
+    let grid = Grid::new(layout, plan);
+    ImageBuffer::from_fn(plan.width, plan.height, |x, y| {
+        Rgb(grid.pixel(x, y, &sample).map(&out))
+    })
+}
+
+/// Which raw samples make each output pixel.
+struct Grid {
+    plan: Resample,
+    /// Raw pixels per line.
+    width: usize,
+    crop_x: usize,
+    skew: usize,
+    scale_x: f64,
+    scale_y: f64,
+}
+
+impl Grid {
+    fn new(layout: RawLayout, plan: Resample) -> Self {
+        let scale = |hw: u32| f64::from(hw) / f64::from(plan.dpi);
+        Self {
+            plan,
+            width: layout.width as usize,
+            crop_x: layout.crop_x as usize,
+            skew: skew_lines(plan.hw_dpi) as usize,
+            scale_x: scale(plan.hw_x_dpi),
+            scale_y: scale(plan.hw_dpi),
+        }
+    }
+
+    /// Raw lines or columns covered by output index `i`.
+    fn span(i: u32, scale: f64) -> std::ops::Range<usize> {
         let a = (f64::from(i) * scale) as usize;
         let b = ((f64::from(i + 1) * scale) as usize).max(a + 1);
         a..b
-    };
-    ImageBuffer::from_fn(plan.width, plan.height, |x, y| {
-        let cols = span(x, scale_x);
-        let rows = span(y, scale_y);
+    }
+
+    /// The raw lines output row `y` reads, every channel and column's.
+    fn lines(&self, y: u32) -> std::ops::Range<usize> {
+        let rows = Self::span(y, self.scale_y);
+        let first = self.plan.first_line as usize;
+        let late = 2 * self.skew + usize::from(*self.plan.stagger.iter().max().unwrap());
+        first + rows.start..first + rows.end + late
+    }
+
+    /// Pixel (x, y)'s mean in each channel: red from its lines 2 × skew on, green from skew
+    /// on and blue from its own, each column from its stagger's lines on.
+    fn pixel(&self, x: u32, y: u32, sample: impl Fn(usize) -> u32) -> [f64; 3] {
+        let cols = Self::span(x, self.scale_x);
+        let rows = Self::span(y, self.scale_y);
         let n = (cols.len() * rows.len()) as f64;
-        let px = [(0, 2 * skew), (1, skew), (2, 0)].map(|(ch, offset)| {
+        let first = self.plan.first_line as usize;
+        [(0, 2 * self.skew), (1, self.skew), (2, 0)].map(|(ch, offset)| {
             let mut sum = 0u64;
             for line in rows.clone() {
                 for col in cols.clone() {
-                    let col = col + layout.crop_x as usize;
-                    let line = first + line + offset + usize::from(plan.stagger[col % 4]);
-                    let i = (line * width + col) * 3 + ch;
-                    sum += u64::from(sample(i));
+                    let col = col + self.crop_x;
+                    let line = first + line + offset + usize::from(self.plan.stagger[col % 4]);
+                    sum += u64::from(sample((line * self.width + col) * 3 + ch));
                 }
             }
-            out(sum as f64 / n)
-        });
-        Rgb(px)
-    })
+            sum as f64 / n
+        })
+    }
 }
 
 #[cfg(test)]
@@ -229,5 +351,45 @@ mod tests {
                 assert_eq!(row, vec![11 + (first + y) as u16; 8], "row {y}");
             }
         }
+    }
+
+    #[test]
+    fn streams_in_any_pieces() {
+        // 1,200 dpi from a 3,200 × 2,400 read with a stagger: a read in odd-sized pieces
+        // decodes to the same image as the whole, while holding only a few lines at a time.
+        let out = Resample {
+            dpi: 1200,
+            hw_dpi: 2400,
+            hw_x_dpi: 3200,
+            width: 30,
+            height: 1000,
+            stagger: [0, 6, 0, 6],
+            first_line: 3,
+        };
+        let layout = RawLayout {
+            lines: 3 + 2000 + 2 * skew_lines(2400) + 6,
+            width: 80,
+            crop_x: 0,
+        };
+        let len = layout.lines as usize * layout.width as usize * 6;
+        let raw: Vec<u8> = (0..len).map(|i| (i * 7919 % 251) as u8).collect();
+        let whole = rgb16(&raw, layout, out);
+        let mut stream = Stream::rgb16(layout, out);
+        let mut held = 0;
+        for piece in raw.chunks(1234) {
+            stream.push(piece);
+            held = held.max(stream.buf.len());
+        }
+        assert_eq!(stream.into_rgb16(), whole);
+        assert!(held < len / 4, "held {held} of {len}");
+        let mut stream = Stream::infrared(layout, out);
+        for piece in raw.chunks(777) {
+            stream.push(piece);
+        }
+        assert_eq!(stream.into_infrared(), infrared(&raw, layout, out));
+        // A read cut short decodes with zeros past its end, like the whole decoder.
+        let mut stream = Stream::rgb16(layout, out);
+        stream.push(&raw[..len / 2]);
+        assert_eq!(stream.into_rgb16(), rgb16(&raw[..len / 2], layout, out));
     }
 }

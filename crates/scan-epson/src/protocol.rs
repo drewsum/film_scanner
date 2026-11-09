@@ -110,42 +110,44 @@ impl<'a> Protocol<'a> {
 
     /// Start a read with `1e 47` and return `len` bytes of image data, trailers removed.
     pub fn read_data(&mut self, len: usize) -> Result<Vec<u8>, ScanError> {
-        self.read_data_with(len, &mut |_| {})
+        let mut data = Vec::with_capacity(len);
+        self.read_data_into(len, &mut |block| data.extend_from_slice(block))?;
+        Ok(data)
     }
 
-    /// [`Self::read_data`], calling `received` with the bytes read so far after each block.
-    pub fn read_data_with(
+    /// [`Self::read_data`], handing `received` each block of the `len` bytes as it comes
+    /// instead of keeping them.
+    pub fn read_data_into(
         &mut self,
         len: usize,
-        received: &mut dyn FnMut(usize),
-    ) -> Result<Vec<u8>, ScanError> {
+        received: &mut dyn FnMut(&[u8]),
+    ) -> Result<(), ScanError> {
         self.dev.write(&[0x1e, 0x47])?;
-        let mut data = Vec::with_capacity(len);
+        let mut done = 0;
         let mut blocks = BlockAssembler::default();
         let mut buf = vec![0u8; 65536];
-        while data.len() < len {
+        while done < len {
             let n = self.dev.read(&mut buf).map_err(|e| {
                 protocol_error(format!(
                     "image read failed after {} of {len} bytes: {e}",
-                    data.len() + blocks.pending()
+                    done + blocks.pending()
                 ))
             })?;
             if n == 0 {
                 return Err(protocol_error(format!(
-                    "scanner stopped after {} of {len} image bytes",
-                    data.len()
+                    "scanner stopped after {done} of {len} image bytes"
                 )));
             }
             if let Some(block) = blocks.push(&buf[..n]) {
                 log::trace!("block of {} bytes", block.len());
-                data.extend_from_slice(&block);
-                received(data.len().min(len));
+                if block.len() > len - done {
+                    log::warn!("read {} image bytes, expected {len}", done + block.len());
+                }
+                let block = &block[..block.len().min(len - done)];
+                done += block.len();
+                received(block);
             }
         }
-        if data.len() != len {
-            log::warn!("read {} image bytes, expected {len}", data.len());
-            data.truncate(len);
-        }
-        Ok(data)
+        Ok(())
     }
 }

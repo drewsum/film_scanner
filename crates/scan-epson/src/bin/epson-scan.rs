@@ -28,7 +28,7 @@
 
 use std::process::ExitCode;
 
-use scan_core::{BitDepth, ScanArea};
+use scan_core::{BitDepth, NoProgress, ScanArea};
 use scan_epson::film::FilmSession;
 use scan_epson::session::FlatbedSession;
 use scan_epson::sim::SimulatedScanner;
@@ -272,21 +272,40 @@ fn run_film(args: &Args) -> Result<(), String> {
     } else {
         open(args.path.clone())?
     };
-    let raw = session
-        .run(dev.as_mut(), POLL_DELAY)
+    use std::io::Write;
+    let mut raw = match &args.raw {
+        Some(path) => Some((
+            path,
+            std::io::BufWriter::new(
+                std::fs::File::create(path).map_err(|e| format!("{path}: {e}"))?,
+            ),
+        )),
+        None => None,
+    };
+    let (mut stream, mut written, mut write_error) = (session.decoder(), 0, None);
+    session
+        .run_into(dev.as_mut(), POLL_DELAY, &mut NoProgress, &mut |block| {
+            stream.push(block);
+            if let Some((_, file)) = &mut raw
+                && write_error.is_none()
+            {
+                write_error = file.write_all(block).err();
+                written += block.len();
+            }
+        })
         .map_err(|e| e.to_string())?;
-    if let Some(path) = &args.raw {
-        std::fs::write(path, &raw).map_err(|e| format!("{path}: {e}"))?;
-        println!("saved the {} byte read to {path}", raw.len());
+    if let Some((path, mut file)) = raw {
+        write_error
+            .map_or_else(|| file.flush(), Err)
+            .map_err(|e| format!("{path}: {e}"))?;
+        println!("saved the {written} byte read to {path}");
     }
     let saved = if args.infrared {
-        session.decode_infrared(&raw, &args.area).save(&args.out)
+        session
+            .align_infrared_plane(stream, &args.area)
+            .save(&args.out)
     } else {
-        let image = scan_core::image::DynamicImage::ImageRgb16(decode::rgb16(
-            &raw,
-            session.layout,
-            plan.output,
-        ));
+        let image = scan_core::image::DynamicImage::ImageRgb16(stream.into_rgb16());
         match args.bit_depth {
             BitDepth::Eight => image.to_rgb8().save(&args.out),
             BitDepth::Sixteen => image.save(&args.out),

@@ -32,6 +32,37 @@ pub struct SimulatedScanner {
     pub position: [u16; 2],
     stage: u8,
     reverse: bool,
+    /// The image read under way, made a block at a time as it is read.
+    feed: Option<Feed>,
+}
+
+/// An image read's blocks still to come: each `per_block` lines of `line` and a trailer.
+#[derive(Debug)]
+struct Feed {
+    line: Vec<u8>,
+    lines: usize,
+    per_block: usize,
+}
+
+impl Feed {
+    /// The next block's transfers, if any are left.
+    fn next(&mut self) -> Option<Vec<Vec<u8>>> {
+        if self.lines == 0 {
+            return None;
+        }
+        let n = self.per_block.min(self.lines);
+        self.lines -= n;
+        let block = self.line.repeat(n);
+        let mut trailer = vec![0x02];
+        trailer.extend_from_slice(&(block.len() as u32).to_le_bytes());
+        trailer.extend_from_slice(&[0x00, 0x80, 0x00]);
+        let mut chunks: Vec<Vec<u8>> = block.chunks(MAX_TRANSFER).map(<[u8]>::to_vec).collect();
+        match chunks.last_mut() {
+            Some(last) if last.len() + trailer.len() <= MAX_TRANSFER => last.extend(trailer),
+            _ => chunks.push(trailer),
+        }
+        Some(chunks)
+    }
 }
 
 /// Parameter writes a command takes; `None` for queries, which reply instead of acking.
@@ -66,10 +97,10 @@ fn query_reply(cmd: [u8; 2]) -> Vec<u8> {
 
 impl SimulatedScanner {
     /// The data blocks for a read with the current geometry.
-    fn image(&self) -> Vec<Vec<u8>> {
+    fn image(&self) -> Option<Feed> {
         let g = &self.geometry;
         if g.len() != 22 {
-            return Vec::new();
+            return None;
         }
         let u16_at = |i: usize| usize::from(u16::from_le_bytes([g[i], g[i + 1]]));
         let units = u16_at(2).saturating_sub(u16_at(0));
@@ -88,27 +119,17 @@ impl SimulatedScanner {
             (true, true) => DARK_LEVEL.to_le_bytes().to_vec(),
             (true, false) => WHITE_LEVEL.to_le_bytes().to_vec(),
         };
-        let line: Vec<u8> = sample.repeat(width * 3);
-        let mut transfers = Vec::new();
-        for first in (0..lines).step_by(per_block) {
-            let block = line.repeat(per_block.min(lines - first));
-            let mut trailer = vec![0x02];
-            trailer.extend_from_slice(&(block.len() as u32).to_le_bytes());
-            trailer.extend_from_slice(&[0x00, 0x80, 0x00]);
-            let mut chunks: Vec<Vec<u8>> = block.chunks(MAX_TRANSFER).map(<[u8]>::to_vec).collect();
-            match chunks.last_mut() {
-                Some(last) if last.len() + trailer.len() <= MAX_TRANSFER => last.extend(trailer),
-                _ => chunks.push(trailer),
-            }
-            transfers.extend(chunks);
-        }
-        transfers
+        Some(Feed {
+            line: sample.repeat(width * 3),
+            lines,
+            per_block,
+        })
     }
 }
 
 impl Transport for SimulatedScanner {
     fn write(&mut self, data: &[u8]) -> Result<(), ScanError> {
-        if !self.replies.is_empty() {
+        if !self.replies.is_empty() || self.feed.as_ref().is_some_and(|f| f.lines > 0) {
             return Err(ScanError::Backend(format!(
                 "write {data:02x?} while {} replies are unread",
                 self.replies.len()
@@ -137,7 +158,7 @@ impl Transport for SimulatedScanner {
             .try_into()
             .map_err(|_| ScanError::Backend(format!("simulator: {data:02x?} is not a command")))?;
         if cmd == [0x1e, 0x47] {
-            self.replies.extend(self.image());
+            self.feed = self.image();
             return Ok(());
         }
         if cmd == [0x1e, 0x05] && self.reverse {
@@ -165,6 +186,11 @@ impl Transport for SimulatedScanner {
     }
 
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, ScanError> {
+        if self.replies.is_empty()
+            && let Some(block) = self.feed.as_mut().and_then(Feed::next)
+        {
+            self.replies.extend(block);
+        }
         let Some(mut reply) = self.replies.pop_front() else {
             return Err(ScanError::Backend(
                 "simulator: read with nothing to send".into(),

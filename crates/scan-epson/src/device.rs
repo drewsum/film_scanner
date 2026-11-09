@@ -219,18 +219,18 @@ impl V500Device {
                 offset: i as f32 / n,
                 scale: 1.0 / n,
             };
-            let raw = session.run_with(dev.as_mut(), self.poll_delay, &mut part)?;
+            // Decoded as it arrives: a whole holder's read at 6,400 dpi is 6 GB.
+            let mut stream = session.decoder();
+            session.run_into(dev.as_mut(), self.poll_delay, &mut part, &mut |block| {
+                stream.push(block)
+            })?;
             drop(dev);
-            let output = session.plan.output;
             match exposures.get(i) {
                 Some(exposure) => passes.push(ScanPass {
                     exposure: *exposure,
-                    image: image(
-                        decode::rgb16(&raw, session.layout, output),
-                        request.bit_depth,
-                    ),
+                    image: image(stream.into_rgb16(), request.bit_depth),
                 }),
-                None => infrared = Some(session.decode_infrared(&raw, &area)),
+                None => infrared = Some(session.align_infrared_plane(stream, &area)),
             }
         }
         progress.progress(1.0);

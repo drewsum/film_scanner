@@ -91,9 +91,6 @@ const IR_MARGIN: u32 = 32;
 const IR_LAG: u32 = 5;
 /// Carriage steps the infrared read starts above the area: whole lines at every resolution.
 const IR_ABOVE_STEPS: u32 = 48;
-/// The largest image read: 2 GiB, a whole holder at 2,400 dpi with room to spare. 3,200 and
-/// 6,400 dpi reach it at about a third of the holder.
-const MAX_READ: usize = 1 << 31;
 /// The read that finds the window: 150 lines at 200 dpi of the gap between the strips.
 const WINDOW_READ: (u16, u16, u16) = (0x0c8f, 0x0e0f, 150);
 const WINDOW_READ_STEPS: u32 = 1920;
@@ -747,11 +744,11 @@ impl FilmSession {
             plan.output.stagger = mode.stagger_at(x0);
             plan.output.first_line -= IR_LAG;
         }
-        let len = plan.lines as usize * plan.read_width as usize * 6;
-        if len > MAX_READ {
+        // `1e 41` counts the lines in 16 bits: a whole holder at 6,400 dpi just fits.
+        if plan.lines > u32::from(u16::MAX) {
             return Err(ScanError::InvalidRequest(format!(
-                "a {:.1} GB read at {dpi} dpi: scan a smaller area",
-                len as f64 / 1e9
+                "{} lines at {dpi} dpi: scan a shorter area",
+                plan.lines
             )));
         }
         Ok(Self {
@@ -767,21 +764,36 @@ impl FilmSession {
         })
     }
 
+    /// A decoder for this session's read as it arrives ([`Self::run_into`]): the color
+    /// pass's image, or for infrared the plane read, to be lined up with
+    /// [`Self::align_infrared_plane`].
+    pub fn decoder(&self) -> decode::Stream {
+        let out = self.plan.output;
+        if !self.light.infrared {
+            return decode::Stream::rgb16(self.layout, out);
+        }
+        let scale = f64::from(out.hw_x_dpi) / f64::from(out.dpi);
+        let wide = Resample {
+            width: (f64::from(self.plan.read_width) / scale) as u32,
+            ..out
+        };
+        decode::Stream::infrared(self.layout, wide)
+    }
+
     /// Decode this infrared session's read onto the color pass's pixels, undoing the
     /// infrared's stretch ([`IR_STRETCH`]) with linear interpolation.
     pub fn decode_infrared(&self, raw: &[u8], area: &ScanArea) -> Gray16Image {
+        let mut stream = self.decoder();
+        stream.push(raw);
+        self.align_infrared_plane(stream, area)
+    }
+
+    /// The infrared plane of [`Self::decoder`]'s stream, lined up like [`Self::decode_infrared`].
+    pub fn align_infrared_plane(&self, stream: decode::Stream, area: &ScanArea) -> Gray16Image {
         let out = self.plan.output;
         let scale = f64::from(out.hw_x_dpi) / f64::from(out.dpi);
-        let wide = decode::infrared(
-            raw,
-            self.layout,
-            Resample {
-                width: (f64::from(self.plan.read_width) / scale) as u32,
-                ..out
-            },
-        );
         let margin = f64::from(self.mode.ir_margin()) / scale;
-        Self::align_infrared(&wide, margin, area.x_mm, out)
+        Self::align_infrared(&stream.into_infrared(), margin, area.x_mm, out)
     }
 
     /// The `out`-sized plane from `wide`, an infrared plane whose column `margin` is the
@@ -919,6 +931,22 @@ impl FilmSession {
         poll_delay: Duration,
         progress: &mut dyn ProgressSink,
     ) -> Result<Vec<u8>, ScanError> {
+        let mut data = Vec::with_capacity(self.data_len());
+        self.run_into(dev, poll_delay, progress, &mut |block| {
+            data.extend_from_slice(block)
+        })?;
+        Ok(data)
+    }
+
+    /// [`Self::run_with`], handing `received` the image read's blocks as they come, for
+    /// decoding them as they arrive ([`decode::Stream`]) instead of keeping the read.
+    pub fn run_into(
+        &self,
+        dev: &mut dyn Transport,
+        poll_delay: Duration,
+        progress: &mut dyn ProgressSink,
+        received: &mut dyn FnMut(&[u8]),
+    ) -> Result<(), ScanError> {
         let (m, l) = (self.mode, self.light);
         let mut p = Protocol::new(dev, poll_delay);
 
@@ -1156,12 +1184,15 @@ impl FilmSession {
         )?;
         p.command(MOTOR, &[&motor(self.plan.scan_steps, l.scan_motor)])?;
         let len = self.data_len();
-        let data = p.read_data_with(len, &mut |n| {
-            progress.progress(CALIBRATED + (1.0 - CALIBRATED) * n as f32 / len as f32);
+        let mut done = 0;
+        p.read_data_into(len, &mut |block| {
+            done += block.len();
+            progress.progress(CALIBRATED + (1.0 - CALIBRATED) * done as f32 / len as f32);
+            received(block);
         })?;
         p.wait_ready()?;
         p.query(OPEN, 1)?;
-        Ok(data)
+        Ok(())
     }
 
     /// Above 1,600 dpi, Epson Scan's type-7 table for a read of x `x0..x1` at line time `lt`
@@ -1363,6 +1394,26 @@ mod tests {
 
     fn inch(v: f32) -> f32 {
         v * MM_PER_INCH
+    }
+
+    /// A whole holder plans at every resolution, in color and infrared: the read is decoded
+    /// as it arrives, and its lines just fit `1e 41`'s 16 bits at 6,400 dpi.
+    #[test]
+    fn whole_holder_at_every_resolution() {
+        for dpi in [400, 800, 1200, 1600, 2400, 3200, 6400] {
+            for session in [
+                FilmSession::new(&FILM_AREA, dpi),
+                FilmSession::infrared(&FILM_AREA, dpi),
+            ] {
+                let s = session.unwrap();
+                assert!(s.plan.lines <= u32::from(u16::MAX), "{dpi} dpi");
+            }
+        }
+        let taller = ScanArea {
+            height_mm: 300.0,
+            ..FILM_AREA
+        };
+        assert!(FilmSession::new(&taller, 6400).is_err());
     }
 
     /// The geometry SilverFast sent in captures 30, 31, 33, 35 and 36, from their `1e 57`

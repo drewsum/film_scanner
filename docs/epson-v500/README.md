@@ -375,6 +375,13 @@ top of the color skew (2 × 63 at 2,400 dpi and 2 × 211 at 6,400, where 0.025 i
 edges come out doubled, and a 6,400 read halved to 3,200 is half as sharp as a 1,600 one.
 Measured on hardware at x0 7,309, 7,322 (2,400) and 7,358, 7,359 (6,400).
 
+A whole holder at 6,400 dpi is a 6.2 GB read of 60,127 lines, which just fits `1e 41`'s 16-bit
+line count. `scan_epson::film` hands the read's blocks to `decode::Stream` as they arrive,
+which keeps only the lines its next rows need (the color skew and stagger, 126 lines at 2,400
+dpi and 416 at 6,400), so the whole read is never held: on the simulator a whole holder at
+3,200 dpi decodes in 10 s to a 1.5 GB image, and at 6,400 in 29 s to 6.2 GB. Scans that big
+are saved as BigTIFF.
+
 Captures 41 and 44 put the 3,200 × 2,400 origin 19 units apart (4,784 and 4,765), while Epson
 Scan's own images of one frame at 1,200, 2,400, 3,200 and 6,400 dpi line up within 2 px at
 1,200 dpi. With the type-7 table and stagger, native scans of capture 41's frame line up with

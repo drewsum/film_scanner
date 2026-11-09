@@ -537,8 +537,10 @@ impl FlatbedSession {
         params[4..].copy_from_slice(&m.scan_motor);
         p.command(MOTOR, &[&params])?;
         let len = self.data_len();
-        let data = p.read_data_with(len, &mut |n| {
-            progress.progress(CALIBRATED + (1.0 - CALIBRATED) * n as f32 / len as f32);
+        let mut data = Vec::with_capacity(len);
+        p.read_data_into(len, &mut |block| {
+            data.extend_from_slice(block);
+            progress.progress(CALIBRATED + (1.0 - CALIBRATED) * data.len() as f32 / len as f32);
         })?;
 
         p.wait_ready()?;
