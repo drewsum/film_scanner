@@ -6,15 +6,22 @@
 //! 2. A 32-line white read of the calibration strip gives each pixel's white level.
 //! 3. A 16-line read with the lamp off gives each pixel's dark level.
 //! 4. The final `1e 42` carries per-channel white and dark bases (the dimmest pixel under the
-//!    glass, and the smoothed dark minimum), and the shading table
-//!    (`1e 84` type 6) per pixel and channel: the white level above its base in 64-count
+//!    glass, and the smoothed dark minimum of the even and of the odd pixels), and the shading
+//!    table (`1e 84` type 6) per pixel and channel: the white level above its base in 64-count
 //!    steps (upper 10 bits) and the smoothed dark level above its base (lower 6 bits).
+//!
+//! At 6,400 dpi the dark level differs between pixels: the even and odd ones of the read (from
+//! its first) by some 300–650 counts, the CCD's four staggered lines by up to ~100 more. So
+//! dark levels are smoothed among pixels a multiple of [`DARK_PHASES`] apart, and each of the
+//! two is measured against its own base.
 //!
 //! All reads are 16-bit little-endian, pixel-interleaved RGB.
 
 const CHANNELS: usize = 3;
-/// Width of the box filter for dark levels.
+/// Width of the box filter for dark levels, in pixels.
 const DARK_SMOOTHING: usize = 65;
+/// Pixels whose dark levels may differ: smoothed only among those this many apart.
+const DARK_PHASES: usize = 4;
 /// Pixels below this fraction of the brightest are outside the calibration strip.
 const LIT_FRACTION: f64 = 0.1;
 const WHITE_STEP: f64 = 64.0;
@@ -39,7 +46,8 @@ pub fn white_read_darks(dark_ref: &[u8]) -> [u16; 3] {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Shading {
     pub white_base: [u16; 3],
-    pub dark_base: [u16; 3],
+    /// Per channel, the even pixels' dark base and the odd ones'.
+    pub dark_base: [[u16; 2]; 3],
     /// `width` × 3 little-endian u16 entries, pixel-interleaved.
     pub table: Vec<u8>,
 }
@@ -65,10 +73,14 @@ impl Shading {
             return None;
         }
         let white = column_means(white, white.len() / line);
-        let dark = smooth(&column_means(dark, dark.len() / line), DARK_SMOOTHING);
+        let dark = smooth(
+            &column_means(dark, dark.len() / line),
+            DARK_SMOOTHING,
+            DARK_PHASES,
+        );
 
         let mut white_base = [0u16; 3];
-        let mut dark_base = [0u16; 3];
+        let mut dark_base = [[0u16; 2]; 3];
         let mut amplitude = vec![[0.0; 3]; width];
         for c in 0..CHANNELS {
             // The white read had `white_darks` subtracted; measure white against each
@@ -84,17 +96,24 @@ impl Shading {
                 .fold(f64::INFINITY, f64::min);
             let base = lit_min.min(max).max(max - WHITE_STEP * WHITE_MAX).max(0.0);
             white_base[c] = base.floor().min(65535.0) as u16;
-            let dark_min = dark.iter().map(|d| d[c]).fold(f64::INFINITY, f64::min);
-            dark_base[c] = dark_min.floor().clamp(0.0, 65535.0) as u16;
+            for (parity, base) in dark_base[c].iter_mut().enumerate() {
+                let levels = || dark.iter().skip(parity).step_by(2).map(|d| d[c]);
+                let min = levels().fold(f64::INFINITY, f64::min);
+                let max = levels().fold(f64::NEG_INFINITY, f64::max);
+                // The lowest, unless the highest would then be out of the table's reach: then
+                // halfway, missing both ends by as little.
+                let b = min.max((min + max - DARK_MAX) / 2.0);
+                *base = b.floor().clamp(0.0, 65535.0) as u16;
+            }
         }
 
         let mut table = Vec::with_capacity(line);
-        for (a, d) in amplitude.iter().zip(&dark) {
+        for (x, (a, d)) in amplitude.iter().zip(&dark).enumerate() {
             for c in 0..CHANNELS {
                 let hi = ((a[c] - f64::from(white_base[c])) / WHITE_STEP)
                     .round()
                     .clamp(0.0, WHITE_MAX) as u16;
-                let lo = (d[c] - f64::from(dark_base[c]))
+                let lo = (d[c] - f64::from(dark_base[c][x % 2]))
                     .round()
                     .clamp(0.0, DARK_MAX) as u16;
                 table.extend_from_slice(&(hi << 6 | lo).to_le_bytes());
@@ -107,14 +126,14 @@ impl Shading {
         })
     }
 
-    /// The `1e 42` parameters: white bases, then each dark base twice.
+    /// The `1e 42` parameters: white bases, then each channel's even and odd dark bases.
     pub fn levels(&self) -> [u8; 18] {
         let mut out = [0u8; 18];
         for c in 0..CHANNELS {
             out[2 * c..2 * c + 2].copy_from_slice(&self.white_base[c].to_le_bytes());
             for k in 0..2 {
                 let i = 6 + 4 * c + 2 * k;
-                out[i..i + 2].copy_from_slice(&self.dark_base[c].to_le_bytes());
+                out[i..i + 2].copy_from_slice(&self.dark_base[c][k].to_le_bytes());
             }
         }
         out
@@ -125,7 +144,7 @@ impl Shading {
 pub fn white_read_levels(darks: [u16; 3]) -> [u8; 18] {
     Shading {
         white_base: [0; 3],
-        dark_base: darks,
+        dark_base: darks.map(|d| [d; 2]),
         table: Vec::new(),
     }
     .levels()
@@ -151,15 +170,19 @@ fn column_means(data: &[u8], lines: usize) -> Vec<[f64; 3]> {
     sums
 }
 
-/// Box filter of `n` pixels, with the edges repeated.
-fn smooth(values: &[[f64; 3]], n: usize) -> Vec<[f64; 3]> {
-    let half = (n / 2) as isize;
+/// Box filter about `n` pixels wide among pixels `phases` apart, with each phase's edges
+/// repeated.
+fn smooth(values: &[[f64; 3]], n: usize, phases: usize) -> Vec<[f64; 3]> {
+    let half = (n / phases / 2) as isize;
     let len = values.len() as isize;
+    let phases = phases as isize;
     (0..len)
         .map(|i| {
+            let phase = i % phases;
+            let last = (len - 1 - phase) / phases;
             let mut sum = [0.0; 3];
-            for j in i - half..=i + half {
-                let v = values[j.clamp(0, len - 1) as usize];
+            for j in i / phases - half..=i / phases + half {
+                let v = values[(j.clamp(0, last) * phases + phase) as usize];
                 for c in 0..CHANNELS {
                     sum[c] += v[c];
                 }
@@ -223,7 +246,7 @@ mod tests {
         assert_eq!(s.table.len(), width * 6);
         // White base: the dimmest lit pixel, measured against its own dark level.
         assert_eq!(s.white_base[1], 25000);
-        assert_eq!(s.dark_base, [1300, 1250, 1100]);
+        assert_eq!(s.dark_base, [[1300; 2], [1250; 2], [1100; 2]]);
         assert_eq!(entry(&s.table, 0, 1), (0, 0));
         assert_eq!(entry(&s.table, 64, 1), (100, 0));
         // Smoothed dark steps from 1300 to 1330 across the read.
@@ -232,6 +255,32 @@ mod tests {
         // Unlit pixels get no white.
         assert_eq!(entry(&s.table, 190, 1).0, 0);
         assert_eq!(s.levels()[..2], s.white_base[0].to_le_bytes());
+    }
+
+    #[test]
+    fn dark_levels_by_phase() {
+        // As at 6,400 dpi: odd pixels some 300 counts below even ones, and the four phases
+        // apart; even ones further apart than the table's 63 counts reach.
+        let width = 400;
+        let phase = [0u16, 300, 90, 290];
+        let level = |x: usize| 1400 - phase[x % 4] + (x / 100) as u16 * 3;
+        let white = rgb16(32, |_| [30000; 3], width);
+        let dark = rgb16(16, |x| [level(x); 3], width);
+        let s = Shading::compute(&white, &dark, width, [1300; 3], width).unwrap();
+        // Even: 1,310 to 1,409 is 99 apart, so halfway (1,328), 18 off at both ends; odd: the
+        // lowest, 1,100.
+        assert_eq!(s.dark_base[0], [1328, 1100]);
+        assert_eq!(s.levels()[6..10], [0x30, 5, 0x4c, 4]);
+        for x in 0..width {
+            let (_, lo) = entry(&s.table, x, 0);
+            let got = i32::from(s.dark_base[0][x % 2] + lo);
+            let err = (got - i32::from(level(x))).abs();
+            assert!(
+                err <= if x % 2 == 0 { 19 } else { 2 },
+                "x {x}: {got} vs {}",
+                level(x)
+            );
+        }
     }
 
     #[test]
