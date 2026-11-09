@@ -280,7 +280,7 @@ fn run_film(args: &Args) -> Result<(), String> {
         println!("saved the {} byte read to {path}", raw.len());
     }
     let saved = if args.infrared {
-        decode::infrared(&raw, session.layout, plan.output).save(&args.out)
+        session.decode_infrared(&raw, &args.area).save(&args.out)
     } else {
         let image = scan_core::image::DynamicImage::ImageRgb16(decode::rgb16(
             &raw,

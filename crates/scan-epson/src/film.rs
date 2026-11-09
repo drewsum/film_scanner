@@ -146,6 +146,13 @@ const fn steady_lead(lead_in: u8) -> i64 {
     368 + lead_in as i64
 }
 
+/// `1e 21` with only the line time set.
+fn line_time(t: u16) -> [u8; 26] {
+    let mut p = [0u8; 26];
+    p[..2].copy_from_slice(&t.to_le_bytes());
+    p
+}
+
 const STEADY_SCAN_MOTOR: [u8; 8] = steady_motor(0x7e);
 const STEADY_LEAD: i64 = steady_lead(0x7e);
 /// Infrared window reads run at this gain, unexposed (`1e 22` is 0 throughout an infrared
@@ -183,6 +190,10 @@ struct Mode {
     first_exposure: u16,
     /// `1e 21`: the line time and longest exposure. A normal one is at most half of it.
     max_exposure: u16,
+    /// `1e 21` during the exposure search. At 6,400 dpi the window read (17,280 px standing
+    /// still) stalls after two blocks at the scan's line time; Epson Scan searches at a longer
+    /// one.
+    search_line_time: u16,
     /// The white read's motor period: the line time over 24 (it reads at 1,600 dpi, 1.5 steps
     /// a line).
     white_step: u16,
@@ -193,6 +204,12 @@ struct Mode {
     lead: i64,
     /// `1e 41` byte 11 of the image read: `80` at 6,400 dpi, as Epson Scan sends it.
     image_kind: u8,
+    /// Lines each column sees the film after the earliest, by column mod 4 (see
+    /// [`Resample::stagger`]). Measured on a V500: the CCD's rows of pixels lie 16 lines
+    /// apart at 6,400 dpi (0.064 mm, 6 lines at 2,400) and its halves 80 further, and Epson
+    /// Scan reads as many lines more than the color skew needs (2 × 63 at 2,400, 2 × 211 at
+    /// 6,400).
+    stagger: [u8; 4],
     /// `1e 57` field 7, low byte.
     record_code: u32,
     /// The infrared pass: line time (`1e 21`), the image read's motor period, and the white
@@ -216,11 +233,13 @@ const MODES: [Mode; 6] = [
         strip: (0x20, 0x30),
         first_exposure: 1500,
         max_exposure: 0x0f00,
+        search_line_time: 0x0f00,
         white_step: 160,
         scan_ramp: (1249, 320, 512),
         scan_motor: [0x7e, 0x00, 0xff, 0x00, 0xff, 0x00, 0x02, 0x00],
         lead: 750,
         image_kind: 0x83,
+        stagger: [0; 4],
         record_code: 0x12,
         // Not captured; 800 dpi's line time at 6 steps a line.
         ir_line_time: 0x1860,
@@ -240,11 +259,13 @@ const MODES: [Mode; 6] = [
         strip: (0x20, 0x30),
         first_exposure: 1500,
         max_exposure: 0x0f00,
+        search_line_time: 0x0f00,
         white_step: 160,
         scan_ramp: (1250, 640, 512),
         scan_motor: [0x7e, 0x00, 0xff, 0x00, 0xff, 0x00, 0x02, 0x00],
         lead: 750,
         image_kind: 0x83,
+        stagger: [0; 4],
         record_code: 0x24,
         // Capture 38.
         ir_line_time: 0x1860,
@@ -265,11 +286,13 @@ const MODES: [Mode; 6] = [
         strip: (0x3d, 0x6d),
         first_exposure: 4000,
         max_exposure: 0x1d40,
+        search_line_time: 0x1d40,
         white_step: 312,
         scan_ramp: (234, 234, 1),
         scan_motor: steady_motor(0x80),
         lead: steady_lead(0x80),
         image_kind: 0x83,
+        stagger: [0; 4],
         record_code: 0x20,
         // Not captured; about 1,600 dpi's line time, in whole periods at 2 steps a line.
         ir_line_time: 0x21c0,
@@ -289,19 +312,22 @@ const MODES: [Mode; 6] = [
         strip: (0x3d, 0x6d),
         first_exposure: 4000,
         max_exposure: 0x1cf8,
+        search_line_time: 0x1cf8,
         white_step: 309,
         scan_ramp: (309, 309, 1),
         scan_motor: STEADY_SCAN_MOTOR,
         lead: STEADY_LEAD,
         image_kind: 0x83,
+        stagger: [0; 4],
         record_code: 0x45,
         // Capture 13.
         ir_line_time: 0x21a8,
         ir_period: 359,
         ir_white_step: 359,
     },
-    // Captures 41–44 (Epson Scan's 2,400 and 3,200 dpi, the same read). The origin lies
-    // between where captures 41 and 44 put it, 19 units apart.
+    // Captures 41–44 (Epson Scan's 2,400 and 3,200 dpi, the same read). The origin is
+    // capture 41's: a frame scanned at it lines up with Epson Scan's to 0.05 mm, as at 1,200
+    // and 6,400 dpi. Capture 44, of a frame in the other strip, puts it 19 units left.
     Mode {
         hw_dpi: 2400,
         x_dpi: 3200,
@@ -310,16 +336,18 @@ const MODES: [Mode; 6] = [
         ccd: 0x01,
         units_per_inch: 1600,
         units_per_px: (1, 1),
-        origin: 4770,
+        origin: 4783,
         search_x: (0x12b2, 0x3472),
         strip: (0x64, 0xc4),
         first_exposure: 4000,
         max_exposure: 0x1fe0,
+        search_line_time: 0x1fe0,
         white_step: 340,
         scan_ramp: (510, 510, 1),
         scan_motor: steady_motor(0x20),
         lead: steady_lead(0x20),
         image_kind: 0x83,
+        stagger: [6, 0, 6, 0],
         record_code: 0x0f,
         // Capture 42.
         ir_line_time: 0x2ee0,
@@ -341,11 +369,13 @@ const MODES: [Mode; 6] = [
         strip: (0xc8, 0x188),
         first_exposure: 4000,
         max_exposure: 0x2550,
+        search_line_time: 0x3690,
         white_step: 398,
         scan_ramp: (1592, 1592, 1),
         scan_motor: steady_motor(0x1e),
         lead: steady_lead(0x1e),
         image_kind: 0x80,
+        stagger: [16, 96, 0, 80],
         record_code: 0x07,
         // Not captured; 2,400 dpi's infrared line time over its color one, at 6 periods a line.
         ir_line_time: 0x36d8,
@@ -516,7 +546,7 @@ impl FilmPlan {
         } else {
             Carriage::Slow((y_steps - lead + SLOW_MOVE_OFFSET) as u32)
         };
-        let lines = h + 2 * skew_lines(hw);
+        let lines = h + 2 * skew_lines(hw) + u32::from(*mode.stagger.iter().max().unwrap());
         Ok(Self {
             output: Resample {
                 dpi,
@@ -524,6 +554,7 @@ impl FilmPlan {
                 hw_x_dpi: hw_x,
                 width,
                 height,
+                stagger: mode.stagger,
             },
             lines,
             x_units: (x0 as u16, x1 as u16),
@@ -904,9 +935,7 @@ impl FilmSession {
         p.command(STAGE, &[&[STAGE_LAMP]])?;
         p.command(PASS, &[&[CCD_800]])?;
         p.command(OFFSETS, &[&analog([FIRST_OFFSET; 3], [l.window_gain; 3])])?;
-        let mut max_exposure = [0u8; 26];
-        max_exposure[..2].copy_from_slice(&WINDOW_EXPOSURE.to_le_bytes());
-        p.command(EXPOSURE_21, &[&max_exposure])?;
+        p.command(EXPOSURE_21, &[&line_time(WINDOW_EXPOSURE)])?;
         upload(
             &mut p,
             tables::TYPE7,
@@ -1009,6 +1038,7 @@ impl FilmSession {
         if !l.infrared {
             p.command(LIGHT, &[&[l.calibrate]])?;
         }
+        self.read_window(&mut p, (x0, x1), self.read_line_time())?;
         p.command(EXPOSURE, &[&l.exposure(base_exposure, false)])?;
         p.command(
             GEOMETRY,
@@ -1111,6 +1141,34 @@ impl FilmSession {
         Ok(data)
     }
 
+    /// Above 1,600 dpi, Epson Scan's type-7 table for a read of x `x0..x1` at line time `lt`
+    /// (see [`tables::type7_window`]); the constant one is right below.
+    fn read_window(
+        &self,
+        p: &mut Protocol<'_>,
+        (x0, x1): (u16, u16),
+        lt: u16,
+    ) -> Result<(), ScanError> {
+        if self.mode.hw_dpi <= 1600 {
+            return Ok(());
+        }
+        upload(
+            p,
+            tables::TYPE7,
+            tables::TYPE7_ADDRESS,
+            &tables::type7_window(x0, x1, lt),
+        )
+    }
+
+    /// The line time of the calibration and image reads.
+    fn read_line_time(&self) -> u16 {
+        if self.light.infrared {
+            self.mode.ir_line_time
+        } else {
+            self.mode.max_exposure
+        }
+    }
+
     /// Mean 8-bit levels through the calibration window at an exposure.
     fn window_means(&self, p: &mut Protocol<'_>, e: u16) -> Result<[f64; 3], ScanError> {
         let m = self.mode;
@@ -1142,9 +1200,8 @@ impl FilmSession {
         if m.ccd != CCD_800 {
             p.command(PASS, &[&[m.ccd]])?;
         }
-        let mut max_exposure = [0u8; 26];
-        max_exposure[..2].copy_from_slice(&m.max_exposure.to_le_bytes());
-        p.command(EXPOSURE_21, &[&max_exposure])?;
+        p.command(EXPOSURE_21, &[&line_time(m.search_line_time)])?;
+        self.read_window(p, m.search_x, m.search_line_time)?;
 
         let mut e = m.first_exposure;
         let mut means = self.window_means(p, e)?;
@@ -1177,6 +1234,9 @@ impl FilmSession {
             }
             gains = next;
         }
+        if m.search_line_time != m.max_exposure {
+            p.command(EXPOSURE_21, &[&line_time(m.max_exposure)])?;
+        }
         Ok((e, gains))
     }
 
@@ -1187,10 +1247,9 @@ impl FilmSession {
         let mut gains = [0; 3];
         p.command(OFFSETS, &[&analog([FIRST_OFFSET; 3], gains)])?;
         p.command(PASS, &[&[m.ccd]])?;
-        let mut line_time = [0u8; 26];
-        line_time[..2].copy_from_slice(&m.ir_line_time.to_le_bytes());
-        p.command(EXPOSURE_21, &[&line_time])?;
+        p.command(EXPOSURE_21, &[&line_time(m.ir_line_time)])?;
         upload(p, tables::TYPE7, tables::TYPE7_ADDRESS, &tables::type7())?;
+        self.read_window(p, m.search_x, m.ir_line_time)?;
         let mut means = self.window_means(p, 0)?;
         if means.iter().cloned().fold(0.0, f64::max) < 8.0 {
             return Err(ScanError::Backend(format!(
@@ -1220,6 +1279,7 @@ impl FilmSession {
         gains: [u8; 3],
     ) -> Result<[u16; 3], ScanError> {
         let (s0, s1) = self.mode.strip;
+        self.read_window(p, self.mode.strip, self.read_line_time())?;
         let geometry = area_params(
             s0,
             s1,
@@ -1408,7 +1468,7 @@ mod tests {
             }
             // The left edge, within the 19 units captures 41 and 44 disagree by.
             assert!(
-                s.plan.x_units.0.abs_diff(x0) <= 16,
+                s.plan.x_units.0.abs_diff(x0) <= 19,
                 "{dpi} dpi, x {x}: {:#x} vs {x0:#x}",
                 s.plan.x_units.0
             );
@@ -1582,6 +1642,7 @@ mod tests {
             hw_x_dpi: 1600,
             width: 1600,
             height: 2,
+            stagger: [0; 4],
         };
         let px_per_mm = 1600.0 / f64::from(MM_PER_INCH);
         // A frame in the left strip: its infrared lands left of the color, increasingly so

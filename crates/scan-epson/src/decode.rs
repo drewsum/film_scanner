@@ -20,6 +20,9 @@ pub struct Resample {
     pub hw_x_dpi: u32,
     pub width: u32,
     pub height: u32,
+    /// Lines each raw column sees the film later than the earliest, by column mod 4: the
+    /// CCD's staggered pixels, which the V500 leaves in its film reads above 1,600 dpi.
+    pub stagger: [u8; 4],
 }
 
 impl From<&FlatbedPlan> for Resample {
@@ -30,6 +33,7 @@ impl From<&FlatbedPlan> for Resample {
             hw_x_dpi: plan.hw_dpi,
             width: plan.width,
             height: plan.height,
+            stagger: [0; 4],
         }
     }
 }
@@ -118,7 +122,9 @@ where
             let mut sum = 0u64;
             for line in rows.clone() {
                 for col in cols.clone() {
-                    let i = ((line + offset) * width + col + layout.crop_x as usize) * 3 + ch;
+                    let col = col + layout.crop_x as usize;
+                    let line = line + offset + usize::from(plan.stagger[col % 4]);
+                    let i = (line * width + col) * 3 + ch;
                     sum += u64::from(sample(i));
                 }
             }
@@ -182,5 +188,37 @@ mod tests {
             ir.get_pixel(0, 0).0,
             [((106.5 + 56.5 + 6.5) / 3.0 * 256.0) as u16]
         );
+    }
+
+    #[test]
+    fn undoes_the_stagger() {
+        // 1:1 at 40 dpi (a skew of 1 line). Each raw sample is the film row it sees: its
+        // column's stagger lines behind its line. Realigned, every output row is one film row.
+        let stagger = [1, 3, 0, 2];
+        let out = Resample {
+            dpi: 40,
+            hw_dpi: 40,
+            hw_x_dpi: 40,
+            width: 8,
+            height: 2,
+            stagger,
+        };
+        let layout = RawLayout {
+            lines: 7,
+            width: 8,
+            crop_x: 0,
+        };
+        let raw: Vec<u8> = (0..7u16)
+            .flat_map(|line| {
+                (0..8).flat_map(move |col| [10 + line - u16::from(stagger[col % 4]); 3])
+            })
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let ir = infrared(&raw, layout, out);
+        for y in 0..2 {
+            let row: Vec<u16> = (0..8).map(|x| ir.get_pixel(x, y).0[0]).collect();
+            // Blue, green and red from lines y, y + 1 and y + 2: film rows 10 + y + 1 on average.
+            assert_eq!(row, vec![11 + y as u16; 8], "row {y}");
+        }
     }
 }
