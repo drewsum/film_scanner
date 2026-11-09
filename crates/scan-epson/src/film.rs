@@ -417,6 +417,19 @@ impl Mode {
     }
 }
 
+/// After the end of a read's window (`x1` + 480 ticks, see [`tables::type7_window`]) a line
+/// runs on at least this many half line-time ticks in all of Epson Scan's reads; it lengthens
+/// the line time for wider reads. Without, a whole holder's white read stalls at 6,400 dpi.
+const LINE_TAIL: u32 = 5300;
+
+/// The shortest line time a read above 1,600 dpi ending at `x1` takes, in whole 48s (which
+/// keep its motor periods whole): 13,968 for the whole film area at 6,400 dpi and 9,648 at
+/// 3,200 × 2,400, as Epson Scan's search reads.
+fn window_line_time(x1: u16) -> u16 {
+    let end = (u32::from(x1) + 480).next_multiple_of(2) + 8 + LINE_TAIL;
+    end.div_ceil(2).next_multiple_of(48) as u16
+}
+
 /// What differs between a color pass and an infrared one.
 #[derive(Clone, Copy, Debug)]
 struct Light {
@@ -427,6 +440,8 @@ struct Light {
     image: u8,
     window_exposure: u16,
     window_gain: u8,
+    /// `1e 21` of the calibration and image reads.
+    line_time: u16,
     white_step: u16,
     /// The image read's motor table and `1e 01` mode, and the move's lead.
     scan_ramp: (u16, u16, usize),
@@ -435,6 +450,22 @@ struct Light {
 }
 
 impl Light {
+    /// This with the line time `t`, if it is longer: the white read's and the image read's
+    /// motor periods grow with it (when it runs at one speed).
+    fn with_line_time(mut self, t: u16) -> Self {
+        if t > self.line_time {
+            let scale =
+                |v: u16| (u32::from(v) * u32::from(t)).div_ceil(u32::from(self.line_time)) as u16;
+            self.white_step = scale(self.white_step);
+            if self.scan_ramp.2 == 1 {
+                let p = scale(self.scan_ramp.0);
+                self.scan_ramp = (p, p, 1);
+            }
+            self.line_time = t;
+        }
+        self
+    }
+
     fn new(mode: &Mode, infrared: bool) -> Self {
         if infrared {
             Self {
@@ -444,6 +475,7 @@ impl Light {
                 image: IR_LAMP,
                 window_exposure: 0,
                 window_gain: IR_WINDOW_GAIN,
+                line_time: mode.ir_line_time,
                 white_step: mode.ir_white_step,
                 scan_ramp: (mode.ir_period, mode.ir_period, 1),
                 // At one speed, with the color read's lead-in where that is steady too.
@@ -466,6 +498,7 @@ impl Light {
                 image: FILM_LAMP,
                 window_exposure: WINDOW_EXPOSURE,
                 window_gain: WINDOW_GAIN,
+                line_time: mode.max_exposure,
                 white_step: mode.white_step,
                 scan_ramp: mode.scan_ramp,
                 scan_motor: mode.scan_motor,
@@ -759,6 +792,11 @@ impl FilmSession {
             plan.output.stagger = mode.stagger_at(x0);
             plan.output.first_line -= IR_LAG;
         }
+        let light = if mode.hw_dpi > 1600 {
+            light.with_line_time(window_line_time(plan.x_units.1))
+        } else {
+            light
+        };
         // `1e 41` counts the lines in 16 bits: a whole holder at 6,400 dpi just fits.
         if plan.lines > u32::from(u16::MAX) {
             return Err(ScanError::InvalidRequest(format!(
@@ -1075,6 +1113,14 @@ impl FilmSession {
         } else {
             self.search_exposure(&mut p)?
         };
+        let searched = if l.infrared {
+            m.ir_line_time
+        } else {
+            m.search_line_time
+        };
+        if searched != l.line_time {
+            p.command(EXPOSURE_21, &[&line_time(l.line_time)])?;
+        }
         let offsets = self.search_offsets(&mut p, base_exposure, gains)?;
         let image_exposure = ((f64::from(base_exposure) * self.exposure_scale).round() as u16)
             .clamp(1, m.max_exposure);
@@ -1241,11 +1287,7 @@ impl FilmSession {
 
     /// The line time of the calibration and image reads.
     fn read_line_time(&self) -> u16 {
-        if self.light.infrared {
-            self.mode.ir_line_time
-        } else {
-            self.mode.max_exposure
-        }
+        self.light.line_time
     }
 
     /// Mean 8-bit levels through the calibration window at an exposure.
@@ -1314,9 +1356,6 @@ impl FilmSession {
                 break;
             }
             gains = next;
-        }
-        if m.search_line_time != m.max_exposure {
-            p.command(EXPOSURE_21, &[&line_time(m.max_exposure)])?;
         }
         Ok((e, gains))
     }
@@ -1437,6 +1476,32 @@ mod tests {
                 let s = session.unwrap();
                 assert!(s.plan.lines <= u32::from(u16::MAX), "{dpi} dpi");
             }
+        }
+        // Whole-holder reads take Epson Scan's line times for its search reads of the film
+        // area, with the motor periods in step; a frame's reads keep the mode's.
+        for (dpi, infrared, line_time, white_step, period) in [
+            (6400, false, 13968, 582, 2328),
+            (3200, false, 13968, 582, 2328),
+            (2400, false, 9648, 402, 603),
+            (2400, true, 12000, 500, 750),
+        ] {
+            let s = if infrared {
+                FilmSession::infrared(&FILM_AREA, dpi)
+            } else {
+                FilmSession::new(&FILM_AREA, dpi)
+            }
+            .unwrap();
+            let l = s.light;
+            assert_eq!(
+                (l.line_time, l.white_step, l.scan_ramp),
+                (line_time, white_step, (period, period, 1)),
+                "{dpi} dpi"
+            );
+        }
+        let frame = area(40.3, 203.8, 21.8, 31.4);
+        for dpi in [2400, 6400] {
+            let s = FilmSession::new(&frame, dpi).unwrap();
+            assert_eq!(s.light.line_time, s.mode.max_exposure, "{dpi} dpi");
         }
         let taller = ScanArea {
             height_mm: 300.0,

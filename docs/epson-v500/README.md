@@ -366,6 +366,13 @@ the CCD is clocked normally (`0x1000`) over the read and fast (`0x2000`) elsewhe
 Epson Scan's white and strip tables have a few more entries (`0x3000`, `0x40`, `0x180`), which
 `tables::type7_window` leaves out with no visible difference.
 
+**Wide reads take a longer line time.** In every one of Epson Scan's reads the line runs on at
+least about 5,300 ticks past x1 + 480, and it lengthens `1e 21` (in whole 48s) to keep that:
+13,968 for its search reads of the whole film area at 6,400 dpi, 9,648 at 3,200 × 2,400. A
+frame's reads fit the modes' own line times; a whole holder's don't, and at 6,400 dpi its
+white read stalls about 25 lines in. `scan_epson::film` lengthens the line time the same way,
+with the white and image reads' motor periods in step (both are proportional to it).
+
 **The CCD's pixels are staggered.** At 6,400 dpi neighbouring columns see the film at
 different times: by x (x0 + column) mod 4, 0, 80, 16 and 96 lines after the earliest (two rows
 of pixels 16 lines, 0.064 mm, apart, and the CCD's halves 80 further). At 3,200 × 2,400 alternate
