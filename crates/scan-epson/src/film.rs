@@ -85,6 +85,12 @@ const IR_CENTRE_MM: f64 = 39.2;
 /// on each side, so the stretch can be undone right to the area's edges: it moves pixels at
 /// most 20 px at 1,600 dpi, at the far edges of the film area.
 const IR_MARGIN: u32 = 32;
+/// The infrared plane comes out this many lines (at hardware resolution) above the color one:
+/// measured on a V500 at 1,600 and 2,400 dpi (5.6 and 4.8 lines, across the frame). The
+/// infrared read starts [`IR_ABOVE_STEPS`] higher so it can be moved down.
+const IR_LAG: u32 = 5;
+/// Carriage steps the infrared read starts above the area: whole lines at every resolution.
+const IR_ABOVE_STEPS: u32 = 48;
 /// The largest image read: 2 GiB, a whole holder at 2,400 dpi with room to spare. 3,200 and
 /// 6,400 dpi reach it at about a third of the holder.
 const MAX_READ: usize = 1 << 31;
@@ -204,11 +210,12 @@ struct Mode {
     lead: i64,
     /// `1e 41` byte 11 of the image read: `80` at 6,400 dpi, as Epson Scan sends it.
     image_kind: u8,
-    /// Lines each column sees the film after the earliest, by column mod 4 (see
+    /// Lines each column sees the film after the earliest, by its x (`x0` + column) mod 4 (see
     /// [`Resample::stagger`]). Measured on a V500: the CCD's rows of pixels lie 16 lines
     /// apart at 6,400 dpi (0.064 mm, 6 lines at 2,400) and its halves 80 further, and Epson
     /// Scan reads as many lines more than the color skew needs (2 × 63 at 2,400, 2 × 211 at
-    /// 6,400).
+    /// 6,400). At 2,400 dpi a read starting one unit further along swaps the columns over,
+    /// though a unit is two pixels.
     stagger: [u8; 4],
     /// `1e 57` field 7, low byte.
     record_code: u32,
@@ -347,7 +354,7 @@ const MODES: [Mode; 6] = [
         scan_motor: steady_motor(0x20),
         lead: steady_lead(0x20),
         image_kind: 0x83,
-        stagger: [6, 0, 6, 0],
+        stagger: [0, 6, 0, 6],
         record_code: 0x0f,
         // Capture 42.
         ir_line_time: 0x2ee0,
@@ -375,7 +382,7 @@ const MODES: [Mode; 6] = [
         scan_motor: steady_motor(0x1e),
         lead: steady_lead(0x1e),
         image_kind: 0x80,
-        stagger: [16, 96, 0, 80],
+        stagger: [0, 80, 16, 96],
         record_code: 0x07,
         // Not captured; 2,400 dpi's infrared line time over its color one, at 6 periods a line.
         ir_line_time: 0x36d8,
@@ -388,6 +395,11 @@ impl Mode {
     /// Read widths are whole 16 px and whole x units.
     fn width_align(&self) -> u32 {
         16 * self.units_per_px.1
+    }
+
+    /// [`Mode::stagger`] by column of a read starting at `x0`.
+    fn stagger_at(&self, x0: u16) -> [u8; 4] {
+        std::array::from_fn(|c| self.stagger[(usize::from(x0) + c) % 4])
     }
 
     /// Pixels the infrared read reaches past the color one on each side: [`IR_MARGIN`],
@@ -510,13 +522,15 @@ pub struct FilmPlan {
 }
 
 impl FilmPlan {
-    /// `lead` and `lead_in` are the move's and the read's (see [`steady_lead`]).
+    /// `lead` and `lead_in` are the move's and the read's (see [`steady_lead`]); the read
+    /// starts `above` lines higher (whole steps), the output still at the area's top.
     fn new(
         area: &ScanArea,
         dpi: u32,
         mode: &Mode,
         lead: i64,
         lead_in: u8,
+        above: u32,
     ) -> Result<Self, ScanError> {
         let (hw, hw_x) = (mode.hw_dpi, mode.x_dpi);
         let (width, height) = area.pixel_size(dpi);
@@ -541,12 +555,13 @@ impl FilmPlan {
             )));
         }
         let y_steps = i64::from(y) * STEPS_PER_INCH as i64 / i64::from(hw);
+        let lead = lead + i64::from(above * STEPS_PER_INCH as u32 / hw);
         let carriage = if y_steps - lead >= MIN_FAST_MOVE {
             Carriage::Fast((y_steps - lead) as u32)
         } else {
             Carriage::Slow((y_steps - lead + SLOW_MOVE_OFFSET) as u32)
         };
-        let lines = h + 2 * skew_lines(hw) + u32::from(*mode.stagger.iter().max().unwrap());
+        let lines = above + h + 2 * skew_lines(hw) + u32::from(*mode.stagger.iter().max().unwrap());
         Ok(Self {
             output: Resample {
                 dpi,
@@ -554,7 +569,8 @@ impl FilmPlan {
                 hw_x_dpi: hw_x,
                 width,
                 height,
-                stagger: mode.stagger,
+                stagger: mode.stagger_at(x0 as u16),
+                first_line: above,
             },
             lines,
             x_units: (x0 as u16, x1 as u16),
@@ -717,12 +733,19 @@ impl FilmSession {
                 ScanError::Unsupported(format!("{dpi} dpi: native film scans go up to 6,400"))
             })?;
         let light = Light::new(&mode, infrared);
-        let mut plan = FilmPlan::new(area, dpi, &mode, light.lead, light.scan_motor[0])?;
+        let above = if infrared {
+            IR_ABOVE_STEPS * mode.hw_dpi / STEPS_PER_INCH as u32
+        } else {
+            0
+        };
+        let mut plan = FilmPlan::new(area, dpi, &mode, light.lead, light.scan_motor[0], above)?;
         if infrared {
             let margin = mode.ir_margin();
             plan.read_width += 2 * margin;
             let x0 = plan.x_units.0 - (margin * mode.units_per_inch / mode.x_dpi) as u16;
             plan.x_units = (x0, x0 + mode.width_units(plan.read_width) as u16);
+            plan.output.stagger = mode.stagger_at(x0);
+            plan.output.first_line -= IR_LAG;
         }
         let len = plan.lines as usize * plan.read_width as usize * 6;
         if len > MAX_READ {
@@ -1643,6 +1666,7 @@ mod tests {
             width: 1600,
             height: 2,
             stagger: [0; 4],
+            first_line: 0,
         };
         let px_per_mm = 1600.0 / f64::from(MM_PER_INCH);
         // A frame in the left strip: its infrared lands left of the color, increasingly so
@@ -1707,7 +1731,10 @@ mod tests {
         let (Carriage::Fast(i), Carriage::Fast(c)) = (ir.plan.carriage, color.plan.carriage) else {
             panic!("slow move");
         };
-        assert_eq!(i - c, 256);
+        // The steady motor's lead, less the lines read above the area.
+        assert_eq!(i - c, 256 - IR_ABOVE_STEPS);
+        assert_eq!(ir.plan.lines, color.plan.lines + IR_ABOVE_STEPS / 3);
+        assert_eq!(ir.plan.output.first_line, IR_ABOVE_STEPS / 3 - IR_LAG);
     }
 
     /// A session that finds the CCD and the lamp out (as one stopped partway leaves them)
