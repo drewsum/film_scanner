@@ -31,6 +31,8 @@ const FILM_RESOLUTIONS: [u32; 11] = [100, 200, 300, 400, 600, 800, 1200, 1600, 2
 /// How far the infrared pass may land from the color one: where the carriage lands varies by
 /// up to 0.35 mm between sessions.
 const INFRARED_REACH_MM: f32 = 0.6;
+/// The infrared's offset is measured in bands this tall down the scan.
+const INFRARED_BAND_MM: f32 = 4.0;
 /// Film exposures beyond the calibrated one reach at most twice it.
 const MAX_FILM_EV: f32 = 1.0;
 /// The bed: 8.5 × 11.7 in, as Epson's WIA driver reports it.
@@ -237,14 +239,22 @@ impl V500Device {
                 None => infrared = Some(session.align_infrared_plane(stream, &area)),
             }
         }
-        // The infrared is a session of its own, landed from its own move: line it up with the
-        // color by its detail.
+        // The infrared is a session of its own, landed from its own move and not keeping step
+        // with the color down the holder: line it up with the color by its detail, band by band.
         if let (Some(ir), Some(pass)) = (&infrared, passes.first()) {
-            let reach = INFRARED_REACH_MM / scan_core::MM_PER_INCH * request.dpi as f32;
-            match register::infrared_offset(&pass.image, ir, reach) {
-                Some(offset) => {
-                    log::info!("infrared {offset:.2?} px from the color; lined up");
-                    infrared = Some(register::shifted(ir, offset));
+            let px = |mm: f32| mm / scan_core::MM_PER_INCH * request.dpi as f32;
+            let band = px(INFRARED_BAND_MM).round() as u32;
+            match register::infrared_offsets(&pass.image, ir, px(INFRARED_REACH_MM), band) {
+                Some(offsets) => {
+                    let k = offsets.knots();
+                    log::info!(
+                        "infrared {:.2?} px from the color at the top, {:.2?} at the bottom \
+                         ({} bands); lined up",
+                        k[0].1,
+                        k[k.len() - 1].1,
+                        k.len()
+                    );
+                    infrared = Some(register::shifted(ir, &offsets));
                 }
                 None => log::warn!("couldn't measure the infrared's offset from the color"),
             }

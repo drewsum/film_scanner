@@ -201,14 +201,24 @@ and the calibration below. Everything else is constant for a given geometry.
    `00 00 00 00 00 00 Dr Dr Dg Dg Db Db` (u16 LE) with D from step 2; the scanner subtracts
    those.
 4. **Dark read**: 16 lines with the lamp off (`1e a2 00`, `1e 22` byte 9 = 1, `1e 42` zero).
-5. **Image read.** `1e 42` holds a white base per channel (u16 × 3), then each channel's dark base
-   twice (u16 × 6). The shading table (`1e 84` type 6) has one u16 per pixel and channel,
-   pixel-interleaved. Its upper 10 bits are the pixel's white level above the white base in
-   64-count steps. Its lower 6 bits are the pixel's dark level above the dark base. The driver
-   smooths the dark profile (a ~65 px box filter matches) and takes its minimum as the dark
-   base. The white base is the dimmest pixel's white level under the glass (the first 8.5 in
-   of the read; past it the read falls off the calibration strip, and those pixels would halve
-   the base).
+5. **Image read.** `1e 42` holds a white base per channel (u16 × 3), then each channel's dark
+   bases for the read's even and odd pixels, counted from its first (u16 × 6). The shading
+   table (`1e 84` type 6) has one u16 per pixel and channel, pixel-interleaved. Its upper 10
+   bits are the pixel's white level above the white base in 64-count steps. Its lower 6 bits
+   are the pixel's dark level above its dark base. The driver smooths the dark profile (a ~65
+   px box filter matches) and takes its minimum as the dark base. The white base is the
+   dimmest pixel's white level under the glass (the first 8.5 in of the read; past it the read
+   falls off the calibration strip, and those pixels would halve the base).
+
+   The two dark bases are equal at 1,200 dpi and below. At 3,200 × 2,400 they're 20–40 counts
+   apart. At 6,400 they're 280–650 apart: capture 45 sends `d4 05 bf 04`, `69 08 ba 06`,
+   `83 0c fb 09`, and its dark read has the even pixels ~300 counts (red) above the odd ones.
+   The four staggered phases differ by up to ~90 more. With one base for both, a whole-holder
+   6,400 dpi scan had its odd columns ~1% of full scale darker than the even ones, which shows
+   as fine vertical stripes. `scan_epson::calibration` smooths the dark levels only among
+   pixels 4 apart, and takes each parity's own base. Where one parity's levels span more than
+   the table's 63 counts, it sets the base halfway, so neither end is off by more than it
+   must be.
 
 `scan_epson::calibration` computes all of this from the scanner's own reads. In capture 24, the
 table's upper field correlates 0.9999 with the white read and the lower field is within ~2
@@ -373,6 +383,11 @@ frame's reads fit the modes' own line times; a whole holder's don't, and at 6,40
 white read stalls about 25 lines in. `scan_epson::film` lengthens the line time the same way,
 with the white and image reads' motor periods in step (both are proportional to it).
 
+**Long tables go in 65,520-byte writes.** The shading table of a whole holder at 6,400 dpi is
+103,680 bytes (17,280 px × 6), the first upload over 64 KiB. Sent as one write, the scanner
+went silent, and the next read timed out. Epson's driver sends its firmware in writes of at
+most 65,520 bytes, and `scan_epson::protocol` splits every command's parameters the same way.
+
 **The CCD's pixels are staggered.** At 6,400 dpi neighbouring columns see the film at
 different times: by x (x0 + column) mod 4, 0, 80, 16 and 96 lines after the earliest (two rows
 of pixels 16 lines, 0.064 mm, apart, and the CCD's halves 80 further). At 3,200 × 2,400 alternate
@@ -441,10 +456,27 @@ LED: lamp `06` for the calibration reads, `05` off for the dark reads and `04` f
    **The planes are lined up after the scan.** Where the carriage lands varies by 0.1 to 0.35
    mm between sessions, and an infrared read at 3,200 × 2,400 lands about 0.06 mm from a
    6,400 dpi color one, so no fixed offset lines the planes up at every resolution.
-   `scan_epson::register` measures how far the infrared's detail is from the color's (the
-   normalised correlation of their fine detail, coarse to fine, to a fraction of a pixel) and
-   moves the infrared there. On this V500 it finds 1.5 px at 1,600 and 2,400 dpi, and 7.6 ×
-   19 px at 6,400, leaving the planes within a pixel along and 2 px (0.008 mm) across.
+   Nor do the passes keep step down a whole holder. On scans of all 12 frames, the
+   infrared drifts against the color over the first third of the holder:
+   - 1,200 dpi: −2.8 to −0.1 px;
+   - 3,200 dpi: −11 to +5 px;
+   - 6,400 dpi: about 7 to 30 px down, against 42 px across.
+
+   `scan_epson::register` measures how far the infrared's detail is from the color's. It
+   uses the normalised correlation of their fine detail, first over the whole scan, then in
+   4 mm bands down it, on each band's most detailed parts. It goes coarse to fine, down to
+   the finest level that still matches: the 3,200 and 6,400 dpi infrared is a 2,400 dpi read
+   scaled up, with no pixel-level detail. A running median over the bands drops strays.
+   Each infrared row is moved by the offset there, interpolated between bands. Measured
+   independently afterwards, the planes are within:
+   - 1,200 dpi: 0.5 px;
+   - 3,200 dpi: about 1 px, and 2.4 px across at the top of one strip, where the two strips
+     differ;
+   - 6,400 dpi: about 4 px (0.016 mm).
+
+   Before this, one offset measured on a window in the middle of the scan left the planes
+   up to 40 px apart at 6,400 dpi on a whole holder, because that window is the blank
+   between the strips.
 3. `1e 25 03`, `1e 11 03` (`02` at 1,600 dpi). Exposure `1e 22` is zero throughout: the line
    time `1e 21` sets it (`60 18` at 800 dpi, `a8 21` at 1,600). Gains start at 0 and aim for a
    window mean of about 210 (`0f 16 14` at 800 dpi). The offsets, white and dark reads follow
