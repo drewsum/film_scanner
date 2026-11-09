@@ -9,6 +9,7 @@ use std::collections::VecDeque;
 
 use scan_core::ScanError;
 
+use crate::protocol::MAX_WRITE;
 use crate::transport::Transport;
 
 const ACK: u8 = 0x06;
@@ -34,6 +35,8 @@ pub struct SimulatedScanner {
     reverse: bool,
     /// The image read under way, made a block at a time as it is read.
     feed: Option<Feed>,
+    /// Bytes of the table being uploaded (`1e 84`) still to come, in writes of their own.
+    table_left: usize,
 }
 
 /// An image read's blocks still to come: each `per_block` lines of `line` and a trailer.
@@ -135,8 +138,31 @@ impl Transport for SimulatedScanner {
                 self.replies.len()
             )));
         }
+        if data.len() > MAX_WRITE {
+            return Err(ScanError::Backend(format!(
+                "simulator: a write of {} bytes, past the {MAX_WRITE} the scanner takes",
+                data.len()
+            )));
+        }
         self.writes.push(data.to_vec());
         if let Some((cmd, left)) = self.awaiting.take() {
+            // A table: its header gives its length, which may come in several writes.
+            if cmd == [0x1e, 0x84] {
+                match (left, data) {
+                    (2, [_, _, _, _, _, a, b, c]) => {
+                        self.table_left =
+                            usize::from(*a) | usize::from(*b) << 8 | usize::from(*c) << 16;
+                        self.awaiting = Some((cmd, 1));
+                        return Ok(());
+                    }
+                    (1, _) if data.len() < self.table_left => {
+                        self.table_left -= data.len();
+                        self.awaiting = Some((cmd, 1));
+                        return Ok(());
+                    }
+                    _ => self.table_left = 0,
+                }
+            }
             match cmd {
                 [0x1e, 0x41] => self.geometry = data.to_vec(),
                 [0x1e, 0xa2] => self.lamp_off = matches!(data, [0x00 | 0x03 | 0x05]),
@@ -240,5 +266,20 @@ mod tests {
         g[18] = 11;
         p.command([0x1e, 0x41], &[&g]).unwrap();
         assert_eq!(p.read_data(30 * 1920 * 3).unwrap().len(), 30 * 1920 * 3);
+    }
+
+    #[test]
+    fn takes_long_tables_in_pieces() {
+        // A whole film area's shading table at 6,400 dpi: 17,280 px × 6 bytes.
+        let mut sim = SimulatedScanner::default();
+        let table = vec![7u8; 17280 * 6];
+        let mut p = Protocol::new(&mut sim, Duration::ZERO);
+        crate::session::upload(&mut p, 6, [0, 8, 1, 2], &table).unwrap();
+        p.wait_ready().unwrap();
+        let pieces: Vec<usize> = sim.writes[2..].iter().map(Vec::len).collect();
+        assert_eq!(pieces[..2], [MAX_WRITE, table.len() - MAX_WRITE]);
+        // Whole, it is refused.
+        let mut sim = SimulatedScanner::default();
+        assert!(sim.write(&table).is_err());
     }
 }

@@ -16,6 +16,9 @@ const STATUS: [u8; 2] = [0x1b, 0x03];
 /// Bit of the first status byte that is set while the carriage moves.
 const STATUS_BUSY: u8 = 0x40;
 const MAX_POLLS: usize = 2000;
+/// The longest write: Epson's driver sends its firmware in writes this long, and a 103,680-byte
+/// shading table sent whole goes unanswered.
+pub(crate) const MAX_WRITE: usize = 0xfff0;
 
 /// A scanner connection that speaks in commands rather than transfers.
 pub struct Protocol<'a> {
@@ -57,7 +60,9 @@ impl<'a> Protocol<'a> {
             return Ok(());
         }
         for p in params {
-            self.dev.write(p)?;
+            for piece in p.chunks(MAX_WRITE) {
+                self.dev.write(piece)?;
+            }
         }
         self.expect_ack(cmd)
     }
