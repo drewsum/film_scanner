@@ -11,11 +11,13 @@ use crate::template::RawLayout;
 pub type Rgb16Image = ImageBuffer<Rgb<u16>, Vec<u16>>;
 
 /// What a read becomes: the output size at the requested resolution, made from raw data at
-/// the hardware resolution.
+/// the hardware resolution: `hw_dpi` lines per inch, and `hw_x_dpi` pixels per inch across
+/// (more than the lines in the V500's 3,200 × 2,400 film mode).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Resample {
     pub dpi: u32,
     pub hw_dpi: u32,
+    pub hw_x_dpi: u32,
     pub width: u32,
     pub height: u32,
 }
@@ -25,6 +27,7 @@ impl From<&FlatbedPlan> for Resample {
         Self {
             dpi: plan.dpi,
             hw_dpi: plan.hw_dpi,
+            hw_x_dpi: plan.hw_dpi,
             width: plan.width,
             height: plan.height,
         }
@@ -99,16 +102,17 @@ where
 {
     let width = layout.width as usize;
     let skew = skew_lines(plan.hw_dpi) as usize;
-    let scale = f64::from(plan.hw_dpi) / f64::from(plan.dpi);
+    let scale = |hw: u32| f64::from(hw) / f64::from(plan.dpi);
+    let (scale_x, scale_y) = (scale(plan.hw_x_dpi), scale(plan.hw_dpi));
     // Raw lines/columns covered by output index `i`.
-    let span = |i: u32| {
+    let span = |i: u32, scale: f64| {
         let a = (f64::from(i) * scale) as usize;
         let b = ((f64::from(i + 1) * scale) as usize).max(a + 1);
         a..b
     };
     ImageBuffer::from_fn(plan.width, plan.height, |x, y| {
-        let cols = span(x);
-        let rows = span(y);
+        let cols = span(x, scale_x);
+        let rows = span(y, scale_y);
         let n = (cols.len() * rows.len()) as f64;
         let px = [(0, 2 * skew), (1, skew), (2, 0)].map(|(ch, offset)| {
             let mut sum = 0u64;

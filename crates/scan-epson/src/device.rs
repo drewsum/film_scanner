@@ -24,8 +24,9 @@ use crate::transport::Transport;
 pub const BACKEND_NAME: &str = "epson";
 /// Resolutions offered; native flatbed sessions go up to 400 dpi so far.
 const RESOLUTIONS: [u32; 7] = [50, 75, 100, 150, 200, 300, 400];
-/// Film resolutions: read at 400, 800 or 1,600 dpi and downsampled.
-const FILM_RESOLUTIONS: [u32; 8] = [100, 200, 300, 400, 600, 800, 1200, 1600];
+/// Film resolutions: read at the hardware resolution at or above, and downsampled (2,400
+/// from 3,200 × 2,400, 3,200 from 6,400).
+const FILM_RESOLUTIONS: [u32; 11] = [100, 200, 300, 400, 600, 800, 1200, 1600, 2400, 3200, 6400];
 /// Film exposures beyond the calibrated one reach at most twice it.
 const MAX_FILM_EV: f32 = 1.0;
 /// The bed: 8.5 × 11.7 in, as Epson's WIA driver reports it.

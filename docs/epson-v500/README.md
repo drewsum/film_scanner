@@ -110,6 +110,11 @@ Captures (in `target/captures`, not committed) are WIA scans made with
 | 35, 36 | 1,600 ppi, a frame on the other strip and one further along | x and y positions |
 | 38 | 800 ppi with iSRD | color pass at 200 dpi hardware, then infrared at 800 |
 | 39 | 400 ppi with multi-exposure | two whole sessions; the second exposes 2× |
+| 40 | Epson Scan, one frame at 1,200 dpi (48-bit, no corrections) | its own 1,200 dpi mode |
+| 41, 43 | the same frame at 3,200 and 2,400 dpi | the same read, 3,200 × 2,400 |
+| 42 | 3,200 dpi with Digital ICE | infrared pass at 3,200 × 2,400 |
+| 44 | 3,200 dpi, a frame on the other strip | x position |
+| 45 | 6,400 dpi | a 6,400 dpi mode |
 
 ### Scan parameters
 
@@ -318,17 +323,39 @@ calibration values and the lines per block (checked by
 | 400 | `01 06`, `10` (÷2) | `03` | 800, 2,365 | 1,249 → 320, `7e 00 ff 00 ff 00 02 00` | 750 |
 | 800 | `01 03`, `00` | `03` | 800, 2,365 | 1,250 → 640, the same | 750 |
 | 1,600 | `02 03`, `00` | `02` | 1,600, 4,730 | 309 flat, `7e 00 00 00 00 00 08 00` | 494 |
+| 1,200 | `01 02`, `a0` (÷4/3) | `02` | 1,600, 4,730 | 234 flat, `80 00 00 00 00 00 08 00` | 496 |
+| 3,200 × 2,400 | `01 01`, `00` | `01` | 1,600 (left edge), about 4,770 | 510 flat, `20 00 00 00 00 00 08 00` | 400 |
+| 6,400 | `08 03`, `00` | `00` | 1,600 (left edge), about 4,819 | 1,592 flat, `1e 00 00 00 00 00 08 00` | 398 |
 
-`1e 11` sets the CCD's horizontal sampling: x units are 2,400 (`01`), 1,600 (`02`), 800 (`03`) or
-533⅓ (`04`, the flatbed) per inch, and byte 8 subsamples from there. The film area is 2.7 × 9.33
+The last three are Epson Scan's (captures 40–45); SilverFast doesn't use them. `1e 11` sets the
+CCD's horizontal sampling: 6,400 (`00`), 3,200 (`01`), 1,600 (`02`), 800 (`03`) or 533⅓ (`04`,
+the flatbed) pixels per inch, and byte 8 subsamples from there. The film area is 2.7 × 9.33
 in (SilverFast's preview, 1,080 × 3,732 px at 400 dpi). An area at x px (hardware resolution)
 starts at origin + x px; its width is rounded up to 16 px. The move from the window is
 2,400 × y in − lead steps (fast: `ff 01 ff 01 10 00`, the 2,500 → 222 table). Shorter moves run
 at one speed (a one-entry table of 96, mode `00 00 00 00 18 00`) and land 1,024 steps further
 on: 274 steps for y = 0 at 400 dpi (capture 11). That offset is inferred for 800 and 1,600 dpi;
 on hardware, scans at y = 3 mm land where the preview has them, to within 0.25 mm. The read
-needs `2400 / hw × lines + 126` steps. SilverFast's lines per block reach 256 KiB at 1,600
-dpi; 64 KiB blocks work as well.
+needs `2400 / hw × lines` steps plus a lead-in, which is `1e 01` byte 4 (126 in SilverFast's
+reads; 128, 32 and 30 in Epson Scan's at 1,200, 2,400 and 6,400 dpi). A steady read's
+fast-move lead is always 368 steps more than its lead-in. SilverFast's lines per block reach
+256 KiB at 1,600 dpi; 64 KiB blocks work as well.
+
+**Above 1,600 dpi** the x units split: `1e 41`'s left edge stays at 1,600 units per inch from
+the origin, while the width (end − start) counts pixels at the CCD's resolution. Epson Scan's
+search reads cover the film area as 4,786–13,426 (8,640 px = 2.7 in at 3,200) and
+4,820–22,100 (17,280 px at 6,400). Epson Scan's 3,200 dpi is the 3,200 × 2,400 read with the
+lines scaled up (its 2,400 sends the very same commands), so a true 3,200 dpi scan is a 6,400
+read halved: about 3× the time of 2,400 (81 s against 26 s for a frame). The `1e 57` record
+gives x and y resolutions separately (`3200, 2400`). At 6,400 dpi the image read's `1e 41`
+byte 11 is `80`, not `83`. The line time is `1e 21`, and every white read's motor period is
+the line time over 24. Epson Scan reads 2 × 63 skew lines at 2,400 dpi and 2 × 211 at 6,400
+where 0.025 in would give 60 and 160; still to be checked on hardware.
+
+Captures 41 and 44 put the 3,200 × 2,400 origin 19 units apart (4,784 and 4,765), while Epson
+Scan's own images of one frame at 1,200, 2,400, 3,200 and 6,400 dpi line up within 2 px at
+1,200 dpi. USBPcap's snap length cuts Epson Scan's 256 KiB data reads to 64 KB, so the
+captures hold the commands but not whole images.
 
 **Multi-exposure** (capture 39) is a second whole session whose image read and its dark read use
 twice the exposure; the white read keeps the normal one, so the second pass comes out a stop
@@ -353,7 +380,7 @@ LED: lamp `06` for the calibration reads, `05` off for the dark reads and `04` f
    unit from the visible lamp. Without the move the window reads are dark. Then `1e 25 00` and
    the CCD's 932-step move, and the window read and move back as for color (no `1e 8a`, no
    saturated read).
-2. `1e 11 01` reads at 2,400 x units per inch: a gain search, then a 490-line read during which
+2. `1e 11 01` reads at 3,200 px per inch across: a gain search, then a 490-line read during which
    neither unit moves, between lamp and CCD moves that cancel out. SilverFast probably measures
    the LED's alignment from it: its infrared read starts 8 px earlier than the color one in
    capture 38, and 1 later but 16 wider in capture 13. `scan_epson::film` leaves it out and
