@@ -324,8 +324,8 @@ calibration values and the lines per block (checked by
 | 800 | `01 03`, `00` | `03` | 800, 2,365 | 1,250 → 640, the same | 750 |
 | 1,600 | `02 03`, `00` | `02` | 1,600, 4,730 | 309 flat, `7e 00 00 00 00 00 08 00` | 494 |
 | 1,200 | `01 02`, `a0` (÷4/3) | `02` | 1,600, 4,730 | 234 flat, `80 00 00 00 00 00 08 00` | 496 |
-| 3,200 × 2,400 | `01 01`, `00` | `01` | 1,600 (left edge), about 4,770 | 510 flat, `20 00 00 00 00 00 08 00` | 400 |
-| 6,400 | `08 03`, `00` | `00` | 1,600 (left edge), about 4,819 | 1,592 flat, `1e 00 00 00 00 00 08 00` | 398 |
+| 3,200 × 2,400 | `01 01`, `00` | `01` | 1,600 (left edge), 4,783 | 510 flat, `20 00 00 00 00 00 08 00` | 400 |
+| 6,400 | `08 03`, `00` | `00` | 1,600 (left edge), 4,819 | 1,592 flat, `1e 00 00 00 00 00 08 00` | 398 |
 
 The last three are Epson Scan's (captures 40–45); SilverFast doesn't use them. `1e 11` sets the
 CCD's horizontal sampling: 6,400 (`00`), 3,200 (`01`), 1,600 (`02`), 800 (`03`) or 533⅓ (`04`,
@@ -349,12 +349,38 @@ lines scaled up (its 2,400 sends the very same commands), so a true 3,200 dpi sc
 read halved: about 3× the time of 2,400 (81 s against 26 s for a frame). The `1e 57` record
 gives x and y resolutions separately (`3200, 2400`). At 6,400 dpi the image read's `1e 41`
 byte 11 is `80`, not `83`. The line time is `1e 21`, and every white read's motor period is
-the line time over 24. Epson Scan reads 2 × 63 skew lines at 2,400 dpi and 2 × 211 at 6,400
-where 0.025 in would give 60 and 160; still to be checked on hardware.
+the line time over 24. At 6,400 dpi the exposure search reads at a longer line time,
+`1e 21 90 36` (13,968, against 9,552 for the scan): at the scan's, the 17,280 px window read
+stalls after two blocks and the USB read times out.
+
+**The type-7 table** is no longer constant above 1,600 dpi: Epson Scan uploads one before each
+read, for its x range. Without it, those reads land 12 to 20 mm left of their x. After the
+constant 16 bytes come (tick, mode) pairs along the line, u16 LE, in half line-time ticks:
+the CCD is clocked normally (`0x1000`) over the read and fast (`0x2000`) elsewhere.
+
+- When x0 ≥ 400, the constant table's last mode becomes `0x2000` and an entry
+  ((x0 + 280) & !7, `0x1000`) follows. Epson Scan's start lies 253 to 316 ticks after x0.
+- Then (x1 + 480 rounded up to even, `0x2000`), and (2 × line time − 8, `0x1000`), then `ff`.
+
+Epson Scan's white and strip tables have a few more entries (`0x3000`, `0x40`, `0x180`), which
+`tables::type7_window` leaves out with no visible difference.
+
+**The CCD's pixels are staggered.** At 6,400 dpi neighbouring columns see the film at
+different times: by x (x0 + column) mod 4, 0, 80, 16 and 96 lines after the earliest (two rows
+of pixels 16 lines, 0.064 mm, apart, and the CCD's halves 80 further). At 3,200 × 2,400 alternate
+columns are 6 lines apart, 0, 6, 0, 6 by x0 + column. A read one unit further along swaps the
+columns over, though a unit is two pixels there. Epson Scan reads just the lines this needs on
+top of the color skew (2 × 63 at 2,400 dpi and 2 × 211 at 6,400, where 0.025 in gives 60 and
+160), and so does `scan_epson::film`; `decode` takes each column from its own line. Uncorrected,
+edges come out doubled, and a 6,400 read halved to 3,200 is half as sharp as a 1,600 one.
+Measured on hardware at x0 7,309, 7,322 (2,400) and 7,358, 7,359 (6,400).
 
 Captures 41 and 44 put the 3,200 × 2,400 origin 19 units apart (4,784 and 4,765), while Epson
 Scan's own images of one frame at 1,200, 2,400, 3,200 and 6,400 dpi line up within 2 px at
-1,200 dpi. USBPcap's snap length cuts Epson Scan's 256 KiB data reads to 64 KB, so the
+1,200 dpi. With the type-7 table and stagger, native scans of capture 41's frame line up with
+Epson Scan's within 0.5 px across at 2,400 dpi and 7 px at 3,200; along the strip they vary
+by up to 0.35 mm between sessions, as the carriage lands. Color channels register within
+0.4 px at 1,600, 2,400 and 3,200 dpi. USBPcap's snap length cuts Epson Scan's 256 KiB data reads to 64 KB, so the
 captures hold the commands but not whole images.
 
 **Multi-exposure** (capture 39) is a second whole session whose image read and its dark read use
@@ -384,8 +410,11 @@ LED: lamp `06` for the calibration reads, `05` off for the dark reads and `04` f
    neither unit moves, between lamp and CCD moves that cancel out. SilverFast probably measures
    the LED's alignment from it: its infrared read starts 8 px earlier than the color one in
    capture 38, and 1 later but 16 wider in capture 13. `scan_epson::film` leaves it out and
-   shifts its infrared read by a fixed 18/2,400 in (6 px at 800 dpi). That is measured on this
-   V500, and puts the two planes within a pixel of each other in x and 2 px (at 1,600 dpi) in y.
+   reads the infrared wider, undoing the infrared's slight magnification about 39.2 mm across
+   the film area (`IR_STRETCH`). The infrared also comes out about 5 lines (at hardware
+   resolution) above the color at 1,600 and 2,400 dpi, so the infrared read starts 48 steps
+   higher and the plane is moved 5 lines down. Measured on this V500: the planes line up
+   within a pixel across and 1.5 lines along at both resolutions.
 3. `1e 25 03`, `1e 11 03` (`02` at 1,600 dpi). Exposure `1e 22` is zero throughout: the line
    time `1e 21` sets it (`60 18` at 800 dpi, `a8 21` at 1,600). Gains start at 0 and aim for a
    window mean of about 210 (`0f 16 14` at 800 dpi). The offsets, white and dark reads follow
