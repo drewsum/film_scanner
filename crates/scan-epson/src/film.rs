@@ -381,10 +381,12 @@ const MODES: [Mode; 6] = [
         image_kind: 0x80,
         stagger: [0, 80, 16, 96],
         record_code: 0x07,
-        // Not captured; 2,400 dpi's infrared line time over its color one, at 6 periods a line.
-        ir_line_time: 0x36d8,
-        ir_period: 2340,
-        ir_white_step: 585,
+        // Not captured. Epson Scan's longest line time at 6,400 dpi (its exposure search's): a
+        // little longer, 2,400 dpi's infrared line time over its color one, stalls the white
+        // or dark read. 6 periods a line.
+        ir_line_time: 0x3690,
+        ir_period: 2328,
+        ir_white_step: 582,
     },
 ];
 
@@ -582,6 +584,14 @@ impl FilmPlan {
     /// subsampled).
     fn calibration_width(&self) -> usize {
         usize::from(self.x_units.1 - self.x_units.0)
+    }
+}
+
+/// Names the read a failed read was: they all fail alike.
+fn read_error(read: &'static str) -> impl Fn(ScanError) -> ScanError {
+    move |e| match e {
+        ScanError::Backend(m) => ScanError::Backend(format!("{read} read: {m}")),
+        other => other,
     }
 }
 
@@ -1015,7 +1025,9 @@ impl FilmSession {
         )?;
         p.command(MOTOR, &[&motor(WINDOW_READ_STEPS, WINDOW_READ_MOTOR)])?;
         let width = usize::from(x1 - x0);
-        let window = p.read_data(width * usize::from(lines) * 3)?;
+        let window = p
+            .read_data(width * usize::from(lines) * 3)
+            .map_err(read_error("holder"))?;
         p.wait_ready()?;
         let back = back_move(&window, width).unwrap_or_else(|| {
             log::warn!("no calibration window in the holder read; assuming the usual place");
@@ -1044,7 +1056,8 @@ impl FilmSession {
             )?;
             p.command(LEVELS, &[&[0u8; 18]])?;
             p.command(GAIN, &[&window_gain()])?;
-            p.read_data(usize::from(x1 - x0) * usize::from(lines) * 6)?;
+            p.read_data(usize::from(x1 - x0) * usize::from(lines) * 6)
+                .map_err(read_error("standing"))?;
             p.wait_ready()?;
         }
         p.command(STAGE, &[&[STAGE_BOTH]])?;
@@ -1079,7 +1092,9 @@ impl FilmSession {
         )?;
         p.command(LEVELS, &[&[0u8; 18]])?;
         p.command(GAIN, &[&neutral_gain()])?;
-        let strip = p.read_data(usize::from(s1 - s0) * 8 * 6)?;
+        let strip = p
+            .read_data(usize::from(s1 - s0) * 8 * 6)
+            .map_err(read_error("masked strip"))?;
         p.wait_ready()?;
         let darks = calibration::white_read_darks(&strip);
 
@@ -1109,7 +1124,9 @@ impl FilmSession {
             &l.white_step.to_le_bytes(),
         )?;
         p.command(MOTOR, &[&WHITE_MOTOR])?;
-        let white = p.read_data(cal_width * usize::from(WHITE_LINES) * 6)?;
+        let white = p
+            .read_data(cal_width * usize::from(WHITE_LINES) * 6)
+            .map_err(read_error("white"))?;
         p.wait_ready()?;
 
         p.command(LIGHT, &[&[l.off]])?;
@@ -1124,7 +1141,9 @@ impl FilmSession {
         p.command(LEVELS, &[&[0u8; 18]])?;
         p.command(GAIN, &[&neutral_gain()])?;
         p.command(GEOMETRY, &[&dark_geometry])?;
-        let dark = p.read_data(cal_width * usize::from(DARK_LINES) * 6)?;
+        let dark = p
+            .read_data(cal_width * usize::from(DARK_LINES) * 6)
+            .map_err(read_error("dark"))?;
         p.wait_ready()?;
         p.command(LIGHT, &[&[l.image]])?;
         p.query(POSITION, 4)?;
@@ -1189,7 +1208,8 @@ impl FilmSession {
             done += block.len();
             progress.progress(CALIBRATED + (1.0 - CALIBRATED) * done as f32 / len as f32);
             received(block);
-        })?;
+        })
+        .map_err(read_error("image"))?;
         p.wait_ready()?;
         p.query(OPEN, 1)?;
         Ok(())
@@ -1239,7 +1259,9 @@ impl FilmSession {
         )?;
         p.command(LEVELS, &[&[0u8; 18]])?;
         p.command(GAIN, &[&neutral_gain()])?;
-        let data = p.read_data(usize::from(x1 - x0) * 4 * 3)?;
+        let data = p
+            .read_data(usize::from(x1 - x0) * 4 * 3)
+            .map_err(read_error("window"))?;
         p.wait_ready()?;
         Ok(channel_means(&data, false))
     }
@@ -1353,7 +1375,9 @@ impl FilmSession {
                 p.command(LIGHT, &[&[FILM_LAMP_OFF]])?;
             }
             p.command(GEOMETRY, &[&geometry])?;
-            let data = p.read_data(usize::from(s1 - s0) * 4 * 6)?;
+            let data = p
+                .read_data(usize::from(s1 - s0) * 4 * 6)
+                .map_err(read_error("offset"))?;
             p.wait_ready()?;
             let means = channel_means(&data, true);
             let mut settled = true;
