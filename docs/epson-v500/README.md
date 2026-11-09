@@ -429,9 +429,15 @@ LED: lamp `06` for the calibration reads, `05` off for the dark reads and `04` f
    13,968. With Digital ICE on, Epson Scan's 6,400 dpi reads both passes at 3,200 × 2,400, the
    commands of its 3,200 dpi with ICE (capture 42), and scales them up (capture 46).
    `scan_epson::film` keeps the color pass at 6,400 and reads only the infrared at 3,200 ×
-   2,400, scaled up to the color's pixels: it only finds dust. That read lands 0.055 mm left
-   and 0.06 mm above a 6,400 dpi color read of the same area (as Epson Scan's own 6,400 and
-   2,400 dpi images do), so it reads that much further on.
+   2,400, scaled up to the color's pixels: it only finds dust.
+
+   **The planes are lined up after the scan.** Where the carriage lands varies by 0.1 to 0.35
+   mm between sessions, and an infrared read at 3,200 × 2,400 lands about 0.06 mm from a
+   6,400 dpi color one, so no fixed offset lines the planes up at every resolution.
+   `scan_epson::register` measures how far the infrared's detail is from the color's (the
+   normalised correlation of their fine detail, coarse to fine, to a fraction of a pixel) and
+   moves the infrared there. On this V500 it finds 1.5 px at 1,600 and 2,400 dpi, and 7.6 ×
+   19 px at 6,400, leaving the planes within a pixel along and 2 px (0.008 mm) across.
 3. `1e 25 03`, `1e 11 03` (`02` at 1,600 dpi). Exposure `1e 22` is zero throughout: the line
    time `1e 21` sets it (`60 18` at 800 dpi, `a8 21` at 1,600). Gains start at 0 and aim for a
    window mean of about 210 (`0f 16 14` at 800 dpi). The offsets, white and dark reads follow

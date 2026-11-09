@@ -94,10 +94,6 @@ const IR_LAG: u32 = 5;
 /// 6,400 dpi (capture 46). Finer scans keep their color pass and scale the infrared up: it only
 /// finds dust and scratches.
 const IR_MAX_DPI: u32 = 2400;
-/// How far right and down an infrared read at 3,200 × 2,400 lands from a 6,400 dpi color one
-/// of the same area, in mm: its pixels show the film this much up and left. Measured on a V500
-/// (6.4 and 7.6 px at 3,200 dpi); Epson Scan's own 6,400 and 2,400 dpi images are as far apart.
-const IR_SCALED_UP_OFFSET_MM: [f32; 2] = [0.055, 0.06];
 /// Carriage steps the infrared read starts above the area: whole lines at every resolution.
 const IR_ABOVE_STEPS: u32 = 48;
 /// The read that finds the window: 150 lines at 200 dpi of the gap between the strips.
@@ -740,25 +736,8 @@ impl FilmSession {
     }
 
     fn with_light(area: &ScanArea, dpi: u32, infrared: bool) -> Result<Self, ScanError> {
-        // Infrared above 2,400 dpi is read at 3,200 × 2,400, a little further on to line up
-        // with the color, and scaled up.
+        // Infrared above 2,400 dpi is read at 3,200 × 2,400 and scaled up.
         let read_dpi = if infrared { dpi.min(IR_MAX_DPI) } else { dpi };
-        let moved;
-        let area = if read_dpi < dpi {
-            let [dx, dy] = IR_SCALED_UP_OFFSET_MM;
-            moved = ScanArea {
-                x_mm: (area.x_mm + dx)
-                    .min(FILM_AREA.width_mm - area.width_mm)
-                    .max(0.0),
-                y_mm: (area.y_mm + dy)
-                    .min(FILM_AREA.height_mm - area.height_mm)
-                    .max(0.0),
-                ..*area
-            };
-            &moved
-        } else {
-            area
-        };
         let mode = *MODES
             .iter()
             .find(|m| m.hw_dpi.min(m.x_dpi) >= read_dpi)
@@ -1803,10 +1782,7 @@ mod tests {
                 (session.plan.output.width, session.plan.output.height),
                 (color.plan.output.width, color.plan.output.height)
             );
-            // Read like a color pass at that resolution, moved to line up.
-            let [dx, dy] = IR_SCALED_UP_OFFSET_MM.map(|d| if dpi > IR_MAX_DPI { d } else { 0.0 });
-            let moved = area(a.x_mm + dx, a.y_mm + dy, a.width_mm, a.height_mm);
-            let color = FilmSession::new(&moved, dpi.min(IR_MAX_DPI)).unwrap();
+            let color = FilmSession::new(&a, dpi.min(IR_MAX_DPI)).unwrap();
             assert_eq!(session.mode.hw_dpi, color.mode.hw_dpi);
             // The same read as the color pass, moved with the steady motor's lead, and wider.
             let m = session.mode;

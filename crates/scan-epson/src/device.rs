@@ -16,6 +16,7 @@ use scan_core::{
 
 use crate::decode;
 use crate::film::{self, FilmSession};
+use crate::register;
 use crate::session::FlatbedSession;
 use crate::system::WiaPause;
 use crate::tables;
@@ -27,6 +28,9 @@ const RESOLUTIONS: [u32; 7] = [50, 75, 100, 150, 200, 300, 400];
 /// Film resolutions: read at the hardware resolution at or above, and downsampled (2,400
 /// from 3,200 × 2,400, 3,200 from 6,400).
 const FILM_RESOLUTIONS: [u32; 11] = [100, 200, 300, 400, 600, 800, 1200, 1600, 2400, 3200, 6400];
+/// How far the infrared pass may land from the color one: where the carriage lands varies by
+/// up to 0.35 mm between sessions.
+const INFRARED_REACH_MM: f32 = 0.6;
 /// Film exposures beyond the calibrated one reach at most twice it.
 const MAX_FILM_EV: f32 = 1.0;
 /// The bed: 8.5 × 11.7 in, as Epson's WIA driver reports it.
@@ -231,6 +235,18 @@ impl V500Device {
                     image: image(stream.into_rgb16(), request.bit_depth),
                 }),
                 None => infrared = Some(session.align_infrared_plane(stream, &area)),
+            }
+        }
+        // The infrared is a session of its own, landed from its own move: line it up with the
+        // color by its detail.
+        if let (Some(ir), Some(pass)) = (&infrared, passes.first()) {
+            let reach = INFRARED_REACH_MM / scan_core::MM_PER_INCH * request.dpi as f32;
+            match register::infrared_offset(&pass.image, ir, reach) {
+                Some(offset) => {
+                    log::info!("infrared {offset:.2?} px from the color; lined up");
+                    infrared = Some(register::shifted(ir, offset));
+                }
+                None => log::warn!("couldn't measure the infrared's offset from the color"),
             }
         }
         progress.progress(1.0);

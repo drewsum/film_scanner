@@ -25,6 +25,7 @@ pub mod firmware;
 pub mod geometry;
 pub mod pcap;
 pub mod protocol;
+pub mod register;
 pub mod replay;
 pub mod session;
 pub mod sim;
