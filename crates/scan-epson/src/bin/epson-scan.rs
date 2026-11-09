@@ -1,9 +1,9 @@
 //! Scan an area of the flatbed natively, up to 400 dpi, or of the film holder (`--film`), up
-//! to 1,600.
+//! to 6,400.
 //!
 //! ```text
-//! epson-scan --dpi N --area X,Y,W,H --out OUT.png [--bits 8|16] [--film [--ev EV | --ir]]
-//!            [--path DEV] [--simulate]
+//! epson-scan --dpi N --area X,Y,W,H --out OUT.png [--bits 8|16]
+//!            [--film [--ev EV | --ir] [--raw RAW.bin]] [--path DEV] [--simulate]
 //! epson-scan --template CAPTURE.pcap [--template ...] --dpi N --area X,Y,W,H --out OUT.png
 //!            [--calibration live|recorded|flat] [--path DEV] [--offline]
 //! ```
@@ -11,6 +11,8 @@
 //! The area is in mm from the bed's corner, or with `--film` from the film area's (2.7 × 9.33 in,
 //! SilverFast's preview). `--ev` exposes a film read up to one stop more than calibrated (a
 //! multi-exposure pass); `--ir` makes the infrared pass instead, saved as a 16-bit grey plane.
+//! `--raw` also saves the film read as the scanner sent it: 16-bit little-endian RGB, the
+//! plan's read width per line.
 //! Stop the WIA service first
 //! (`Stop-Service stisvc -Force`), or its polling interferes. By default the whole session is
 //! generated ([`scan_epson::session`]); `--simulate` runs it against a simulated scanner.
@@ -49,6 +51,7 @@ struct Args {
     film: bool,
     ev: f32,
     infrared: bool,
+    raw: Option<String>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -60,7 +63,7 @@ fn parse_args() -> Result<Args, String> {
     let mut simulate = false;
     let mut calibration = Calibration::Live;
     let mut bit_depth = BitDepth::Eight;
-    let (mut film, mut ev, mut infrared) = (false, 0.0, false);
+    let (mut film, mut ev, mut infrared, mut raw) = (false, 0.0, false, None);
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
@@ -88,6 +91,7 @@ fn parse_args() -> Result<Args, String> {
             "--film" => film = true,
             "--ev" => ev = value()?.parse().map_err(|_| "bad --ev")?,
             "--ir" => infrared = true,
+            "--raw" => raw = Some(value()?),
             "--bits" => {
                 bit_depth = match value()?.as_str() {
                     "8" => BitDepth::Eight,
@@ -108,6 +112,9 @@ fn parse_args() -> Result<Args, String> {
     }
     if bit_depth == BitDepth::Sixteen && !templates.is_empty() {
         return Err("--template scans are 8-bit".into());
+    }
+    if raw.is_some() && !film {
+        return Err("--raw needs --film".into());
     }
     if infrared && !film {
         return Err("--ir needs --film".into());
@@ -131,6 +138,7 @@ fn parse_args() -> Result<Args, String> {
         film,
         ev,
         infrared,
+        raw,
     })
 }
 
@@ -248,10 +256,12 @@ fn run_film(args: &Args) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     let plan = &session.plan;
     println!(
-        "plan: {}x{} px, {} lines at {} dpi, x {:?}, {:?}, scan {} steps",
+        "plan: {}x{} px, {} lines of {} px at {} x {} dpi, x {:?}, {:?}, scan {} steps",
         plan.output.width,
         plan.output.height,
         plan.lines,
+        plan.read_width,
+        plan.output.hw_x_dpi,
         plan.output.hw_dpi,
         plan.x_units,
         plan.carriage,
@@ -265,6 +275,10 @@ fn run_film(args: &Args) -> Result<(), String> {
     let raw = session
         .run(dev.as_mut(), POLL_DELAY)
         .map_err(|e| e.to_string())?;
+    if let Some(path) = &args.raw {
+        std::fs::write(path, &raw).map_err(|e| format!("{path}: {e}"))?;
+        println!("saved the {} byte read to {path}", raw.len());
+    }
     let saved = if args.infrared {
         decode::infrared(&raw, session.layout, plan.output).save(&args.out)
     } else {
