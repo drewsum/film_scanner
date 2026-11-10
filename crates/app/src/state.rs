@@ -1,6 +1,7 @@
 //! UI-independent application state and its transitions, driven by worker events.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use scan_core::{
     BitDepth, Capabilities, ColorMode, DeviceId, DeviceInfo, Exposure, ScanError, ScanRequest,
@@ -12,6 +13,7 @@ use scan_film::{FilmStock, Inverter, Mono, MonoStock, Printing};
 use scan_process::adjust::{self, Adjustments, Levels};
 use scan_process::{DustRemoval, ExposureMerge, FrameDetection, FrameRect};
 
+use crate::eta::Eta;
 use crate::export::{self, ExportSettings};
 use crate::history::{self, History, Preset};
 use crate::session::{self, Roll};
@@ -479,7 +481,7 @@ impl Default for ScanSettings {
 }
 
 /// Resolution used for preview scans (the lowest supported at or above this).
-pub const PREVIEW_DPI: u32 = 75;
+pub const PREVIEW_DPI: u32 = 600;
 /// How much brighter a multi-exposure scan's second pass is, in stops: as much as the V500
 /// takes, and enough to lift the densest film well clear of the noise.
 pub const EXTRA_EV: f32 = 1.0;
@@ -491,6 +493,8 @@ pub struct AppState {
     pub capabilities: Option<Capabilities>,
     pub settings: ScanSettings,
     pub activity: Activity,
+    /// The running scan's progress, for its time left.
+    pub scan_eta: Eta,
     pub status: String,
     pub error: Option<String>,
     pub result: Option<Arc<ScanResult>>,
@@ -539,6 +543,7 @@ impl Default for AppState {
             capabilities: None,
             settings: ScanSettings::default(),
             activity: Activity::Idle,
+            scan_eta: Eta::default(),
             status: "Ready".into(),
             error: None,
             result: None,
@@ -674,6 +679,7 @@ impl AppState {
                     kind,
                     progress: 0.0,
                 };
+                self.scan_eta.reset();
                 self.status = format!("{} at {} dpi...", kind.label(), request.dpi);
                 self.error = None;
                 Some(Command::Scan {
@@ -1517,6 +1523,7 @@ impl AppState {
             Event::Progress(p) => {
                 if let Activity::Scanning { progress, .. } = &mut self.activity {
                     *progress = p;
+                    self.scan_eta.update(Instant::now(), p);
                 }
                 None
             }
@@ -1827,9 +1834,14 @@ mod tests {
 
     /// A preview scan, applied; returns the command that follows it.
     fn preview(state: &mut AppState) -> Option<Command> {
-        let Some(Command::Scan { request, kind, .. }) = state.start_scan(ScanKind::Preview) else {
+        let Some(Command::Scan {
+            mut request, kind, ..
+        }) = state.start_scan(ScanKind::Preview)
+        else {
             panic!("expected scan command");
         };
+        // At the lowest resolution, as the full preview one is slow to draw and detect in tests.
+        request.dpi = 75;
         let mut dev = MockBackend.open(&MockBackend::device_info()).unwrap();
         let result = dev.scan(&request, &mut NoProgress);
         state.apply(Event::ScanDone { kind, result })
@@ -2114,13 +2126,13 @@ mod tests {
     }
 
     #[test]
-    fn preview_request_uses_low_resolution_without_infrared() {
+    fn preview_request_uses_preview_resolution_without_infrared() {
         let mut state = with_mock_open();
         state.settings.infrared = true;
         let preview = state.build_request(ScanKind::Preview).unwrap();
         assert_eq!(
             (preview.dpi, preview.bit_depth, preview.infrared),
-            (75, BitDepth::Eight, false)
+            (600, BitDepth::Eight, false)
         );
         let full = state.build_request(ScanKind::Final).unwrap();
         assert_eq!(

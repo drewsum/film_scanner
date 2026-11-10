@@ -2,6 +2,7 @@
 
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::time::Instant;
 
 use eframe::egui::{self, Align, Layout, RichText};
 use scan_core::image::DynamicImage;
@@ -12,6 +13,7 @@ use scan_film::{Mono, Printing, Rendering, Toning};
 
 use crate::crop::{BedView, CropEditor};
 use crate::edit::{self, Editor};
+use crate::eta;
 use crate::export::{self, ExportSettings, FrameFormat};
 use crate::history::Preset;
 use crate::session;
@@ -265,6 +267,9 @@ impl ScannerApp {
                             .desired_width(200.0)
                             .show_percentage(),
                     );
+                    if let Some(left) = self.state.scan_eta.remaining(Instant::now()) {
+                        ui.label(eta::describe(left));
+                    }
                 }
                 _ => {
                     ui.spinner();
