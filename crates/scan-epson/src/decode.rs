@@ -136,15 +136,25 @@ impl Stream {
         }
     }
 
-    /// Even out the four phases of raw columns in a color read decoded 1:1 across: the CCD's
-    /// staggered pixels, which differ by a percent or so in gain and dark level beyond what
-    /// the shading table can hold (its dark field spans 63 counts, the phases' dark levels
-    /// over 100 apart at 6,400 dpi). Each phase's gain and offset come from how its pixels
-    /// compare with the mean of their group of four, over the whole read; Epson Scan's raw
-    /// reads have the same stripes and its images don't.
+    /// Even out the four phases of raw columns in a color read: the CCD's staggered pixels,
+    /// which differ by a percent or so in gain and dark level beyond what the shading table
+    /// can hold (its dark field spans 63 counts, the phases' dark levels over 100 apart at
+    /// 6,400 dpi). Each output column takes the phase of its first raw column, so a read
+    /// decoded 1:1 across has four and one decoded 2:1 (3,200 dpi from 6,400) two, each a
+    /// pair of raw phases. Each phase's gain and offset come from how its pixels compare with
+    /// the mean of their group of four columns, over the whole read; Epson Scan's raw reads
+    /// have the same stripes and its images don't. Other scales mix the phases unevenly and
+    /// are left as read.
     pub fn with_phase_balance(mut self) -> Self {
-        if matches!(self.kind, Kind::Tone(_)) {
-            self.balance = Some(PhaseBalance::default());
+        let scale = self.grid.scale_x;
+        if matches!(self.kind, Kind::Tone(_)) && (scale == 1.0 || scale == 2.0) {
+            let phases = (0..self.grid.plan.width)
+                .map(|x| ((Grid::span(x, scale).start + self.grid.crop_x) % 4) as u8)
+                .collect();
+            self.balance = Some(PhaseBalance {
+                phases,
+                sums: Default::default(),
+            });
         }
         self
     }
@@ -162,7 +172,7 @@ impl Stream {
             let luts = balance.luts(curve);
             let width = out.width as usize;
             for (i, px) in self.pixels.as_chunks_mut::<3>().0.iter_mut().enumerate() {
-                let lut = &luts[(i % width + self.grid.crop_x) % 4];
+                let lut = &luts[usize::from(balance.phases[i % width])];
                 for (c, v) in px.iter_mut().enumerate() {
                     *v = lut[c][usize::from(*v)];
                 }
@@ -212,7 +222,7 @@ impl Stream {
             if let Some(balance) = &mut self.balance
                 && self.row.is_multiple_of(BALANCE_EVERY)
             {
-                balance.add(&self.pixels[start..], self.grid.crop_x);
+                balance.add(&self.pixels[start..]);
             }
             self.row += 1;
         }
@@ -230,20 +240,20 @@ impl Stream {
 }
 
 /// Per channel and phase of raw column, sums for fitting `v = gain × m + offset`, where `v`
-/// is a linear pixel and `m` the mean of its group of four (one pixel of each phase). The
+/// is a linear pixel and `m` the mean of its group of four columns (each phase alike). The
 /// gains average 1 and the offsets 0, so the groups' means stay as read. Kept about 32,768
 /// for precision.
-#[derive(Default)]
 struct PhaseBalance {
+    /// Each output column's phase.
+    phases: Vec<u8>,
     sums: [[[f64; 5]; 4]; 3],
 }
 
 impl PhaseBalance {
-    /// Add a row of linear RGB pixels whose first is raw column `crop_x`.
-    fn add(&mut self, row: &[u16], crop_x: usize) {
-        // Groups start at a raw column of phase 0.
-        let skip = (4 - crop_x % 4) % 4;
-        for group in row.get(3 * skip..).unwrap_or_default().as_chunks::<12>().0 {
+    /// Add a row of linear RGB pixels.
+    fn add(&mut self, row: &[u16]) {
+        let groups = row.as_chunks::<12>().0;
+        for (group, phases) in groups.iter().zip(self.phases.as_chunks::<4>().0) {
             for c in 0..3 {
                 let v: [f64; 4] = std::array::from_fn(|k| f64::from(group[3 * k + c]));
                 let m = v.iter().sum::<f64>() / 4.0;
@@ -251,9 +261,9 @@ impl PhaseBalance {
                     continue;
                 }
                 let m = m - 32768.0;
-                for (phase, v) in v.into_iter().enumerate() {
+                for (&phase, v) in phases.iter().zip(v) {
                     let v = v - 32768.0;
-                    let s = &mut self.sums[c][phase];
+                    let s = &mut self.sums[c][usize::from(phase)];
                     for (sum, add) in s.iter_mut().zip([1.0, m, m * m, v, v * m]) {
                         *sum += add;
                     }
@@ -476,16 +486,57 @@ mod tests {
     #[test]
     fn balances_the_phases() {
         // Smooth film-like content with noise, read through phases a percent or so apart in
-        // gain and some tens of counts in dark level, with the read starting at phase 2.
+        // gain and some tens of counts in dark level, with the read starting at phase 2:
+        // decoded 1:1, and 2:1 (as 3,200 dpi from a 6,400 dpi read), where each column
+        // averages two phases.
+        for scale in [1, 2] {
+            balances_at(scale);
+        }
+        // Other scales, and the infrared, are left as read.
+        let out = |dpi| Resample {
+            dpi,
+            hw_dpi: 40,
+            hw_x_dpi: 40,
+            width: 8,
+            height: 8,
+            stagger: [0; 4],
+            first_line: 0,
+        };
+        let layout = RawLayout {
+            lines: 20,
+            width: 20,
+            crop_x: 0,
+        };
+        assert!(
+            Stream::rgb16(layout, out(30))
+                .with_phase_balance()
+                .balance
+                .is_none()
+        );
+        assert!(
+            Stream::rgb16(layout, out(10))
+                .with_phase_balance()
+                .balance
+                .is_none()
+        );
+        assert!(
+            Stream::infrared(layout, out(40))
+                .with_phase_balance()
+                .balance
+                .is_none()
+        );
+    }
+
+    fn balances_at(scale: usize) {
         let (w, h) = (256usize, 640usize);
         let gain = [0.985, 1.012, 1.0, 1.003];
         let offset = [-60.0, 40.0, 80.0, -60.0];
         let out = Resample {
-            dpi: 40,
+            dpi: 40 / scale as u32,
             hw_dpi: 40,
             hw_x_dpi: 40,
-            width: w as u32,
-            height: h as u32,
+            width: (w / scale) as u32,
+            height: (h / scale) as u32,
             stagger: [0; 4],
             first_line: 0,
         };
@@ -523,10 +574,11 @@ mod tests {
             std::array::from_fn(|phase| {
                 let d: Vec<f64> = img
                     .enumerate_pixels()
-                    .filter(|(x, _, _)| (*x as usize + 2) % 4 == phase)
+                    .filter(|(x, _, _)| (*x as usize * scale + 2) % 4 == phase)
+                    .filter(|_| scale == 1 || phase % 2 == 0)
                     .map(|(x, y, px)| f64::from(px.0[1]) - f64::from(flat.get_pixel(x, y).0[1]))
                     .collect();
-                d.iter().sum::<f64>() / d.len() as f64
+                d.iter().sum::<f64>() / d.len().max(1) as f64
             })
         };
         let before = error(&rgb16(&striped, layout, out));
@@ -535,14 +587,11 @@ mod tests {
             stream.push(piece);
         }
         let after = error(&stream.into_rgb16());
-        assert!(before.iter().any(|e| e.abs() > 100.0), "{before:?}");
+        assert!(before.iter().any(|e| e.abs() > 30.0), "{scale}: {before:?}");
         assert!(
             after.iter().all(|e| e.abs() < 15.0),
-            "{before:?} -> {after:?}"
+            "{scale}: {before:?} -> {after:?}"
         );
-        // The infrared is left as is.
-        let ir = Stream::infrared(layout, out).with_phase_balance();
-        assert!(ir.balance.is_none());
     }
 
     #[test]
