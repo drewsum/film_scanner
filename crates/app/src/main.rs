@@ -5,6 +5,7 @@
 
 mod crop;
 mod edit;
+mod eta;
 mod export;
 mod history;
 mod icc;

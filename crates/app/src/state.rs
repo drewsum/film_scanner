@@ -1,6 +1,7 @@
 //! UI-independent application state and its transitions, driven by worker events.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use scan_core::{
     BitDepth, Capabilities, ColorMode, DeviceId, DeviceInfo, Exposure, ScanError, ScanRequest,
@@ -12,6 +13,7 @@ use scan_film::{FilmStock, Inverter, Mono, MonoStock, Printing};
 use scan_process::adjust::{self, Adjustments, Levels};
 use scan_process::{DustRemoval, ExposureMerge, FrameDetection, FrameRect};
 
+use crate::eta::Eta;
 use crate::export::{self, ExportSettings};
 use crate::history::{self, History, Preset};
 use crate::session::{self, Roll};
@@ -491,6 +493,8 @@ pub struct AppState {
     pub capabilities: Option<Capabilities>,
     pub settings: ScanSettings,
     pub activity: Activity,
+    /// The running scan's progress, for its time left.
+    pub scan_eta: Eta,
     pub status: String,
     pub error: Option<String>,
     pub result: Option<Arc<ScanResult>>,
@@ -539,6 +543,7 @@ impl Default for AppState {
             capabilities: None,
             settings: ScanSettings::default(),
             activity: Activity::Idle,
+            scan_eta: Eta::default(),
             status: "Ready".into(),
             error: None,
             result: None,
@@ -674,6 +679,7 @@ impl AppState {
                     kind,
                     progress: 0.0,
                 };
+                self.scan_eta.reset();
                 self.status = format!("{} at {} dpi...", kind.label(), request.dpi);
                 self.error = None;
                 Some(Command::Scan {
@@ -1517,6 +1523,7 @@ impl AppState {
             Event::Progress(p) => {
                 if let Activity::Scanning { progress, .. } = &mut self.activity {
                     *progress = p;
+                    self.scan_eta.update(Instant::now(), p);
                 }
                 None
             }
