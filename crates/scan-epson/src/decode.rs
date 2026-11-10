@@ -10,6 +10,18 @@ use crate::template::RawLayout;
 /// A 16-bit RGB image.
 pub type Rgb16Image = ImageBuffer<Rgb<u16>, Vec<u16>>;
 
+/// Rows a [`Stream`]'s phase balance samples: one in this many.
+const BALANCE_EVERY: u32 = 8;
+/// Groups of four pixels the phase balance measures: linear means in this range (dense film
+/// to bright, short of clipping), with no pixel clipped.
+const BALANCE_RANGE: std::ops::RangeInclusive<f64> = 655.0..=58982.0;
+/// Fewer groups than this leave a phase as read.
+const BALANCE_MIN_GROUPS: f64 = 1000.0;
+/// Gains and offsets beyond these aren't the CCD's phases (some ±2% and a few hundred
+/// counts in Epson Scan's raw 6,400 dpi read), so the phase is left as read.
+const BALANCE_MAX_GAIN: f64 = 0.05;
+const BALANCE_MAX_OFFSET: f64 = 2000.0;
+
 /// What a read becomes: the output size at the requested resolution, made from raw data at
 /// the hardware resolution: `hw_dpi` lines per inch, and `hw_x_dpi` pixels per inch across
 /// (more than the lines in the V500's 3,200 × 2,400 film mode).
@@ -88,6 +100,8 @@ pub struct Stream {
     /// The next output row, and the rows so far: 3 channels, or 1 for infrared.
     row: u32,
     pixels: Vec<u16>,
+    /// With [`Stream::with_phase_balance`]: rows are kept linear until the end.
+    balance: Option<PhaseBalance>,
 }
 
 enum Kind {
@@ -118,7 +132,21 @@ impl Stream {
             base: 0,
             row: 0,
             pixels: Vec::with_capacity(out.width as usize * out.height as usize * channels),
+            balance: None,
         }
+    }
+
+    /// Even out the four phases of raw columns in a color read decoded 1:1 across: the CCD's
+    /// staggered pixels, which differ by a percent or so in gain and dark level beyond what
+    /// the shading table can hold (its dark field spans 63 counts, the phases' dark levels
+    /// over 100 apart at 6,400 dpi). Each phase's gain and offset come from how its pixels
+    /// compare with the mean of their group of four, over the whole read; Epson Scan's raw
+    /// reads have the same stripes and its images don't.
+    pub fn with_phase_balance(mut self) -> Self {
+        if matches!(self.kind, Kind::Tone(_)) {
+            self.balance = Some(PhaseBalance::default());
+        }
+        self
     }
 
     /// The read's next bytes.
@@ -130,6 +158,16 @@ impl Stream {
     pub fn into_rgb16(mut self) -> Rgb16Image {
         self.rows(true);
         let out = self.grid.plan;
+        if let (Some(balance), Kind::Tone(curve)) = (self.balance.take(), &self.kind) {
+            let luts = balance.luts(curve);
+            let width = out.width as usize;
+            for (i, px) in self.pixels.as_chunks_mut::<3>().0.iter_mut().enumerate() {
+                let lut = &luts[(i % width + self.grid.crop_x) % 4];
+                for (c, v) in px.iter_mut().enumerate() {
+                    *v = lut[c][usize::from(*v)];
+                }
+            }
+        }
         ImageBuffer::from_raw(out.width, out.height, self.pixels).expect("whole image")
     }
 
@@ -155,9 +193,13 @@ impl Stream {
                 buf.get(at..at + 2)
                     .map_or(0, |b| u32::from(u16::from_le_bytes([b[0], b[1]])))
             };
+            let start = self.pixels.len();
             for x in 0..out.width {
                 let mean = self.grid.pixel(x, self.row, sample);
                 match &self.kind {
+                    Kind::Tone(_) if self.balance.is_some() => {
+                        self.pixels.extend(mean.map(|m| m.round() as u16))
+                    }
                     Kind::Tone(curve) => {
                         self.pixels.extend(mean.map(|m| curve[m.round() as usize]))
                     }
@@ -166,6 +208,11 @@ impl Stream {
                         self.pixels.push(((m[0] + m[1] + m[2] + 1) / 3) as u16);
                     }
                 }
+            }
+            if let Some(balance) = &mut self.balance
+                && self.row.is_multiple_of(BALANCE_EVERY)
+            {
+                balance.add(&self.pixels[start..], self.grid.crop_x);
             }
             self.row += 1;
         }
@@ -179,6 +226,79 @@ impl Stream {
                 self.base += done / line_len;
             }
         }
+    }
+}
+
+/// Per channel and phase of raw column, sums for fitting `v = gain × m + offset`, where `v`
+/// is a linear pixel and `m` the mean of its group of four (one pixel of each phase). The
+/// gains average 1 and the offsets 0, so the groups' means stay as read. Kept about 32,768
+/// for precision.
+#[derive(Default)]
+struct PhaseBalance {
+    sums: [[[f64; 5]; 4]; 3],
+}
+
+impl PhaseBalance {
+    /// Add a row of linear RGB pixels whose first is raw column `crop_x`.
+    fn add(&mut self, row: &[u16], crop_x: usize) {
+        // Groups start at a raw column of phase 0.
+        let skip = (4 - crop_x % 4) % 4;
+        for group in row.get(3 * skip..).unwrap_or_default().as_chunks::<12>().0 {
+            for c in 0..3 {
+                let v: [f64; 4] = std::array::from_fn(|k| f64::from(group[3 * k + c]));
+                let m = v.iter().sum::<f64>() / 4.0;
+                if !BALANCE_RANGE.contains(&m) || v.contains(&65535.0) {
+                    continue;
+                }
+                let m = m - 32768.0;
+                for (phase, v) in v.into_iter().enumerate() {
+                    let v = v - 32768.0;
+                    let s = &mut self.sums[c][phase];
+                    for (sum, add) in s.iter_mut().zip([1.0, m, m * m, v, v * m]) {
+                        *sum += add;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Per phase and channel, the gain and offset; `None` where the fit is short of groups
+    /// or out of bounds.
+    fn fit(&self) -> [[Option<(f64, f64)>; 3]; 4] {
+        std::array::from_fn(|phase| {
+            std::array::from_fn(|c| {
+                let [n, m, mm, v, vm] = self.sums[c][phase];
+                if n < BALANCE_MIN_GROUPS {
+                    return None;
+                }
+                let (m, v) = (m / n, v / n);
+                let var = mm / n - m * m;
+                let gain = (vm / n - m * v) / var;
+                let offset = (v + 32768.0) - gain * (m + 32768.0);
+                ((gain - 1.0).abs() <= BALANCE_MAX_GAIN && offset.abs() <= BALANCE_MAX_OFFSET)
+                    .then_some((gain, offset))
+            })
+        })
+    }
+
+    /// Per phase and channel, every linear value balanced and through `curve`.
+    fn luts(&self, curve: &[u16]) -> [[Vec<u16>; 3]; 4] {
+        let fit = self.fit();
+        log::info!(
+            "phase balance (gain, offset) by phase, R G B: {:?}",
+            fit.map(|p| p.map(|f| f.map(|(g, o)| ((g * 1e4).round() / 1e4, o.round()))))
+        );
+        fit.map(|p| {
+            p.map(|f| {
+                let (gain, offset) = f.unwrap_or((1.0, 0.0));
+                (0..=u16::MAX)
+                    .map(|v| {
+                        let b = ((f64::from(v) - offset) / gain).round().clamp(0.0, 65535.0);
+                        curve[b as usize]
+                    })
+                    .collect()
+            })
+        })
     }
 }
 
@@ -351,6 +471,78 @@ mod tests {
                 assert_eq!(row, vec![11 + (first + y) as u16; 8], "row {y}");
             }
         }
+    }
+
+    #[test]
+    fn balances_the_phases() {
+        // Smooth film-like content with noise, read through phases a percent or so apart in
+        // gain and some tens of counts in dark level, with the read starting at phase 2.
+        let (w, h) = (256usize, 640usize);
+        let gain = [0.985, 1.012, 1.0, 1.003];
+        let offset = [-60.0, 40.0, 80.0, -60.0];
+        let out = Resample {
+            dpi: 40,
+            hw_dpi: 40,
+            hw_x_dpi: 40,
+            width: w as u32,
+            height: h as u32,
+            stagger: [0; 4],
+            first_line: 0,
+        };
+        let layout = RawLayout {
+            lines: (h + 2) as u32,
+            width: (w + 2) as u32,
+            crop_x: 2,
+        };
+        let film = |line: usize, col: usize| {
+            let (x, y) = (col as f64, line as f64);
+            let noise = ((line * 7919 + col * 104_729) % 401) as f64 - 200.0;
+            20000.0
+                + 15000.0 * (x / 37.0).sin() * (y / 23.0).cos()
+                + 4000.0 * (y / 91.0).sin()
+                + noise
+        };
+        let read = |stripes: bool| -> Vec<u8> {
+            (0..h + 2)
+                .flat_map(|line| (0..w + 2).map(move |col| (line, col)))
+                .flat_map(|(line, col)| {
+                    let v = film(line, col);
+                    let v = if stripes {
+                        gain[col % 4] * v + offset[col % 4]
+                    } else {
+                        v
+                    };
+                    [(v.round() as u16).to_le_bytes(); 3]
+                })
+                .flatten()
+                .collect()
+        };
+        let flat = rgb16(&read(false), layout, out);
+        let striped = read(true);
+        let error = |img: &Rgb16Image| -> [f64; 4] {
+            std::array::from_fn(|phase| {
+                let d: Vec<f64> = img
+                    .enumerate_pixels()
+                    .filter(|(x, _, _)| (*x as usize + 2) % 4 == phase)
+                    .map(|(x, y, px)| f64::from(px.0[1]) - f64::from(flat.get_pixel(x, y).0[1]))
+                    .collect();
+                d.iter().sum::<f64>() / d.len() as f64
+            })
+        };
+        let before = error(&rgb16(&striped, layout, out));
+        let mut stream = Stream::rgb16(layout, out).with_phase_balance();
+        for piece in striped.chunks(5000) {
+            stream.push(piece);
+        }
+        let after = error(&stream.into_rgb16());
+        assert!(before.iter().any(|e| e.abs() > 100.0), "{before:?}");
+        assert!(
+            after.iter().all(|e| e.abs() < 15.0),
+            "{before:?} -> {after:?}"
+        );
+        // The infrared is left as is.
+        let ir = Stream::infrared(layout, out).with_phase_balance();
+        assert!(ir.balance.is_none());
     }
 
     #[test]

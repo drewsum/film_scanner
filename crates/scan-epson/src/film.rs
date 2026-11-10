@@ -826,7 +826,13 @@ impl FilmSession {
     pub fn decoder(&self) -> decode::Stream {
         let out = self.plan.output;
         if !self.light.infrared {
-            return decode::Stream::rgb16(self.layout, out);
+            let stream = decode::Stream::rgb16(self.layout, out);
+            // The CCD's staggered pixels show as stripes where each output column is a raw one.
+            return if self.mode.stagger != [0; 4] && out.hw_x_dpi == out.dpi {
+                stream.with_phase_balance()
+            } else {
+                stream
+            };
         }
         let scale = f64::from(out.hw_x_dpi) / f64::from(out.dpi);
         let wide = Resample {

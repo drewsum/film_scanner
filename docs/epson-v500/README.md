@@ -242,6 +242,21 @@ and the calibration below. Everything else is constant for a given geometry.
    the table's 63 counts, it sets the base halfway, so neither end is off by more than it
    must be.
 
+   That leaves the 6,400 dpi phases about ±1% apart. The even phases' dark levels are
+   115–160 counts apart, so the dimmest and brightest are each tens of counts off. Blue's
+   gains also differ by about ±0.5%. Epson Scan's raw read has the same stripes, ±1–2%. Its
+   table leaves one even phase 90–127 counts high, and its images are flat, so the driver
+   evens them out on the host. `decode::Stream::with_phase_balance` does the same for film
+   color reads with the stagger at 1:1 across (3,200 and 6,400 dpi):
+   - **Fit:** on every 8th row, it compares each pixel with the mean of its group of four.
+     It fits each channel and phase's gain and offset over the whole read, in linear
+     values.
+   - **Correct:** it applies the fit with the tone curve as the image is handed over.
+
+   On a whole-holder 6,400 dpi scan, the phases went from ±1.5% to within ±0.1%. The fit was
+   mostly offsets, −100 to +80 linear counts. At 3,200, green's ±0.5% even/odd went to about
+   ±0.1%; it drifts slightly down the holder.
+
 `scan_epson::calibration` computes all of this from the scanner's own reads. In capture 24, the
 table's upper field correlates 0.9999 with the white read and the lower field is within ~2
 counts of the smoothed dark read. The driver's white levels carry some noise this read doesn't
