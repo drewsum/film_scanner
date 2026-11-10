@@ -1202,7 +1202,10 @@ impl FilmSession {
         p.command(LIGHT, &[&[l.image]])?;
         p.query(POSITION, 4)?;
 
-        dump_calibration(l.infrared, &[("strip", &strip), ("white", &white), ("dark", &dark)]);
+        dump_calibration(
+            l.infrared,
+            &[("strip", &strip), ("white", &white), ("dark", &dark)],
+        );
         let shading = Shading::compute(&white, &dark, cal_width, darks, cal_width, WHITE_SHIFTS)
             .ok_or_else(|| {
                 ScanError::Backend(format!(
