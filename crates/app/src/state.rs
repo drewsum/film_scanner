@@ -479,7 +479,7 @@ impl Default for ScanSettings {
 }
 
 /// Resolution used for preview scans (the lowest supported at or above this).
-pub const PREVIEW_DPI: u32 = 75;
+pub const PREVIEW_DPI: u32 = 600;
 /// How much brighter a multi-exposure scan's second pass is, in stops: as much as the V500
 /// takes, and enough to lift the densest film well clear of the noise.
 pub const EXTRA_EV: f32 = 1.0;
@@ -1827,9 +1827,14 @@ mod tests {
 
     /// A preview scan, applied; returns the command that follows it.
     fn preview(state: &mut AppState) -> Option<Command> {
-        let Some(Command::Scan { request, kind, .. }) = state.start_scan(ScanKind::Preview) else {
+        let Some(Command::Scan {
+            mut request, kind, ..
+        }) = state.start_scan(ScanKind::Preview)
+        else {
             panic!("expected scan command");
         };
+        // At the lowest resolution, as the full preview one is slow to draw and detect in tests.
+        request.dpi = 75;
         let mut dev = MockBackend.open(&MockBackend::device_info()).unwrap();
         let result = dev.scan(&request, &mut NoProgress);
         state.apply(Event::ScanDone { kind, result })
@@ -2114,13 +2119,13 @@ mod tests {
     }
 
     #[test]
-    fn preview_request_uses_low_resolution_without_infrared() {
+    fn preview_request_uses_preview_resolution_without_infrared() {
         let mut state = with_mock_open();
         state.settings.infrared = true;
         let preview = state.build_request(ScanKind::Preview).unwrap();
         assert_eq!(
             (preview.dpi, preview.bit_depth, preview.infrared),
-            (75, BitDepth::Eight, false)
+            (600, BitDepth::Eight, false)
         );
         let full = state.build_request(ScanKind::Final).unwrap();
         assert_eq!(
