@@ -3,7 +3,9 @@
 //!
 //! 1. A small read of a masked strip of the CCD gives the black level the scanner subtracts
 //!    during the white read (`1e 42`).
-//! 2. A 32-line white read of the calibration strip gives each pixel's white level.
+//! 2. A 32-line white read of the calibration strip gives each pixel's white level: the mean
+//!    of its lines near their median, so a speck the carriage passes over on the strip doesn't
+//!    darken the pixel's white (and brighten its column in every image line).
 //! 3. A 16-line read with the lamp off gives each pixel's dark level.
 //! 4. The final `1e 42` carries per-channel white and dark bases (the dimmest pixel under the
 //!    glass, and the smoothed dark minimum of the even and of the odd pixels), and the shading
@@ -31,6 +33,9 @@ const DARK_PHASES: usize = 4;
 const LIT_FRACTION: f64 = 0.1;
 const WHITE_MAX: f64 = 1023.0;
 const DARK_MAX: f64 = 63.0;
+/// White-read lines further than this fraction from a pixel's median are left out of its
+/// level: some 4 times the lines' noise (0.7% in Epson Scan's 3,200 and 6,400 dpi reads).
+const WHITE_TOLERANCE: f64 = 0.03;
 
 /// Per-channel black levels subtracted during the white read, from the masked-strip read.
 pub fn white_read_darks(dark_ref: &[u8]) -> [u16; 3] {
@@ -80,7 +85,7 @@ impl Shading {
         {
             return None;
         }
-        let white = column_means(white, white.len() / line);
+        let white = column_levels(white, white.len() / line);
         let dark = smooth(
             &column_means(dark, dark.len() / line),
             DARK_SMOOTHING,
@@ -198,6 +203,34 @@ fn column_means(data: &[u8], lines: usize) -> Vec<[f64; 3]> {
         }
     }
     sums
+}
+
+/// Per pixel and channel, the mean of the lines within [`WHITE_TOLERANCE`] of their median (or
+/// a count, for unlit pixels).
+fn column_levels(data: &[u8], lines: usize) -> Vec<[f64; 3]> {
+    let lines = lines.max(1);
+    let width = data.len() / (lines * CHANNELS * 2);
+    let line_len = width * CHANNELS * 2;
+    let mut values = Vec::with_capacity(lines);
+    (0..width)
+        .map(|x| {
+            std::array::from_fn(|c| {
+                values.clear();
+                values.extend(data.chunks_exact(line_len).take(lines).map(|line| {
+                    let i = (x * CHANNELS + c) * 2;
+                    f64::from(u16::from_le_bytes([line[i], line[i + 1]]))
+                }));
+                values.sort_by(f64::total_cmp);
+                let n = values.len();
+                let median = (values[(n - 1) / 2] + values[n / 2]) / 2.0;
+                let near = values
+                    .iter()
+                    .filter(|&&v| (v - median).abs() <= (WHITE_TOLERANCE * median).max(1.0));
+                let (sum, count) = near.fold((0.0, 0), |(s, k), &v| (s + v, k + 1));
+                sum / f64::from(count)
+            })
+        })
+        .collect()
 }
 
 /// Box filter about `n` pixels wide among pixels `phases` apart, with each phase's edges
@@ -346,6 +379,30 @@ mod tests {
         let s = Shading::compute(&white, &dark, width, [1300; 3], width, 2..=5).unwrap();
         assert_eq!(s.white_shift, 5);
         assert_eq!(s.white_base[0], 1000 + 150 * 399 - 32 * 1023);
+    }
+
+    #[test]
+    fn white_ignores_a_speck_in_some_lines() {
+        // A speck on the strip darkens pixels 10..14 in 6 of the 32 lines.
+        let width = 32;
+        let mut white = rgb16(32, |x| [30000 + 10 * x as u16 + x as u16 % 2; 3], width);
+        for line in 4..10 {
+            for x in 10..14 {
+                let i = (line * width + x) * 6 + 2;
+                white[i..i + 2].copy_from_slice(&12000u16.to_le_bytes());
+            }
+        }
+        let levels = column_levels(&white, 32);
+        for (x, l) in levels.iter().enumerate() {
+            let want = f64::from(30000 + 10 * x as u16 + x as u16 % 2);
+            assert_eq!(*l, [want; 3], "x {x}");
+        }
+        // Noise within the tolerance is averaged, not just the median taken.
+        let noisy: Vec<u8> = (0..4u16)
+            .flat_map(|k| [30000 + 100 * k; 3])
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert_eq!(column_levels(&noisy, 4), [[30150.0; 3]]);
     }
 
     #[test]

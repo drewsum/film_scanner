@@ -1202,6 +1202,7 @@ impl FilmSession {
         p.command(LIGHT, &[&[l.image]])?;
         p.query(POSITION, 4)?;
 
+        dump_calibration(l.infrared, &[("strip", &strip), ("white", &white), ("dark", &dark)]);
         let shading = Shading::compute(&white, &dark, cal_width, darks, cal_width, WHITE_SHIFTS)
             .ok_or_else(|| {
                 ScanError::Backend(format!(
@@ -1446,6 +1447,22 @@ impl FilmSession {
         log::warn!("offsets {offsets:02x?} leave the dark level outside {DARK_RANGE:?}");
         p.command(OFFSETS, &[&analog(offsets, gains)])?;
         Ok(offsets)
+    }
+}
+
+/// With `EPSON_CALIBRATION_DUMP` set to a folder, save the film calibration reads there as
+/// raw 16-bit RGB (`white.bin` and so on, `ir-` first for an infrared pass), for checking a
+/// scan's columns against them.
+fn dump_calibration(infrared: bool, reads: &[(&str, &[u8])]) {
+    let Some(dir) = std::env::var_os("EPSON_CALIBRATION_DUMP") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    for (name, data) in reads {
+        let path = dir.join(format!("{}{name}.bin", if infrared { "ir-" } else { "" }));
+        if let Err(e) = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, data)) {
+            log::warn!("couldn't save {}: {e}", path.display());
+        }
     }
 }
 

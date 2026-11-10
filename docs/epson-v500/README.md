@@ -348,6 +348,12 @@ calibration values and the lines per block (checked by
 7. **White and dark reads** at the area's x range: an 8-line masked-strip read for the levels,
    then a 32-line white read (`02 03`, `40`) through the window and a 64-line dark read, as on
    the flatbed. The shading table covers the read's x units (before subsampling).
+   Each pixel's white is the mean of its lines within 3% of their median. With a plain
+   mean, specks on the calibration strip that only some lines pass over darkened a few
+   dozen pixels' white, and those columns came out brighter all the way down the scan. One
+   whole-holder 6,400 dpi scan was 37% bright over 90 px, and others 11–20% bright. Each
+   speck hit the green odd and blue even CCD rows, which sit next to each other.
+   `EPSON_CALIBRATION_DUMP=<folder>` saves the masked-strip, white and dark reads.
 8. **Flat 12-bit tone curves, the move and the image read.** `1e 41`
    `… 00 00 SS RR RR 83 80 00 00 20 80 a0 BB`, 16-bit; `1e 43` neutral for both halves.
 
