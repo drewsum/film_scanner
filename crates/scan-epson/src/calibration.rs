@@ -7,8 +7,11 @@
 //! 3. A 16-line read with the lamp off gives each pixel's dark level.
 //! 4. The final `1e 42` carries per-channel white and dark bases (the dimmest pixel under the
 //!    glass, and the smoothed dark minimum of the even and of the odd pixels), and the shading
-//!    table (`1e 84` type 6) per pixel and channel: the white level above its base in 64-count
-//!    steps (upper 10 bits) and the smoothed dark level above its base (lower 6 bits).
+//!    table (`1e 84` type 6) per pixel and channel: the white level above its base in steps of
+//!    a power of two (upper 10 bits) and the smoothed dark level above its base (lower 6 bits).
+//!    The image read's `1e 41` names the step ([`Shading::step_code`]): Epson's driver takes
+//!    the finest whose 1,023 steps span the white levels, 64 for the whole flatbed's width and
+//!    4 or 8 for film.
 //!
 //! At 6,400 dpi the dark level differs between pixels: the even and odd ones of the read (from
 //! its first) by some 300–650 counts, the CCD's four staggered lines by up to ~100 more. So
@@ -17,6 +20,8 @@
 //!
 //! All reads are 16-bit little-endian, pixel-interleaved RGB.
 
+use std::ops::RangeInclusive;
+
 const CHANNELS: usize = 3;
 /// Width of the box filter for dark levels, in pixels.
 const DARK_SMOOTHING: usize = 65;
@@ -24,7 +29,6 @@ const DARK_SMOOTHING: usize = 65;
 const DARK_PHASES: usize = 4;
 /// Pixels below this fraction of the brightest are outside the calibration strip.
 const LIT_FRACTION: f64 = 0.1;
-const WHITE_STEP: f64 = 64.0;
 const WHITE_MAX: f64 = 1023.0;
 const DARK_MAX: f64 = 63.0;
 
@@ -48,6 +52,8 @@ pub struct Shading {
     pub white_base: [u16; 3],
     /// Per channel, the even pixels' dark base and the odd ones'.
     pub dark_base: [[u16; 2]; 3],
+    /// The white field's step is `1 << white_shift` counts.
+    pub white_shift: u8,
     /// `width` × 3 little-endian u16 entries, pixel-interleaved.
     pub table: Vec<u8>,
 }
@@ -55,14 +61,16 @@ pub struct Shading {
 impl Shading {
     /// Compute from the white read (taken with `white_darks` subtracted) and the dark read.
     /// The white base comes from the first `bed` pixels, which lie under the glass; beyond
-    /// them the read falls off the calibration strip. Returns `None` if the reads don't split
-    /// into `width`-pixel lines.
+    /// them the read falls off the calibration strip. The white field's step is the finest
+    /// power of two among `shifts` that spans the white levels. Returns `None` if the reads
+    /// don't split into `width`-pixel lines.
     pub fn compute(
         white: &[u8],
         dark: &[u8],
         width: usize,
         white_darks: [u16; 3],
         bed: usize,
+        shifts: RangeInclusive<u8>,
     ) -> Option<Self> {
         let line = width * CHANNELS * 2;
         if width == 0
@@ -81,20 +89,32 @@ impl Shading {
 
         let mut white_base = [0u16; 3];
         let mut dark_base = [[0u16; 2]; 3];
-        let mut amplitude = vec![[0.0; 3]; width];
-        for c in 0..CHANNELS {
-            // The white read had `white_darks` subtracted; measure white against each
-            // pixel's own dark level instead.
-            for (a, (w, d)) in amplitude.iter_mut().zip(white.iter().zip(&dark)) {
-                a[c] = w[c] + f64::from(white_darks[c]) - d[c];
-            }
+        // The white read had `white_darks` subtracted; measure white against each pixel's own
+        // dark level instead.
+        let amplitude: Vec<[f64; 3]> = white
+            .iter()
+            .zip(&dark)
+            .map(|(w, d)| std::array::from_fn(|c| w[c] + f64::from(white_darks[c]) - d[c]))
+            .collect();
+        // Per channel, the brightest pixel and the dimmest lit one under the glass.
+        let span: [(f64, f64); 3] = std::array::from_fn(|c| {
             let max = amplitude.iter().map(|a| a[c]).fold(0.0, f64::max);
             let lit_min = amplitude[..bed.min(width)]
                 .iter()
                 .map(|a| a[c])
                 .filter(|&a| a >= LIT_FRACTION * max)
                 .fold(f64::INFINITY, f64::min);
-            let base = lit_min.min(max).max(max - WHITE_STEP * WHITE_MAX).max(0.0);
+            (lit_min.min(max), max)
+        });
+        let range = span.iter().map(|(lo, hi)| hi - lo).fold(0.0, f64::max);
+        let white_shift = shifts
+            .clone()
+            .find(|&s| range <= f64::from(1u32 << s) * WHITE_MAX)
+            .unwrap_or(*shifts.end());
+        let step = f64::from(1u32 << white_shift);
+        for c in 0..CHANNELS {
+            let (lit_min, max) = span[c];
+            let base = lit_min.max(max - step * WHITE_MAX).max(0.0);
             white_base[c] = base.floor().min(65535.0) as u16;
             for (parity, base) in dark_base[c].iter_mut().enumerate() {
                 let levels = || dark.iter().skip(parity).step_by(2).map(|d| d[c]);
@@ -110,7 +130,7 @@ impl Shading {
         let mut table = Vec::with_capacity(line);
         for (x, (a, d)) in amplitude.iter().zip(&dark).enumerate() {
             for c in 0..CHANNELS {
-                let hi = ((a[c] - f64::from(white_base[c])) / WHITE_STEP)
+                let hi = ((a[c] - f64::from(white_base[c])) / step)
                     .round()
                     .clamp(0.0, WHITE_MAX) as u16;
                 let lo = (d[c] - f64::from(dark_base[c][x % 2]))
@@ -122,8 +142,17 @@ impl Shading {
         Some(Self {
             white_base,
             dark_base,
+            white_shift,
             table,
         })
+    }
+
+    /// The image read's `1e 41` byte 15 for this table's white step, where byte 11 is `kind`.
+    /// The step is 2 ^ (upper nibble + (`kind` & 3) − 2) counts, in all of the captures: `60`
+    /// with `82` is 64 (the flatbed's width), `50` with `82` and `40` with `83` 32, `30` with
+    /// `83` 16, `20` with `83` 8 (film up to 3,200 dpi), `50` with `80` 8 (6,400 dpi).
+    pub fn step_code(&self, kind: u8) -> u8 {
+        (self.white_shift + 2).saturating_sub(kind & 3) << 4
     }
 
     /// The `1e 42` parameters: white bases, then each channel's even and odd dark bases.
@@ -145,6 +174,7 @@ pub fn white_read_levels(darks: [u16; 3]) -> [u8; 18] {
     Shading {
         white_base: [0; 3],
         dark_base: darks.map(|d| [d; 2]),
+        white_shift: 0,
         table: Vec::new(),
     }
     .levels()
@@ -242,7 +272,7 @@ mod tests {
             width,
         );
         let dark = rgb16(16, |x| [1300 + (x / 50) as u16 * 10, 1250, 1100], width);
-        let s = Shading::compute(&white, &dark, width, [1300, 1250, 1100], 170).unwrap();
+        let s = Shading::compute(&white, &dark, width, [1300, 1250, 1100], 170, 6..=6).unwrap();
         assert_eq!(s.table.len(), width * 6);
         // White base: the dimmest lit pixel, measured against its own dark level.
         assert_eq!(s.white_base[1], 25000);
@@ -266,7 +296,7 @@ mod tests {
         let level = |x: usize| 1400 - phase[x % 4] + (x / 100) as u16 * 3;
         let white = rgb16(32, |_| [30000; 3], width);
         let dark = rgb16(16, |x| [level(x); 3], width);
-        let s = Shading::compute(&white, &dark, width, [1300; 3], width).unwrap();
+        let s = Shading::compute(&white, &dark, width, [1300; 3], width, 6..=6).unwrap();
         // Even: 1,310 to 1,409 is 99 apart, so halfway (1,328), 18 off at both ends; odd: the
         // lowest, 1,100.
         assert_eq!(s.dark_base[0], [1328, 1100]);
@@ -284,7 +314,42 @@ mod tests {
     }
 
     #[test]
+    fn white_step_spans_the_levels() {
+        // Film's white levels: a few thousand counts of vignetting over the base.
+        let width = 400;
+        let dark = rgb16(16, |_| [1300; 3], width);
+        let film = |spread: u16| {
+            let white = rgb16(
+                32,
+                |x| [48000 + (u32::from(spread) * x as u32 / 399) as u16; 3],
+                width,
+            );
+            Shading::compute(&white, &dark, width, [1300; 3], width, 2..=6).unwrap()
+        };
+        let s = film(5360);
+        // 5,360 counts take 1,340 steps of 4, 670 of 8.
+        assert_eq!(s.white_shift, 3);
+        assert_eq!(entry(&s.table, 399, 0).0, 670);
+        // Byte 15 as Epson Scan sends it at 6,400 dpi (`80`) and up to 3,200 (`83`).
+        assert_eq!(s.step_code(0x80), 0x50);
+        assert_eq!(s.step_code(0x83), 0x20);
+        let s = film(3000);
+        assert_eq!(s.white_shift, 2);
+        assert_eq!(entry(&s.table, 399, 0).0, 750);
+        assert_eq!(s.step_code(0x83), 0x10);
+        // The flatbed keeps 64, `60` with `82`.
+        let white = rgb16(32, |x| [24000 + 80 * x as u16; 3], width);
+        let s = Shading::compute(&white, &dark, width, [1300; 3], width, 6..=6).unwrap();
+        assert_eq!((s.white_shift, s.step_code(0x82)), (6, 0x60));
+        // Beyond 1,023 steps of the coarsest, the base rises to keep the brightest in reach.
+        let white = rgb16(32, |x| [1000 + 150 * x as u16; 3], width);
+        let s = Shading::compute(&white, &dark, width, [1300; 3], width, 2..=5).unwrap();
+        assert_eq!(s.white_shift, 5);
+        assert_eq!(s.white_base[0], 1000 + 150 * 399 - 32 * 1023);
+    }
+
+    #[test]
     fn rejects_mismatched_width() {
-        assert!(Shading::compute(&[0; 12], &[0; 12], 3, [0; 3], 3).is_none());
+        assert!(Shading::compute(&[0; 12], &[0; 12], 3, [0; 3], 3, 6..=6).is_none());
     }
 }

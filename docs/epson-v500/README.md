@@ -204,11 +204,33 @@ and the calibration below. Everything else is constant for a given geometry.
 5. **Image read.** `1e 42` holds a white base per channel (u16 × 3), then each channel's dark
    bases for the read's even and odd pixels, counted from its first (u16 × 6). The shading
    table (`1e 84` type 6) has one u16 per pixel and channel, pixel-interleaved. Its upper 10
-   bits are the pixel's white level above the white base in 64-count steps. Its lower 6 bits
-   are the pixel's dark level above its dark base. The driver smooths the dark profile (a ~65
-   px box filter matches) and takes its minimum as the dark base. The white base is the
+   bits are the pixel's white level above the white base in steps of a power of two. Its lower
+   6 bits are the pixel's dark level above its dark base. The driver smooths the dark profile
+   (a ~65 px box filter matches) and takes its minimum as the dark base. The white base is the
    dimmest pixel's white level under the glass (the first 8.5 in of the read; past it the read
    falls off the calibration strip, and those pixels would halve the base).
+
+   **The image read's `1e 41` names the white step.** It is 2 ^ (n + (byte 11 & 3) − 2)
+   counts, where n is the upper nibble of byte 15. That holds in every capture with a white
+   read:
+
+   | Byte 11, byte 15 | Step | Captures |
+   |---|---|---|
+   | `82`, `60` | 64 | the flatbed's full width (24, 25, 28, 29) and 05 |
+   | `82`, `50` / `83`, `40` | 32 | small flatbed areas (01–04, 06, 08, 15, 18, 19, 23) |
+   | `83`, `30` | 16 | 07, 09, 16, 17, 22, 26 |
+   | `83`, `20` | 8 | film up to 3,200 dpi (11, 30, 31, 39, 41, 43, 44), 20, 21, 27 |
+   | `83`, `10` | 4 | film at 1,200 and 1,600 dpi, and with Digital ICE (12, 13, 40, 42, 46) |
+   | `80`, `50` | 8 | 6,400 dpi (45) |
+
+   The driver takes the finest step whose 1,023 steps span the white levels: a few thousand
+   counts for film, ~32,000 across the whole flatbed. `scan_epson::film` sent `20` while its
+   tables were in steps of 64, so the scanner applied an eighth of each pixel's white
+   correction up to 3,200 dpi, and a sixty-fourth at 6,400 (`20` with `80` is a step of 1).
+   That left the CCD's columns uncorrected. On a whole holder at 6,400 dpi the four staggered
+   phases came out up to 2.5% apart, and the column profile varied 4–11% (Epson Scan's own
+   read: 0.6%). `scan_epson::calibration` now picks the step, 4 to 64 for film and 64 for the
+   flatbed, and the image read names it.
 
    The two dark bases are equal at 1,200 dpi and below. At 3,200 × 2,400 they're 20–40 counts
    apart. At 6,400 they're 280–650 apart: capture 45 sends `d4 05 bf 04`, `69 08 ba 06`,

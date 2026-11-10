@@ -127,6 +127,9 @@ const FIRST_OFFSET: u16 = 0x80;
 const OFFSET_STEP: u16 = 0x40;
 const OFFSET_TRIES: usize = 8;
 const DARK_LINES: u16 = 64;
+/// The shading table's white step is the finest of 4 to 64 counts that spans the white levels.
+/// Epson Scan's are 4 and 8, against film's few thousand counts of vignetting.
+const WHITE_SHIFTS: std::ops::RangeInclusive<u8> = 2..=6;
 
 /// Moves under the holder: a 512-entry acceleration from 2,500 to 222.
 const MOVE_RAMP: (u16, u16, usize) = (2500, 222, 512);
@@ -1199,8 +1202,8 @@ impl FilmSession {
         p.command(LIGHT, &[&[l.image]])?;
         p.query(POSITION, 4)?;
 
-        let shading =
-            Shading::compute(&white, &dark, cal_width, darks, cal_width).ok_or_else(|| {
+        let shading = Shading::compute(&white, &dark, cal_width, darks, cal_width, WHITE_SHIFTS)
+            .ok_or_else(|| {
                 ScanError::Backend(format!(
                     "calibration reads of {} and {} bytes don't fit {cal_width} pixels",
                     white.len(),
@@ -1234,7 +1237,7 @@ impl FilmSession {
             block,
         );
         params[6] = 0x80;
-        params[9] = 0x20;
+        params[9] = shading.step_code(m.image_kind);
         p.command(EXPOSURE, &[&l.exposure(image_exposure, false)])?;
         p.command(GEOMETRY, &[&area_params(x0, x1, lines, params)])?;
         p.command(LEVELS, &[&shading.levels()])?;
@@ -1740,9 +1743,12 @@ mod tests {
                         // Calibration values differ per session.
                         c if c == OFFSETS || c == LEVELS => {}
                         // Lines per block: SilverFast's blocks grow to 256 KiB at 1,600 dpi;
-                        // ours stay at 64 KiB.
+                        // ours stay at 64 KiB. The white step follows the calibration.
                         c if c == GEOMETRY && tw[11] == 0x83 => {
-                            assert_eq!([&tw[..18], &tw[19..]], [&ow[..18], &ow[19..]]);
+                            assert_eq!(
+                                [&tw[..15], &tw[16..18], &tw[19..]],
+                                [&ow[..15], &ow[16..18], &ow[19..]]
+                            );
                         }
                         c if c == EXPOSURE => assert_eq!(
                             [&tw[..6], &tw[8..]],
