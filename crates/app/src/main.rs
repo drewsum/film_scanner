@@ -23,6 +23,7 @@ use eframe::egui;
 const NO_ELEVATE: &str = "--no-elevate";
 
 fn main() -> eframe::Result {
+    scan_epson::system::apply_forwarded_env();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     if elevate() {
         return Ok(());

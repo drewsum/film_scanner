@@ -4,7 +4,9 @@
 //!
 //! An app elevates once at launch ([`relaunch_elevated`]); each scan then holds a
 //! [`WiaPause`], which stops the service and starts it again when dropped. Call
-//! [`restore_wia`] before exiting, in case a scan was still running.
+//! [`restore_wia`] before exiting, in case a scan was still running. Windows starts the
+//! elevated copy with a fresh environment, so the relaunch passes [`FORWARDED_ENV`] on as
+//! arguments, which [`apply_forwarded_env`] sets again first thing.
 
 use std::sync::Mutex;
 
@@ -53,6 +55,65 @@ pub fn restore_wia() {
 }
 
 pub use imp::{is_elevated, relaunch_elevated};
+
+/// Environment variables the elevated copy keeps: the calibration dump and the log filter.
+pub const FORWARDED_ENV: &[&str] = &["EPSON_CALIBRATION_DUMP", "RUST_LOG"];
+/// Carries one of [`FORWARDED_ENV`] as `--env=NAME=VALUE`.
+const ENV_ARG: &str = "--env=";
+
+/// Set the [`FORWARDED_ENV`] variables a relaunch passed on. Call first thing in `main`,
+/// before any other thread starts.
+pub fn apply_forwarded_env() {
+    for arg in std::env::args_os().skip(1) {
+        let Some((name, value)) = arg
+            .to_str()
+            .and_then(|a| a.strip_prefix(ENV_ARG))
+            .and_then(|a| a.split_once('='))
+        else {
+            continue;
+        };
+        if FORWARDED_ENV.contains(&name) {
+            // SAFETY: called before any other thread starts.
+            unsafe { std::env::set_var(name, value) };
+        }
+    }
+}
+
+/// The arguments for an elevated copy: this process's own, without any forwarded variables,
+/// then the [`FORWARDED_ENV`] variables set now.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn relaunch_args() -> Vec<String> {
+    let forwarded = FORWARDED_ENV
+        .iter()
+        .filter_map(|&name| Some(format!("{ENV_ARG}{name}={}", std::env::var(name).ok()?)));
+    std::env::args()
+        .skip(1)
+        .filter(|a| !a.starts_with(ENV_ARG))
+        .chain(forwarded)
+        .collect()
+}
+
+/// Quote `arg` for a Windows command line, as `CommandLineToArgvW` splits it: backslashes
+/// are only doubled before a quote.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn quote_arg(arg: &str) -> String {
+    let mut out = String::from('"');
+    let mut backslashes = 0;
+    for ch in arg.chars() {
+        match ch {
+            '\\' => backslashes += 1,
+            '"' => {
+                out.extend(std::iter::repeat_n('\\', backslashes + 1));
+                backslashes = 0;
+            }
+            _ => backslashes = 0,
+        }
+        out.push(ch);
+    }
+    out.extend(std::iter::repeat_n('\\', backslashes));
+    out.push('"');
+    out
+}
 
 #[cfg(windows)]
 mod imp {
@@ -194,9 +255,9 @@ mod imp {
     /// arguments. Returns `Ok` once the elevated copy has started; the caller should exit.
     pub fn relaunch_elevated() -> Result<(), ScanError> {
         let exe = std::env::current_exe()?;
-        let args: Vec<String> = std::env::args()
-            .skip(1)
-            .map(|a| format!("\"{}\"", a.replace('"', "\\\"")))
+        let args: Vec<String> = super::relaunch_args()
+            .iter()
+            .map(|a| super::quote_arg(a))
             .collect();
         let cwd = std::env::current_dir()?;
         // SAFETY: all strings live for the call.
@@ -242,5 +303,23 @@ mod imp {
         Err(ScanError::Unsupported(
             "elevation is only needed on Windows".into(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quotes_for_the_windows_command_line() {
+        assert_eq!(quote_arg("plain"), r#""plain""#);
+        // A trailing backslash would otherwise escape the closing quote.
+        assert_eq!(quote_arg(r"C:\tests\cal 6400\"), r#""C:\tests\cal 6400\\""#);
+        assert_eq!(quote_arg(r#"say "hi""#), r#""say \"hi\"""#);
+        assert_eq!(quote_arg(r#"a\"b"#), r#""a\\\"b""#);
+        assert_eq!(
+            quote_arg(r"--env=EPSON_CALIBRATION_DUMP=C:\x"),
+            r#""--env=EPSON_CALIBRATION_DUMP=C:\x""#
+        );
     }
 }

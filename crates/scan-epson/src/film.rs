@@ -1,6 +1,7 @@
 //! Film scans through the transparency unit, generated from scratch: the session SilverFast
 //! runs (see `docs/epson-v500`), with exposure, gain and offset searches of our own that land
-//! where SilverFast's do.
+//! where SilverFast's do. The 1,200, 2,400 and 6,400 dpi modes come from Epson Scan's
+//! sessions, which SilverFast doesn't use.
 //!
 //! A session:
 //!
@@ -9,7 +10,8 @@
 //! 3. searches the exposure and per-channel gains through the window, and the analog offsets
 //!    against dark reads of the CCD's masked strip;
 //! 4. takes white and dark reads at the area's x range for the shading table;
-//! 5. moves to the area and reads it at 400, 800 or 1,600 dpi.
+//! 5. moves to the area and reads it at 400, 800, 1,200, 1,600, 2,400 or 6,400 dpi (3,200 ×
+//!    2,400 at 2,400: the CCD samples finer across than the motor steps).
 //!
 //! An infrared pass ([`FilmSession::infrared`]) is a session of its own, as in SilverFast's
 //! iSRD: the infrared lamp, an exposure fixed by the line time, and gains searched for it.
@@ -53,8 +55,10 @@ const IR_LAMP_OFF: u8 = 0x05;
 const IR_LAMP: u8 = 0x04;
 /// `1e e1` parameters in SilverFast's film sessions.
 const SETUP_PARAMS: [u8; 6] = [0x0b, 0x00, 0x31, 0x61, 0x00, 0x00];
-/// `1e 11` (the CCD's horizontal mode) for 800 x units per inch.
+/// `1e 11` (the CCD's horizontal mode): 6,400 (`00`), 3,200 (`01`), 1,600 (`02`) or 800
+/// (`03`) pixels per inch.
 const CCD_800: u8 = 0x03;
+const CCD_1600: u8 = 0x02;
 
 /// The film area: 2.7 × 9.33 in, SilverFast's preview.
 pub const FILM_AREA: ScanArea = ScanArea {
@@ -81,6 +85,17 @@ const IR_CENTRE_MM: f64 = 39.2;
 /// on each side, so the stretch can be undone right to the area's edges: it moves pixels at
 /// most 20 px at 1,600 dpi, at the far edges of the film area.
 const IR_MARGIN: u32 = 32;
+/// The infrared plane comes out this many lines (at hardware resolution) above the color one:
+/// measured on a V500 at 1,600 and 2,400 dpi (5.6 and 4.8 lines, across the frame). The
+/// infrared read starts [`IR_ABOVE_STEPS`] higher so it can be moved down.
+const IR_LAG: u32 = 5;
+/// The finest infrared read: 3,200 × 2,400. At 6,400 dpi the V500 stalls in the infrared white
+/// read, and Epson Scan reads both its passes at 3,200 × 2,400 when Digital ICE is on, even for
+/// 6,400 dpi (capture 46). Finer scans keep their color pass and scale the infrared up: it only
+/// finds dust and scratches.
+const IR_MAX_DPI: u32 = 2400;
+/// Carriage steps the infrared read starts above the area: whole lines at every resolution.
+const IR_ABOVE_STEPS: u32 = 48;
 /// The read that finds the window: 150 lines at 200 dpi of the gap between the strips.
 const WINDOW_READ: (u16, u16, u16) = (0x0c8f, 0x0e0f, 150);
 const WINDOW_READ_STEPS: u32 = 1920;
@@ -112,6 +127,9 @@ const FIRST_OFFSET: u16 = 0x80;
 const OFFSET_STEP: u16 = 0x40;
 const OFFSET_TRIES: usize = 8;
 const DARK_LINES: u16 = 64;
+/// The shading table's white step is the finest of 4 to 64 counts that spans the white levels.
+/// Epson Scan's are 4 and 8, against film's few thousand counts of vignetting.
+const WHITE_SHIFTS: std::ops::RangeInclusive<u8> = 2..=6;
 
 /// Moves under the holder: a 512-entry acceleration from 2,500 to 222.
 const MOVE_RAMP: (u16, u16, usize) = (2500, 222, 512);
@@ -125,30 +143,54 @@ const SLOW_BACK_MOTOR: [u8; 8] = [0, 0, 0, 0, 0, 0, 0x38, 0x00];
 /// steps plus twice its 512-step ramp (as `1e 86` counts it).
 const SLOW_MOVE_OFFSET: i64 = 1024;
 const MIN_FAST_MOVE: i64 = 512;
-const SCAN_LEAD_IN: u32 = 126;
 
 /// Image reads at one motor speed (`1e 01` mode `08`): a line takes the motor period × 16 ×
-/// steps per line, which is the line time `1e 21` sets. The move to them lands short by this.
-const STEADY_SCAN_MOTOR: [u8; 8] = [0x7e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00];
-const STEADY_LEAD: i64 = 494;
+/// steps per line, which is the line time `1e 21` sets. Byte 0 is the read's lead-in in steps,
+/// as in every read's `1e 01`.
+const fn steady_motor(lead_in: u8) -> [u8; 8] {
+    [lead_in, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00]
+}
+
+/// The move to a steady read lands short by this: 368 steps more than the read's lead-in, in
+/// SilverFast's sessions and Epson Scan's alike.
+const fn steady_lead(lead_in: u8) -> i64 {
+    368 + lead_in as i64
+}
+
+/// `1e 21` with only the line time set.
+fn line_time(t: u16) -> [u8; 26] {
+    let mut p = [0u8; 26];
+    p[..2].copy_from_slice(&t.to_le_bytes());
+    p
+}
+
+const STEADY_SCAN_MOTOR: [u8; 8] = steady_motor(0x7e);
+const STEADY_LEAD: i64 = steady_lead(0x7e);
 /// Infrared window reads run at this gain, unexposed (`1e 22` is 0 throughout an infrared
 /// pass; the line time sets the exposure).
 const IR_WINDOW_GAIN: u8 = 0x32;
 /// The infrared gain search starts from 0 and aims for this mean.
 const IR_TARGET: f64 = 210.0;
 
-/// Constants of one hardware resolution, from SilverFast's captures.
+/// Constants of one hardware resolution, from SilverFast's captures and Epson Scan's.
 #[derive(Clone, Copy, Debug)]
 struct Mode {
+    /// Lines per inch.
     hw_dpi: u32,
+    /// Pixels per inch across: as many as the lines, except 3,200 in the 2,400 dpi mode.
+    x_dpi: u32,
     /// `1e 41` bytes 9–10.
     resolution: [u8; 2],
     /// `1e 41` byte 8 of the image read (16-bit).
     subsampling: u8,
     /// `1e 11` during the searches and reads.
     ccd: u8,
-    /// x units per inch.
+    /// x units per inch of the area's left edge (`1e 41` bytes 0–1).
     units_per_inch: u32,
+    /// x units per pixel of the read's width, as a fraction: 2 at 400 dpi and 4/3 at 1,200
+    /// (both subsampled), otherwise 1. Above 1,600 dpi the width counts pixels while the left
+    /// edge stays at 1,600 units per inch, as Epson Scan sends them.
+    units_per_px: (u32, u32),
     /// x of the film area's left edge.
     origin: u16,
     /// x range of the exposure search through the window.
@@ -157,14 +199,29 @@ struct Mode {
     strip: (u16, u16),
     /// `1e 22` of the first search read.
     first_exposure: u16,
-    /// `1e 21`: the longest exposure. A normal one is at most half of it.
+    /// `1e 21`: the line time and longest exposure. A normal one is at most half of it.
     max_exposure: u16,
+    /// `1e 21` during the exposure search. At 6,400 dpi the window read (17,280 px standing
+    /// still) stalls after two blocks at the scan's line time; Epson Scan searches at a longer
+    /// one.
+    search_line_time: u16,
+    /// The white read's motor period: the line time over 24 (it reads at 1,600 dpi, 1.5 steps
+    /// a line).
     white_step: u16,
     scan_ramp: (u16, u16, usize),
     /// `1e 01` bytes 4–11 of the image read.
     scan_motor: [u8; 8],
     /// Steps the fast move lands short of 2,400 per inch.
     lead: i64,
+    /// `1e 41` byte 11 of the image read: `80` at 6,400 dpi, as Epson Scan sends it.
+    image_kind: u8,
+    /// Lines each column sees the film after the earliest, by its x (`x0` + column) mod 4 (see
+    /// [`Resample::stagger`]). Measured on a V500: the CCD's rows of pixels lie 16 lines
+    /// apart at 6,400 dpi (0.064 mm, 6 lines at 2,400) and its halves 80 further, and Epson
+    /// Scan reads as many lines more than the color skew needs (2 × 63 at 2,400, 2 × 211 at
+    /// 6,400). At 2,400 dpi a read starting one unit further along swaps the columns over,
+    /// though a unit is two pixels.
+    stagger: [u8; 4],
     /// `1e 57` field 7, low byte.
     record_code: u32,
     /// The infrared pass: line time (`1e 21`), the image read's motor period, and the white
@@ -174,22 +231,27 @@ struct Mode {
     ir_white_step: u16,
 }
 
-const MODES: [Mode; 3] = [
+const MODES: [Mode; 6] = [
     Mode {
         hw_dpi: 400,
+        x_dpi: 400,
         resolution: [1, 6],
         subsampling: 0x10,
         ccd: CCD_800,
         units_per_inch: 800,
+        units_per_px: (2, 1),
         origin: 2365,
         search_x: (0x0943, 0x11b3),
         strip: (0x20, 0x30),
         first_exposure: 1500,
         max_exposure: 0x0f00,
+        search_line_time: 0x0f00,
         white_step: 160,
         scan_ramp: (1249, 320, 512),
         scan_motor: [0x7e, 0x00, 0xff, 0x00, 0xff, 0x00, 0x02, 0x00],
         lead: 750,
+        image_kind: 0x83,
+        stagger: [0; 4],
         record_code: 0x12,
         // Not captured; 800 dpi's line time at 6 steps a line.
         ir_line_time: 0x1860,
@@ -198,47 +260,178 @@ const MODES: [Mode; 3] = [
     },
     Mode {
         hw_dpi: 800,
+        x_dpi: 800,
         resolution: [1, 3],
         subsampling: 0x00,
         ccd: CCD_800,
         units_per_inch: 800,
+        units_per_px: (1, 1),
         origin: 2365,
         search_x: (0x0943, 0x11b3),
         strip: (0x20, 0x30),
         first_exposure: 1500,
         max_exposure: 0x0f00,
+        search_line_time: 0x0f00,
         white_step: 160,
         scan_ramp: (1250, 640, 512),
         scan_motor: [0x7e, 0x00, 0xff, 0x00, 0xff, 0x00, 0x02, 0x00],
         lead: 750,
+        image_kind: 0x83,
+        stagger: [0; 4],
         record_code: 0x24,
         // Capture 38.
         ir_line_time: 0x1860,
         ir_period: 130,
         ir_white_step: 260,
     },
+    // Capture 40 (Epson Scan): 1,600 dpi's CCD mode, subsampled.
+    Mode {
+        hw_dpi: 1200,
+        x_dpi: 1200,
+        resolution: [1, 2],
+        subsampling: 0xa0,
+        ccd: CCD_1600,
+        units_per_inch: 1600,
+        units_per_px: (4, 3),
+        origin: 4730,
+        search_x: (0x1287, 0x2367),
+        strip: (0x3d, 0x6d),
+        first_exposure: 4000,
+        max_exposure: 0x1d40,
+        search_line_time: 0x1d40,
+        white_step: 312,
+        scan_ramp: (234, 234, 1),
+        scan_motor: steady_motor(0x80),
+        lead: steady_lead(0x80),
+        image_kind: 0x83,
+        stagger: [0; 4],
+        record_code: 0x20,
+        // Not captured; about 1,600 dpi's line time, in whole periods at 2 steps a line.
+        ir_line_time: 0x21c0,
+        ir_period: 270,
+        ir_white_step: 360,
+    },
     Mode {
         hw_dpi: 1600,
+        x_dpi: 1600,
         resolution: [2, 3],
         subsampling: 0x00,
-        ccd: 0x02,
+        ccd: CCD_1600,
         units_per_inch: 1600,
+        units_per_px: (1, 1),
         origin: 4730,
         search_x: (0x1287, 0x2367),
         strip: (0x3d, 0x6d),
         first_exposure: 4000,
         max_exposure: 0x1cf8,
+        search_line_time: 0x1cf8,
         white_step: 309,
         scan_ramp: (309, 309, 1),
         scan_motor: STEADY_SCAN_MOTOR,
         lead: STEADY_LEAD,
+        image_kind: 0x83,
+        stagger: [0; 4],
         record_code: 0x45,
         // Capture 13.
         ir_line_time: 0x21a8,
         ir_period: 359,
         ir_white_step: 359,
     },
+    // Captures 41–44 (Epson Scan's 2,400 and 3,200 dpi, the same read). The origin is
+    // capture 41's: a frame scanned at it lines up with Epson Scan's to 0.05 mm, as at 1,200
+    // and 6,400 dpi. Capture 44, of a frame in the other strip, puts it 19 units left.
+    Mode {
+        hw_dpi: 2400,
+        x_dpi: 3200,
+        resolution: [1, 1],
+        subsampling: 0x00,
+        ccd: 0x01,
+        units_per_inch: 1600,
+        units_per_px: (1, 1),
+        origin: 4783,
+        search_x: (0x12b2, 0x3472),
+        strip: (0x64, 0xc4),
+        first_exposure: 4000,
+        max_exposure: 0x1fe0,
+        search_line_time: 0x1fe0,
+        white_step: 340,
+        scan_ramp: (510, 510, 1),
+        scan_motor: steady_motor(0x20),
+        lead: steady_lead(0x20),
+        image_kind: 0x83,
+        stagger: [0, 6, 0, 6],
+        record_code: 0x0f,
+        // Capture 42.
+        ir_line_time: 0x2ee0,
+        ir_period: 750,
+        ir_white_step: 500,
+    },
+    // Capture 45 (Epson Scan's 6,400 dpi). Its origin is 49 units right of 2,400 dpi's: Epson
+    // Scan's images of one area in both line up.
+    Mode {
+        hw_dpi: 6400,
+        x_dpi: 6400,
+        resolution: [8, 3],
+        subsampling: 0x00,
+        ccd: 0x00,
+        units_per_inch: 1600,
+        units_per_px: (1, 1),
+        origin: 4819,
+        search_x: (0x12d4, 0x5654),
+        strip: (0xc8, 0x188),
+        first_exposure: 4000,
+        max_exposure: 0x2550,
+        search_line_time: 0x3690,
+        white_step: 398,
+        scan_ramp: (1592, 1592, 1),
+        scan_motor: steady_motor(0x1e),
+        lead: steady_lead(0x1e),
+        image_kind: 0x80,
+        stagger: [0, 80, 16, 96],
+        record_code: 0x07,
+        // Unused: infrared is read at 3,200 × 2,400 ([`IR_MAX_DPI`]).
+        ir_line_time: 0x3690,
+        ir_period: 2328,
+        ir_white_step: 582,
+    },
 ];
+
+impl Mode {
+    /// Read widths are whole 16 px and whole x units.
+    fn width_align(&self) -> u32 {
+        16 * self.units_per_px.1
+    }
+
+    /// [`Mode::stagger`] by column of a read starting at `x0`.
+    fn stagger_at(&self, x0: u16) -> [u8; 4] {
+        std::array::from_fn(|c| self.stagger[(usize::from(x0) + c) % 4])
+    }
+
+    /// Pixels the infrared read reaches past the color one on each side: [`IR_MARGIN`],
+    /// rounded up so the read stays aligned.
+    fn ir_margin(&self) -> u32 {
+        let half = self.width_align() / 2;
+        IR_MARGIN.div_ceil(half) * half
+    }
+
+    /// x units of `px` pixels of width.
+    fn width_units(&self, px: u32) -> u32 {
+        px * self.units_per_px.0 / self.units_per_px.1
+    }
+}
+
+/// After the end of a read's window (`x1` + 480 ticks, see [`tables::type7_window`]) a line
+/// runs on at least this many half line-time ticks in all of Epson Scan's reads; it lengthens
+/// the line time for wider reads. Without, a whole holder's white read stalls at 6,400 dpi.
+const LINE_TAIL: u32 = 5300;
+
+/// The shortest line time a read above 1,600 dpi ending at `x1` takes, in whole 48s (which
+/// keep its motor periods whole): 13,968 for the whole film area at 6,400 dpi and 9,648 at
+/// 3,200 × 2,400, as Epson Scan's search reads.
+fn window_line_time(x1: u16) -> u16 {
+    let end = (u32::from(x1) + 480).next_multiple_of(2) + 8 + LINE_TAIL;
+    end.div_ceil(2).next_multiple_of(48) as u16
+}
 
 /// What differs between a color pass and an infrared one.
 #[derive(Clone, Copy, Debug)]
@@ -250,6 +443,8 @@ struct Light {
     image: u8,
     window_exposure: u16,
     window_gain: u8,
+    /// `1e 21` of the calibration and image reads.
+    line_time: u16,
     white_step: u16,
     /// The image read's motor table and `1e 01` mode, and the move's lead.
     scan_ramp: (u16, u16, usize),
@@ -258,6 +453,22 @@ struct Light {
 }
 
 impl Light {
+    /// This with the line time `t`, if it is longer: the white read's and the image read's
+    /// motor periods grow with it (when it runs at one speed).
+    fn with_line_time(mut self, t: u16) -> Self {
+        if t > self.line_time {
+            let scale =
+                |v: u16| (u32::from(v) * u32::from(t)).div_ceil(u32::from(self.line_time)) as u16;
+            self.white_step = scale(self.white_step);
+            if self.scan_ramp.2 == 1 {
+                let p = scale(self.scan_ramp.0);
+                self.scan_ramp = (p, p, 1);
+            }
+            self.line_time = t;
+        }
+        self
+    }
+
     fn new(mode: &Mode, infrared: bool) -> Self {
         if infrared {
             Self {
@@ -267,10 +478,20 @@ impl Light {
                 image: IR_LAMP,
                 window_exposure: 0,
                 window_gain: IR_WINDOW_GAIN,
+                line_time: mode.ir_line_time,
                 white_step: mode.ir_white_step,
                 scan_ramp: (mode.ir_period, mode.ir_period, 1),
-                scan_motor: STEADY_SCAN_MOTOR,
-                lead: STEADY_LEAD,
+                // At one speed, with the color read's lead-in where that is steady too.
+                scan_motor: if mode.scan_ramp.2 == 1 {
+                    mode.scan_motor
+                } else {
+                    STEADY_SCAN_MOTOR
+                },
+                lead: if mode.scan_ramp.2 == 1 {
+                    mode.lead
+                } else {
+                    STEADY_LEAD
+                },
             }
         } else {
             Self {
@@ -280,6 +501,7 @@ impl Light {
                 image: FILM_LAMP,
                 window_exposure: WINDOW_EXPOSURE,
                 window_gain: WINDOW_GAIN,
+                line_time: mode.max_exposure,
                 white_step: mode.white_step,
                 scan_ramp: mode.scan_ramp,
                 scan_motor: mode.scan_motor,
@@ -338,18 +560,28 @@ pub struct FilmPlan {
 }
 
 impl FilmPlan {
-    fn new(area: &ScanArea, dpi: u32, mode: &Mode, lead: i64) -> Result<Self, ScanError> {
-        let hw = mode.hw_dpi;
+    /// `lead` and `lead_in` are the move's and the read's (see [`steady_lead`]); the read
+    /// starts `above` lines higher (whole steps), the output still at the area's top.
+    fn new(
+        area: &ScanArea,
+        dpi: u32,
+        mode: &Mode,
+        lead: i64,
+        lead_in: u8,
+        above: u32,
+    ) -> Result<Self, ScanError> {
+        let (hw, hw_x) = (mode.hw_dpi, mode.x_dpi);
         let (width, height) = area.pixel_size(dpi);
-        let scale = f64::from(hw) / f64::from(dpi);
-        let px = |mm: f32| (f64::from(mm) / f64::from(MM_PER_INCH) * f64::from(hw)).round() as u32;
-        let (x, y) = (px(area.x_mm), px(area.y_mm));
-        let w = (f64::from(width) * scale).ceil() as u32;
-        let h = (f64::from(height) * scale).floor() as u32;
-        let read_width = w.div_ceil(16) * 16;
-        let per_px = mode.units_per_inch / hw;
-        let x0 = u32::from(mode.origin) + x * per_px;
-        let x1 = x0 + read_width * per_px;
+        let scale = |hw: u32| f64::from(hw) / f64::from(dpi);
+        let px = |mm: f32, hw: u32| {
+            (f64::from(mm) / f64::from(MM_PER_INCH) * f64::from(hw)).round() as u32
+        };
+        let (x, y) = (px(area.x_mm, hw_x), px(area.y_mm, hw));
+        let w = (f64::from(width) * scale(hw_x)).ceil() as u32;
+        let h = (f64::from(height) * scale(hw)).floor() as u32;
+        let read_width = w.div_ceil(mode.width_align()) * mode.width_align();
+        let x0 = u32::from(mode.origin) + (x * mode.units_per_inch + hw_x / 2) / hw_x;
+        let x1 = x0 + mode.width_units(read_width);
         let end = |a: f32, b: f32| f64::from(a + b) - 0.01;
         if end(area.x_mm, area.width_mm) > f64::from(FILM_AREA.width_mm)
             || end(area.y_mm, area.height_mm) > f64::from(FILM_AREA.height_mm)
@@ -361,31 +593,44 @@ impl FilmPlan {
             )));
         }
         let y_steps = i64::from(y) * STEPS_PER_INCH as i64 / i64::from(hw);
+        let lead = lead + i64::from(above * STEPS_PER_INCH as u32 / hw);
         let carriage = if y_steps - lead >= MIN_FAST_MOVE {
             Carriage::Fast((y_steps - lead) as u32)
         } else {
             Carriage::Slow((y_steps - lead + SLOW_MOVE_OFFSET) as u32)
         };
-        let lines = h + 2 * skew_lines(hw);
+        let lines = above + h + 2 * skew_lines(hw) + u32::from(*mode.stagger.iter().max().unwrap());
         Ok(Self {
             output: Resample {
                 dpi,
                 hw_dpi: hw,
+                hw_x_dpi: hw_x,
                 width,
                 height,
+                stagger: mode.stagger_at(x0 as u16),
+                first_line: above,
             },
             lines,
             x_units: (x0 as u16, x1 as u16),
             read_width,
             pixels: [x, y, w, h],
             carriage,
-            scan_steps: lines * STEPS_PER_INCH as u32 / hw + SCAN_LEAD_IN,
+            scan_steps: (lines * STEPS_PER_INCH as u32).div_ceil(hw) + u32::from(lead_in),
         })
     }
 
-    /// Width of the white and dark reads, in x units (one pixel per unit).
+    /// Width of the white and dark reads, in x units (one pixel per unit: they aren't
+    /// subsampled).
     fn calibration_width(&self) -> usize {
         usize::from(self.x_units.1 - self.x_units.0)
+    }
+}
+
+/// Names the read a failed read was: they all fail alike.
+fn read_error(read: &'static str) -> impl Fn(ScanError) -> ScanError {
+    move |e| match e {
+        ScanError::Backend(m) => ScanError::Backend(format!("{read} read: {m}")),
+        other => other,
     }
 }
 
@@ -527,15 +772,40 @@ impl FilmSession {
     }
 
     fn with_light(area: &ScanArea, dpi: u32, infrared: bool) -> Result<Self, ScanError> {
-        let mode = *MODES.iter().find(|m| m.hw_dpi >= dpi).ok_or_else(|| {
-            ScanError::Unsupported(format!("{dpi} dpi: native film scans go up to 1,600"))
-        })?;
+        // Infrared above 2,400 dpi is read at 3,200 × 2,400 and scaled up.
+        let read_dpi = if infrared { dpi.min(IR_MAX_DPI) } else { dpi };
+        let mode = *MODES
+            .iter()
+            .find(|m| m.hw_dpi.min(m.x_dpi) >= read_dpi)
+            .ok_or_else(|| {
+                ScanError::Unsupported(format!("{dpi} dpi: native film scans go up to 6,400"))
+            })?;
         let light = Light::new(&mode, infrared);
-        let mut plan = FilmPlan::new(area, dpi, &mode, light.lead)?;
+        let above = if infrared {
+            IR_ABOVE_STEPS * mode.hw_dpi / STEPS_PER_INCH as u32
+        } else {
+            0
+        };
+        let mut plan = FilmPlan::new(area, dpi, &mode, light.lead, light.scan_motor[0], above)?;
         if infrared {
-            let margin = (IR_MARGIN * mode.units_per_inch / mode.hw_dpi) as u16;
-            plan.x_units = (plan.x_units.0 - margin, plan.x_units.1 + margin);
-            plan.read_width += 2 * IR_MARGIN;
+            let margin = mode.ir_margin();
+            plan.read_width += 2 * margin;
+            let x0 = plan.x_units.0 - (margin * mode.units_per_inch / mode.x_dpi) as u16;
+            plan.x_units = (x0, x0 + mode.width_units(plan.read_width) as u16);
+            plan.output.stagger = mode.stagger_at(x0);
+            plan.output.first_line -= IR_LAG;
+        }
+        let light = if mode.hw_dpi > 1600 {
+            light.with_line_time(window_line_time(plan.x_units.1))
+        } else {
+            light
+        };
+        // `1e 41` counts the lines in 16 bits: a whole holder at 6,400 dpi just fits.
+        if plan.lines > u32::from(u16::MAX) {
+            return Err(ScanError::InvalidRequest(format!(
+                "{} lines at {dpi} dpi: scan a shorter area",
+                plan.lines
+            )));
         }
         Ok(Self {
             mode,
@@ -550,20 +820,42 @@ impl FilmSession {
         })
     }
 
+    /// A decoder for this session's read as it arrives ([`Self::run_into`]): the color
+    /// pass's image, or for infrared the plane read, to be lined up with
+    /// [`Self::align_infrared_plane`].
+    pub fn decoder(&self) -> decode::Stream {
+        let out = self.plan.output;
+        if !self.light.infrared {
+            let stream = decode::Stream::rgb16(self.layout, out);
+            // The CCD's staggered pixels show as stripes in reads with the stagger.
+            return if self.mode.stagger != [0; 4] {
+                stream.with_phase_balance()
+            } else {
+                stream
+            };
+        }
+        let scale = f64::from(out.hw_x_dpi) / f64::from(out.dpi);
+        let wide = Resample {
+            width: (f64::from(self.plan.read_width) / scale) as u32,
+            ..out
+        };
+        decode::Stream::infrared(self.layout, wide)
+    }
+
     /// Decode this infrared session's read onto the color pass's pixels, undoing the
     /// infrared's stretch ([`IR_STRETCH`]) with linear interpolation.
     pub fn decode_infrared(&self, raw: &[u8], area: &ScanArea) -> Gray16Image {
+        let mut stream = self.decoder();
+        stream.push(raw);
+        self.align_infrared_plane(stream, area)
+    }
+
+    /// The infrared plane of [`Self::decoder`]'s stream, lined up like [`Self::decode_infrared`].
+    pub fn align_infrared_plane(&self, stream: decode::Stream, area: &ScanArea) -> Gray16Image {
         let out = self.plan.output;
-        let scale = f64::from(out.hw_dpi) / f64::from(out.dpi);
-        let wide = decode::infrared(
-            raw,
-            self.layout,
-            Resample {
-                width: (f64::from(self.plan.read_width) / scale) as u32,
-                ..out
-            },
-        );
-        Self::align_infrared(&wide, f64::from(IR_MARGIN) / scale, area.x_mm, out)
+        let scale = f64::from(out.hw_x_dpi) / f64::from(out.dpi);
+        let margin = f64::from(self.mode.ir_margin()) / scale;
+        Self::align_infrared(&stream.into_infrared(), margin, area.x_mm, out)
     }
 
     /// The `out`-sized plane from `wide`, an infrared plane whose column `margin` is the
@@ -602,11 +894,10 @@ impl FilmSession {
 
     /// The `1e 57` record: resolution, the area in pixels, then SilverFast's constants.
     fn record(&self) -> [u8; 42] {
-        let hw = self.mode.hw_dpi;
         let [x, y, w, h] = self.plan.pixels;
         let fields = [
-            hw,
-            hw,
+            self.mode.x_dpi,
+            self.mode.hw_dpi,
             x,
             y,
             w,
@@ -702,6 +993,22 @@ impl FilmSession {
         poll_delay: Duration,
         progress: &mut dyn ProgressSink,
     ) -> Result<Vec<u8>, ScanError> {
+        let mut data = Vec::with_capacity(self.data_len());
+        self.run_into(dev, poll_delay, progress, &mut |block| {
+            data.extend_from_slice(block)
+        })?;
+        Ok(data)
+    }
+
+    /// [`Self::run_with`], handing `received` the image read's blocks as they come, for
+    /// decoding them as they arrive ([`decode::Stream`]) instead of keeping the read.
+    pub fn run_into(
+        &self,
+        dev: &mut dyn Transport,
+        poll_delay: Duration,
+        progress: &mut dyn ProgressSink,
+        received: &mut dyn FnMut(&[u8]),
+    ) -> Result<(), ScanError> {
         let (m, l) = (self.mode, self.light);
         let mut p = Protocol::new(dev, poll_delay);
 
@@ -741,9 +1048,7 @@ impl FilmSession {
         p.command(STAGE, &[&[STAGE_LAMP]])?;
         p.command(PASS, &[&[CCD_800]])?;
         p.command(OFFSETS, &[&analog([FIRST_OFFSET; 3], [l.window_gain; 3])])?;
-        let mut max_exposure = [0u8; 26];
-        max_exposure[..2].copy_from_slice(&WINDOW_EXPOSURE.to_le_bytes());
-        p.command(EXPOSURE_21, &[&max_exposure])?;
+        p.command(EXPOSURE_21, &[&line_time(WINDOW_EXPOSURE)])?;
         upload(
             &mut p,
             tables::TYPE7,
@@ -772,7 +1077,9 @@ impl FilmSession {
         )?;
         p.command(MOTOR, &[&motor(WINDOW_READ_STEPS, WINDOW_READ_MOTOR)])?;
         let width = usize::from(x1 - x0);
-        let window = p.read_data(width * usize::from(lines) * 3)?;
+        let window = p
+            .read_data(width * usize::from(lines) * 3)
+            .map_err(read_error("holder"))?;
         p.wait_ready()?;
         let back = back_move(&window, width).unwrap_or_else(|| {
             log::warn!("no calibration window in the holder read; assuming the usual place");
@@ -801,7 +1108,8 @@ impl FilmSession {
             )?;
             p.command(LEVELS, &[&[0u8; 18]])?;
             p.command(GAIN, &[&window_gain()])?;
-            p.read_data(usize::from(x1 - x0) * usize::from(lines) * 6)?;
+            p.read_data(usize::from(x1 - x0) * usize::from(lines) * 6)
+                .map_err(read_error("standing"))?;
             p.wait_ready()?;
         }
         p.command(STAGE, &[&[STAGE_BOTH]])?;
@@ -814,6 +1122,14 @@ impl FilmSession {
         } else {
             self.search_exposure(&mut p)?
         };
+        let searched = if l.infrared {
+            m.ir_line_time
+        } else {
+            m.search_line_time
+        };
+        if searched != l.line_time {
+            p.command(EXPOSURE_21, &[&line_time(l.line_time)])?;
+        }
         let offsets = self.search_offsets(&mut p, base_exposure, gains)?;
         let image_exposure = ((f64::from(base_exposure) * self.exposure_scale).round() as u16)
             .clamp(1, m.max_exposure);
@@ -836,7 +1152,9 @@ impl FilmSession {
         )?;
         p.command(LEVELS, &[&[0u8; 18]])?;
         p.command(GAIN, &[&neutral_gain()])?;
-        let strip = p.read_data(usize::from(s1 - s0) * 8 * 6)?;
+        let strip = p
+            .read_data(usize::from(s1 - s0) * 8 * 6)
+            .map_err(read_error("masked strip"))?;
         p.wait_ready()?;
         let darks = calibration::white_read_darks(&strip);
 
@@ -846,6 +1164,7 @@ impl FilmSession {
         if !l.infrared {
             p.command(LIGHT, &[&[l.calibrate]])?;
         }
+        self.read_window(&mut p, (x0, x1), self.read_line_time())?;
         p.command(EXPOSURE, &[&l.exposure(base_exposure, false)])?;
         p.command(
             GEOMETRY,
@@ -865,7 +1184,9 @@ impl FilmSession {
             &l.white_step.to_le_bytes(),
         )?;
         p.command(MOTOR, &[&WHITE_MOTOR])?;
-        let white = p.read_data(cal_width * usize::from(WHITE_LINES) * 6)?;
+        let white = p
+            .read_data(cal_width * usize::from(WHITE_LINES) * 6)
+            .map_err(read_error("white"))?;
         p.wait_ready()?;
 
         p.command(LIGHT, &[&[l.off]])?;
@@ -880,13 +1201,19 @@ impl FilmSession {
         p.command(LEVELS, &[&[0u8; 18]])?;
         p.command(GAIN, &[&neutral_gain()])?;
         p.command(GEOMETRY, &[&dark_geometry])?;
-        let dark = p.read_data(cal_width * usize::from(DARK_LINES) * 6)?;
+        let dark = p
+            .read_data(cal_width * usize::from(DARK_LINES) * 6)
+            .map_err(read_error("dark"))?;
         p.wait_ready()?;
         p.command(LIGHT, &[&[l.image]])?;
         p.query(POSITION, 4)?;
 
-        let shading =
-            Shading::compute(&white, &dark, cal_width, darks, cal_width).ok_or_else(|| {
+        dump_calibration(
+            l.infrared,
+            &[("strip", &strip), ("white", &white), ("dark", &dark)],
+        );
+        let shading = Shading::compute(&white, &dark, cal_width, darks, cal_width, WHITE_SHIFTS)
+            .ok_or_else(|| {
                 ScanError::Backend(format!(
                     "calibration reads of {} and {} bytes don't fit {cal_width} pixels",
                     white.len(),
@@ -912,9 +1239,15 @@ impl FilmSession {
         let lines = u16::try_from(self.plan.lines)
             .map_err(|_| ScanError::InvalidRequest("area too tall".into()))?;
         let block = (MAX_BLOCK / self.line_len()).clamp(1, 255) as u8;
-        let mut params = read_params(m.subsampling, m.resolution, 0x83, [0x80, 0xa0], block);
+        let mut params = read_params(
+            m.subsampling,
+            m.resolution,
+            m.image_kind,
+            [0x80, 0xa0],
+            block,
+        );
         params[6] = 0x80;
-        params[9] = 0x20;
+        params[9] = shading.step_code(m.image_kind);
         p.command(EXPOSURE, &[&l.exposure(image_exposure, false)])?;
         p.command(GEOMETRY, &[&area_params(x0, x1, lines, params)])?;
         p.command(LEVELS, &[&shading.levels()])?;
@@ -934,12 +1267,40 @@ impl FilmSession {
         )?;
         p.command(MOTOR, &[&motor(self.plan.scan_steps, l.scan_motor)])?;
         let len = self.data_len();
-        let data = p.read_data_with(len, &mut |n| {
-            progress.progress(CALIBRATED + (1.0 - CALIBRATED) * n as f32 / len as f32);
-        })?;
+        let mut done = 0;
+        p.read_data_into(len, &mut |block| {
+            done += block.len();
+            progress.progress(CALIBRATED + (1.0 - CALIBRATED) * done as f32 / len as f32);
+            received(block);
+        })
+        .map_err(read_error("image"))?;
         p.wait_ready()?;
         p.query(OPEN, 1)?;
-        Ok(data)
+        Ok(())
+    }
+
+    /// Above 1,600 dpi, Epson Scan's type-7 table for a read of x `x0..x1` at line time `lt`
+    /// (see [`tables::type7_window`]); the constant one is right below.
+    fn read_window(
+        &self,
+        p: &mut Protocol<'_>,
+        (x0, x1): (u16, u16),
+        lt: u16,
+    ) -> Result<(), ScanError> {
+        if self.mode.hw_dpi <= 1600 {
+            return Ok(());
+        }
+        upload(
+            p,
+            tables::TYPE7,
+            tables::TYPE7_ADDRESS,
+            &tables::type7_window(x0, x1, lt),
+        )
+    }
+
+    /// The line time of the calibration and image reads.
+    fn read_line_time(&self) -> u16 {
+        self.light.line_time
     }
 
     /// Mean 8-bit levels through the calibration window at an exposure.
@@ -958,7 +1319,9 @@ impl FilmSession {
         )?;
         p.command(LEVELS, &[&[0u8; 18]])?;
         p.command(GAIN, &[&neutral_gain()])?;
-        let data = p.read_data(usize::from(x1 - x0) * 4 * 3)?;
+        let data = p
+            .read_data(usize::from(x1 - x0) * 4 * 3)
+            .map_err(read_error("window"))?;
         p.wait_ready()?;
         Ok(channel_means(&data, false))
     }
@@ -973,9 +1336,8 @@ impl FilmSession {
         if m.ccd != CCD_800 {
             p.command(PASS, &[&[m.ccd]])?;
         }
-        let mut max_exposure = [0u8; 26];
-        max_exposure[..2].copy_from_slice(&m.max_exposure.to_le_bytes());
-        p.command(EXPOSURE_21, &[&max_exposure])?;
+        p.command(EXPOSURE_21, &[&line_time(m.search_line_time)])?;
+        self.read_window(p, m.search_x, m.search_line_time)?;
 
         let mut e = m.first_exposure;
         let mut means = self.window_means(p, e)?;
@@ -1018,10 +1380,9 @@ impl FilmSession {
         let mut gains = [0; 3];
         p.command(OFFSETS, &[&analog([FIRST_OFFSET; 3], gains)])?;
         p.command(PASS, &[&[m.ccd]])?;
-        let mut line_time = [0u8; 26];
-        line_time[..2].copy_from_slice(&m.ir_line_time.to_le_bytes());
-        p.command(EXPOSURE_21, &[&line_time])?;
+        p.command(EXPOSURE_21, &[&line_time(m.ir_line_time)])?;
         upload(p, tables::TYPE7, tables::TYPE7_ADDRESS, &tables::type7())?;
+        self.read_window(p, m.search_x, m.ir_line_time)?;
         let mut means = self.window_means(p, 0)?;
         if means.iter().cloned().fold(0.0, f64::max) < 8.0 {
             return Err(ScanError::Backend(format!(
@@ -1051,6 +1412,7 @@ impl FilmSession {
         gains: [u8; 3],
     ) -> Result<[u16; 3], ScanError> {
         let (s0, s1) = self.mode.strip;
+        self.read_window(p, self.mode.strip, self.read_line_time())?;
         let geometry = area_params(
             s0,
             s1,
@@ -1070,7 +1432,9 @@ impl FilmSession {
                 p.command(LIGHT, &[&[FILM_LAMP_OFF]])?;
             }
             p.command(GEOMETRY, &[&geometry])?;
-            let data = p.read_data(usize::from(s1 - s0) * 4 * 6)?;
+            let data = p
+                .read_data(usize::from(s1 - s0) * 4 * 6)
+                .map_err(read_error("offset"))?;
             p.wait_ready()?;
             let means = channel_means(&data, true);
             let mut settled = true;
@@ -1095,6 +1459,22 @@ impl FilmSession {
     }
 }
 
+/// With `EPSON_CALIBRATION_DUMP` set to a folder, save the film calibration reads there as
+/// raw 16-bit RGB (`white.bin` and so on, `ir-` first for an infrared pass), for checking a
+/// scan's columns against them.
+fn dump_calibration(infrared: bool, reads: &[(&str, &[u8])]) {
+    let Some(dir) = std::env::var_os("EPSON_CALIBRATION_DUMP") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    for (name, data) in reads {
+        let path = dir.join(format!("{}{name}.bin", if infrared { "ir-" } else { "" }));
+        if let Err(e) = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, data)) {
+            log::warn!("couldn't save {}: {e}", path.display());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1111,6 +1491,52 @@ mod tests {
 
     fn inch(v: f32) -> f32 {
         v * MM_PER_INCH
+    }
+
+    /// A whole holder plans at every resolution, in color and infrared: the read is decoded
+    /// as it arrives, and its lines just fit `1e 41`'s 16 bits at 6,400 dpi.
+    #[test]
+    fn whole_holder_at_every_resolution() {
+        for dpi in [400, 800, 1200, 1600, 2400, 3200, 6400] {
+            for session in [
+                FilmSession::new(&FILM_AREA, dpi),
+                FilmSession::infrared(&FILM_AREA, dpi),
+            ] {
+                let s = session.unwrap();
+                assert!(s.plan.lines <= u32::from(u16::MAX), "{dpi} dpi");
+            }
+        }
+        // Whole-holder reads take Epson Scan's line times for its search reads of the film
+        // area, with the motor periods in step; a frame's reads keep the mode's.
+        for (dpi, infrared, line_time, white_step, period) in [
+            (6400, false, 13968, 582, 2328),
+            (3200, false, 13968, 582, 2328),
+            (2400, false, 9648, 402, 603),
+            (2400, true, 12000, 500, 750),
+        ] {
+            let s = if infrared {
+                FilmSession::infrared(&FILM_AREA, dpi)
+            } else {
+                FilmSession::new(&FILM_AREA, dpi)
+            }
+            .unwrap();
+            let l = s.light;
+            assert_eq!(
+                (l.line_time, l.white_step, l.scan_ramp),
+                (line_time, white_step, (period, period, 1)),
+                "{dpi} dpi"
+            );
+        }
+        let frame = area(40.3, 203.8, 21.8, 31.4);
+        for dpi in [2400, 6400] {
+            let s = FilmSession::new(&frame, dpi).unwrap();
+            assert_eq!(s.light.line_time, s.mode.max_exposure, "{dpi} dpi");
+        }
+        let taller = ScanArea {
+            height_mm: 300.0,
+            ..FILM_AREA
+        };
+        assert!(FilmSession::new(&taller, 6400).is_err());
     }
 
     /// The geometry SilverFast sent in captures 30, 31, 33, 35 and 36, from their `1e 57`
@@ -1186,7 +1612,64 @@ mod tests {
         assert_eq!(s.plan.carriage, Carriage::Slow(274));
         assert!(FilmSession::new(&area(60.0, 0.0, 10.0, 10.0), 800).is_err());
         assert!(FilmSession::new(&area(0.0, 230.0, 10.0, 10.0), 800).is_err());
-        assert!(FilmSession::new(&area(0.0, 0.0, 10.0, 10.0), 2400).is_err());
+        assert!(FilmSession::new(&area(0.0, 0.0, 10.0, 10.0), 9600).is_err());
+    }
+
+    /// The geometry Epson Scan sent in captures 40, 41, 44 and 45, from their `1e 57` records
+    /// (the area in pixels: x at the CCD's resolution, y at the lines'), `1e 41` and `1e 01`.
+    #[test]
+    fn matches_epson_scan() {
+        // (dpi, record x and y resolution, x, y, w, h, the read's x range, its move)
+        for (dpi, (rx, ry), [x, y, w, h], (x0, x1), steps) in [
+            (
+                1200,
+                (1200, 1200),
+                [1904, 9627, 1027, 1483],
+                (0x1c6b, 0x226b),
+                0x4946,
+            ),
+            (
+                2400,
+                (3200, 2400),
+                [5077, 19255, 2741, 2967],
+                (0x1c9a, 0x275a),
+                0x49a7,
+            ),
+            (
+                2400,
+                (3200, 2400),
+                [287, 8119, 2901, 3344],
+                (0x132c, 0x1e8c),
+                0x1e27,
+            ),
+            (
+                3200,
+                (6400, 6400),
+                [10154, 51349, 5482, 7914],
+                (0x1ccb, 0x323b),
+                0x49a9,
+            ),
+        ] {
+            let a = area(
+                inch(x as f32 / rx as f32),
+                inch(y as f32 / ry as f32),
+                inch(w as f32 / rx as f32),
+                inch(h as f32 / ry as f32),
+            );
+            let s = FilmSession::new(&a, dpi).unwrap();
+            assert_eq!((s.mode.x_dpi, s.mode.hw_dpi), (rx, ry), "{dpi} dpi");
+            assert_eq!(s.plan.carriage, Carriage::Fast(steps), "{dpi} dpi, y {y}");
+            // Epson Scan reads 1,200 dpi wider than asked; the others to whole 16 px.
+            if dpi != 1200 {
+                assert_eq!(s.plan.x_units.1 - s.plan.x_units.0, x1 - x0, "{dpi} dpi");
+            }
+            // The left edge, within the 19 units captures 41 and 44 disagree by.
+            assert!(
+                s.plan.x_units.0.abs_diff(x0) <= 19,
+                "{dpi} dpi, x {x}: {:#x} vs {x0:#x}",
+                s.plan.x_units.0
+            );
+        }
     }
 
     #[test]
@@ -1286,9 +1769,12 @@ mod tests {
                         // Calibration values differ per session.
                         c if c == OFFSETS || c == LEVELS => {}
                         // Lines per block: SilverFast's blocks grow to 256 KiB at 1,600 dpi;
-                        // ours stay at 64 KiB.
+                        // ours stay at 64 KiB. The white step follows the calibration.
                         c if c == GEOMETRY && tw[11] == 0x83 => {
-                            assert_eq!([&tw[..18], &tw[19..]], [&ow[..18], &ow[19..]]);
+                            assert_eq!(
+                                [&tw[..15], &tw[16..18], &tw[19..]],
+                                [&ow[..15], &ow[16..18], &ow[19..]]
+                            );
                         }
                         c if c == EXPOSURE => assert_eq!(
                             [&tw[..6], &tw[8..]],
@@ -1353,8 +1839,11 @@ mod tests {
         let out = Resample {
             dpi: 1600,
             hw_dpi: 1600,
+            hw_x_dpi: 1600,
             width: 1600,
             height: 2,
+            stagger: [0; 4],
+            first_line: 0,
         };
         let px_per_mm = 1600.0 / f64::from(MM_PER_INCH);
         // A frame in the left strip: its infrared lands left of the color, increasingly so
@@ -1376,17 +1865,31 @@ mod tests {
     #[test]
     fn infrared_pass_on_simulator() {
         let a = area(5.0, 40.0, 24.0, 36.0);
-        for dpi in [800, 1600] {
+        for (dpi, a) in [
+            (800, a),
+            (1200, a),
+            (1600, a),
+            (2400, area(5.0, 40.0, 6.0, 6.0)),
+            (3200, area(5.0, 40.0, 3.0, 3.0)),
+        ] {
             let session = FilmSession::infrared(&a, dpi).unwrap();
-            // The same read as the color pass, moved with the steady motor's lead, and wider.
             let color = FilmSession::new(&a, dpi).unwrap();
-            let margin = (IR_MARGIN * session.mode.units_per_inch / session.mode.hw_dpi) as u16;
-            let (x0, x1) = color.plan.x_units;
-            assert_eq!(session.plan.x_units, (x0 - margin, x1 + margin));
+            // The color pass's pixels, at 3,200 dpi read at 3,200 × 2,400.
             assert_eq!(
-                session.plan.read_width,
-                color.plan.read_width + 2 * IR_MARGIN
+                (session.plan.output.width, session.plan.output.height),
+                (color.plan.output.width, color.plan.output.height)
             );
+            let color = FilmSession::new(&a, dpi.min(IR_MAX_DPI)).unwrap();
+            assert_eq!(session.mode.hw_dpi, color.mode.hw_dpi);
+            // The same read as the color pass, moved with the steady motor's lead, and wider.
+            let m = session.mode;
+            let margin = m.ir_margin();
+            let (x0, x1) = color.plan.x_units;
+            let left = (margin * m.units_per_inch / m.x_dpi) as u16;
+            let right = m.width_units(2 * margin) as u16 - left;
+            assert_eq!(session.plan.x_units, (x0 - left, x1 + right), "{dpi} dpi");
+            assert_eq!(session.plan.read_width, color.plan.read_width + 2 * margin);
+            assert_eq!(session.plan.read_width % m.width_align(), 0);
             let mut sim = SimulatedScanner::default();
             let data = session.run(&mut sim, Duration::ZERO).unwrap();
             assert_eq!(data.len(), session.data_len());
@@ -1404,14 +1907,18 @@ mod tests {
             let exposures = sim.writes.windows(2).filter(|w| w[0] == EXPOSURE);
             assert!(exposures.into_iter().all(|w| w[1] == [0; 12]));
             let motor = sim.writes.iter().rev().find(|w| w.len() == 12).unwrap();
-            assert_eq!(motor[4..], STEADY_SCAN_MOTOR);
+            assert_eq!(motor[4..], session.light.scan_motor);
+            assert_eq!(motor[10], 0x08);
         }
         let ir = FilmSession::infrared(&a, 800).unwrap();
         let color = FilmSession::new(&a, 800).unwrap();
         let (Carriage::Fast(i), Carriage::Fast(c)) = (ir.plan.carriage, color.plan.carriage) else {
             panic!("slow move");
         };
-        assert_eq!(i - c, 256);
+        // The steady motor's lead, less the lines read above the area.
+        assert_eq!(i - c, 256 - IR_ABOVE_STEPS);
+        assert_eq!(ir.plan.lines, color.plan.lines + IR_ABOVE_STEPS / 3);
+        assert_eq!(ir.plan.output.first_line, IR_ABOVE_STEPS / 3 - IR_LAG);
     }
 
     /// A session that finds the CCD and the lamp out (as one stopped partway leaves them)
@@ -1442,16 +1949,29 @@ mod tests {
 
     #[test]
     fn runs_on_simulator() {
-        for dpi in [300, 800, 1600] {
-            let session = FilmSession::new(&area(5.0, 40.0, 24.0, 36.0), dpi).unwrap();
+        let frame = area(5.0, 40.0, 24.0, 36.0);
+        for (dpi, a) in [
+            (300, frame),
+            (800, frame),
+            (1200, frame),
+            (1600, frame),
+            (2400, area(5.0, 40.0, 6.0, 6.0)),
+            (3200, area(5.0, 40.0, 3.0, 3.0)),
+            (6400, area(5.0, 40.0, 3.0, 3.0)),
+        ] {
+            let session = FilmSession::new(&a, dpi).unwrap();
             let mut sim = SimulatedScanner::default();
             let data = session.run(&mut sim, Duration::ZERO).unwrap();
             assert_eq!(data.len(), session.data_len(), "{dpi} dpi");
+            // Decodes to the requested size.
+            let image = decode::rgb16(&data, session.layout, session.plan.output);
+            let (w, h) = a.pixel_size(dpi);
+            assert_eq!(image.dimensions(), (w, h), "{dpi} dpi");
             // The film lamp, then 16-bit linear data.
             assert!(sim.writes.contains(&vec![FILM_LAMP]));
             assert!(sim.writes.contains(&tables::linear12()));
             let geometry = sim.writes.iter().rev().find(|w| w.len() == 22).unwrap();
-            assert_eq!(geometry[11], 0x83);
+            assert_eq!(geometry[11], session.mode.image_kind);
             assert_eq!(geometry[8] & 0x01, 0);
         }
     }

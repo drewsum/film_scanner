@@ -131,6 +131,29 @@ pub fn type7() -> [u8; 256] {
     std::array::from_fn(|i| HEAD.get(i).copied().unwrap_or(0xff))
 }
 
+/// The type-7 table Epson Scan sends before each read above 1,600 dpi, for a read of x
+/// `x0..x1`. Its entries are (tick, mode) pairs along the line, in half line-time ticks:
+/// the CCD is clocked normally (`0x1000`) from a little after `x0` (from 400 when `x0` is
+/// below it) to `x1` + 480, rounded up to even, and fast (`0x2000`) elsewhere, until 8
+/// short of the line's end (the line time `lt` is 2 ticks). With [`type7`]'s constant table instead, these reads land 12 to 20 mm left of their x.
+pub fn type7_window(x0: u16, x1: u16, lt: u16) -> [u8; 256] {
+    let mut t = type7();
+    let mut entries = vec![];
+    if x0 >= 400 {
+        t[14..16].copy_from_slice(&0x2000u16.to_le_bytes());
+        // Epson Scan's start lies 253 to 316 ticks after x0, at a multiple of 8.
+        entries.push(((x0 + 280) & !7, 0x1000));
+    }
+    entries.push(((x1 + 480).next_multiple_of(2), 0x2000));
+    entries.push((2 * lt - 8, 0x1000));
+    for (i, (tick, mode)) in entries.into_iter().enumerate() {
+        let at = 16 + 4 * i;
+        t[at..at + 2].copy_from_slice(&u16::to_le_bytes(tick));
+        t[at + 2..at + 4].copy_from_slice(&u16::to_le_bytes(mode));
+    }
+    t
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,5 +216,39 @@ mod tests {
             [0x05, 0x00, 0x00, 0x01, 0x02, 0x02, 0x00, 0x00]
         );
         assert_eq!(type7()[4..8], [0x28, 0x00, 0xc0, 0x31]);
+    }
+
+    #[test]
+    fn type7_window_as_epson_scan() {
+        // Captures 43 and 45: the 2,400 and 6,400 dpi image reads, and the infrared pass's
+        // strip read in capture 42.
+        let t = type7_window(7322, 10074, 8160);
+        assert_eq!(
+            u16s(&t[12..28]),
+            [
+                0x190, 0x2000, 0x1db0, 0x1000, 0x293a, 0x2000, 0x3fb8, 0x1000
+            ]
+        );
+        assert_eq!(t[28], 0xff);
+        let t = type7_window(7371, 12859, 9552);
+        assert_eq!(
+            u16s(&t[12..28]),
+            [
+                0x190,
+                0x2000,
+                0x1dc8 + 24,
+                0x1000,
+                0x341c,
+                0x2000,
+                0x4a98,
+                0x1000
+            ]
+        );
+        let t = type7_window(100, 196, 12000);
+        assert_eq!(
+            u16s(&t[12..24]),
+            [0x190, 0x1000, 0x2a4, 0x2000, 0x5db8, 0x1000]
+        );
+        assert_eq!(t[24], 0xff);
     }
 }

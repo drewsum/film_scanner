@@ -441,14 +441,22 @@ impl FlatbedSession {
         p.command(LIGHT, &[&[FLATBED_LAMP]])?;
         p.query(POSITION, 4)?;
 
-        let shading = Shading::compute(&white, &dark, cal_width, darks, geometry::bed_units())
-            .ok_or_else(|| {
-                ScanError::Backend(format!(
-                    "calibration reads of {} and {} bytes don't fit {cal_width} pixels",
-                    white.len(),
-                    dark.len()
-                ))
-            })?;
+        // A step of 64, as Epson's driver takes for the whole width.
+        let shading = Shading::compute(
+            &white,
+            &dark,
+            cal_width,
+            darks,
+            geometry::bed_units(),
+            6..=6,
+        )
+        .ok_or_else(|| {
+            ScanError::Backend(format!(
+                "calibration reads of {} and {} bytes don't fit {cal_width} pixels",
+                white.len(),
+                dark.len()
+            ))
+        })?;
         log::info!(
             "calibration: offsets {offsets:02x?}, white-read darks {darks:?}, \
              white base {:?}, dark base {:?}",
@@ -507,7 +515,7 @@ impl FlatbedSession {
                     0x80,
                     0,
                     0,
-                    0x60,
+                    shading.step_code(0x82),
                     self.short_flag(),
                     0xa0,
                     lines_per_block,
@@ -537,8 +545,10 @@ impl FlatbedSession {
         params[4..].copy_from_slice(&m.scan_motor);
         p.command(MOTOR, &[&params])?;
         let len = self.data_len();
-        let data = p.read_data_with(len, &mut |n| {
-            progress.progress(CALIBRATED + (1.0 - CALIBRATED) * n as f32 / len as f32);
+        let mut data = Vec::with_capacity(len);
+        p.read_data_into(len, &mut |block| {
+            data.extend_from_slice(block);
+            progress.progress(CALIBRATED + (1.0 - CALIBRATED) * data.len() as f32 / len as f32);
         })?;
 
         p.wait_ready()?;

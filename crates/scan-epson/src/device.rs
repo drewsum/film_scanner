@@ -16,6 +16,7 @@ use scan_core::{
 
 use crate::decode;
 use crate::film::{self, FilmSession};
+use crate::register;
 use crate::session::FlatbedSession;
 use crate::system::WiaPause;
 use crate::tables;
@@ -24,8 +25,14 @@ use crate::transport::Transport;
 pub const BACKEND_NAME: &str = "epson";
 /// Resolutions offered; native flatbed sessions go up to 400 dpi so far.
 const RESOLUTIONS: [u32; 7] = [50, 75, 100, 150, 200, 300, 400];
-/// Film resolutions: read at 400, 800 or 1,600 dpi and downsampled.
-const FILM_RESOLUTIONS: [u32; 8] = [100, 200, 300, 400, 600, 800, 1200, 1600];
+/// Film resolutions: read at the hardware resolution at or above, and downsampled (2,400
+/// from 3,200 × 2,400, 3,200 from 6,400).
+const FILM_RESOLUTIONS: [u32; 11] = [100, 200, 300, 400, 600, 800, 1200, 1600, 2400, 3200, 6400];
+/// How far the infrared pass may land from the color one: where the carriage lands varies by
+/// up to 0.35 mm between sessions.
+const INFRARED_REACH_MM: f32 = 0.6;
+/// The infrared's offset is measured in bands this tall down the scan.
+const INFRARED_BAND_MM: f32 = 4.0;
 /// Film exposures beyond the calibrated one reach at most twice it.
 const MAX_FILM_EV: f32 = 1.0;
 /// The bed: 8.5 × 11.7 in, as Epson's WIA driver reports it.
@@ -218,18 +225,38 @@ impl V500Device {
                 offset: i as f32 / n,
                 scale: 1.0 / n,
             };
-            let raw = session.run_with(dev.as_mut(), self.poll_delay, &mut part)?;
+            // Decoded as it arrives: a whole holder's read at 6,400 dpi is 6 GB.
+            let mut stream = session.decoder();
+            session.run_into(dev.as_mut(), self.poll_delay, &mut part, &mut |block| {
+                stream.push(block)
+            })?;
             drop(dev);
-            let output = session.plan.output;
             match exposures.get(i) {
                 Some(exposure) => passes.push(ScanPass {
                     exposure: *exposure,
-                    image: image(
-                        decode::rgb16(&raw, session.layout, output),
-                        request.bit_depth,
-                    ),
+                    image: image(stream.into_rgb16(), request.bit_depth),
                 }),
-                None => infrared = Some(session.decode_infrared(&raw, &area)),
+                None => infrared = Some(session.align_infrared_plane(stream, &area)),
+            }
+        }
+        // The infrared is a session of its own, landed from its own move and not keeping step
+        // with the color down the holder: line it up with the color by its detail, band by band.
+        if let (Some(ir), Some(pass)) = (&infrared, passes.first()) {
+            let px = |mm: f32| mm / scan_core::MM_PER_INCH * request.dpi as f32;
+            let band = px(INFRARED_BAND_MM).round() as u32;
+            match register::infrared_offsets(&pass.image, ir, px(INFRARED_REACH_MM), band) {
+                Some(offsets) => {
+                    let k = offsets.knots();
+                    log::info!(
+                        "infrared {:.2?} px from the color at the top, {:.2?} at the bottom \
+                         ({} bands); lined up",
+                        k[0].1,
+                        k[k.len() - 1].1,
+                        k.len()
+                    );
+                    infrared = Some(register::shifted(ir, &offsets));
+                }
+                None => log::warn!("couldn't measure the infrared's offset from the color"),
             }
         }
         progress.progress(1.0);

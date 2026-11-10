@@ -9,6 +9,7 @@ use std::collections::VecDeque;
 
 use scan_core::ScanError;
 
+use crate::protocol::MAX_WRITE;
 use crate::transport::Transport;
 
 const ACK: u8 = 0x06;
@@ -32,6 +33,39 @@ pub struct SimulatedScanner {
     pub position: [u16; 2],
     stage: u8,
     reverse: bool,
+    /// The image read under way, made a block at a time as it is read.
+    feed: Option<Feed>,
+    /// Bytes of the table being uploaded (`1e 84`) still to come, in writes of their own.
+    table_left: usize,
+}
+
+/// An image read's blocks still to come: each `per_block` lines of `line` and a trailer.
+#[derive(Debug)]
+struct Feed {
+    line: Vec<u8>,
+    lines: usize,
+    per_block: usize,
+}
+
+impl Feed {
+    /// The next block's transfers, if any are left.
+    fn next(&mut self) -> Option<Vec<Vec<u8>>> {
+        if self.lines == 0 {
+            return None;
+        }
+        let n = self.per_block.min(self.lines);
+        self.lines -= n;
+        let block = self.line.repeat(n);
+        let mut trailer = vec![0x02];
+        trailer.extend_from_slice(&(block.len() as u32).to_le_bytes());
+        trailer.extend_from_slice(&[0x00, 0x80, 0x00]);
+        let mut chunks: Vec<Vec<u8>> = block.chunks(MAX_TRANSFER).map(<[u8]>::to_vec).collect();
+        match chunks.last_mut() {
+            Some(last) if last.len() + trailer.len() <= MAX_TRANSFER => last.extend(trailer),
+            _ => chunks.push(trailer),
+        }
+        Some(chunks)
+    }
 }
 
 /// Parameter writes a command takes; `None` for queries, which reply instead of acking.
@@ -66,10 +100,10 @@ fn query_reply(cmd: [u8; 2]) -> Vec<u8> {
 
 impl SimulatedScanner {
     /// The data blocks for a read with the current geometry.
-    fn image(&self) -> Vec<Vec<u8>> {
+    fn image(&self) -> Option<Feed> {
         let g = &self.geometry;
         if g.len() != 22 {
-            return Vec::new();
+            return None;
         }
         let u16_at = |i: usize| usize::from(u16::from_le_bytes([g[i], g[i + 1]]));
         let units = u16_at(2).saturating_sub(u16_at(0));
@@ -88,34 +122,47 @@ impl SimulatedScanner {
             (true, true) => DARK_LEVEL.to_le_bytes().to_vec(),
             (true, false) => WHITE_LEVEL.to_le_bytes().to_vec(),
         };
-        let line: Vec<u8> = sample.repeat(width * 3);
-        let mut transfers = Vec::new();
-        for first in (0..lines).step_by(per_block) {
-            let block = line.repeat(per_block.min(lines - first));
-            let mut trailer = vec![0x02];
-            trailer.extend_from_slice(&(block.len() as u32).to_le_bytes());
-            trailer.extend_from_slice(&[0x00, 0x80, 0x00]);
-            let mut chunks: Vec<Vec<u8>> = block.chunks(MAX_TRANSFER).map(<[u8]>::to_vec).collect();
-            match chunks.last_mut() {
-                Some(last) if last.len() + trailer.len() <= MAX_TRANSFER => last.extend(trailer),
-                _ => chunks.push(trailer),
-            }
-            transfers.extend(chunks);
-        }
-        transfers
+        Some(Feed {
+            line: sample.repeat(width * 3),
+            lines,
+            per_block,
+        })
     }
 }
 
 impl Transport for SimulatedScanner {
     fn write(&mut self, data: &[u8]) -> Result<(), ScanError> {
-        if !self.replies.is_empty() {
+        if !self.replies.is_empty() || self.feed.as_ref().is_some_and(|f| f.lines > 0) {
             return Err(ScanError::Backend(format!(
                 "write {data:02x?} while {} replies are unread",
                 self.replies.len()
             )));
         }
+        if data.len() > MAX_WRITE {
+            return Err(ScanError::Backend(format!(
+                "simulator: a write of {} bytes, past the {MAX_WRITE} the scanner takes",
+                data.len()
+            )));
+        }
         self.writes.push(data.to_vec());
         if let Some((cmd, left)) = self.awaiting.take() {
+            // A table: its header gives its length, which may come in several writes.
+            if cmd == [0x1e, 0x84] {
+                match (left, data) {
+                    (2, [_, _, _, _, _, a, b, c]) => {
+                        self.table_left =
+                            usize::from(*a) | usize::from(*b) << 8 | usize::from(*c) << 16;
+                        self.awaiting = Some((cmd, 1));
+                        return Ok(());
+                    }
+                    (1, _) if data.len() < self.table_left => {
+                        self.table_left -= data.len();
+                        self.awaiting = Some((cmd, 1));
+                        return Ok(());
+                    }
+                    _ => self.table_left = 0,
+                }
+            }
             match cmd {
                 [0x1e, 0x41] => self.geometry = data.to_vec(),
                 [0x1e, 0xa2] => self.lamp_off = matches!(data, [0x00 | 0x03 | 0x05]),
@@ -137,7 +184,7 @@ impl Transport for SimulatedScanner {
             .try_into()
             .map_err(|_| ScanError::Backend(format!("simulator: {data:02x?} is not a command")))?;
         if cmd == [0x1e, 0x47] {
-            self.replies.extend(self.image());
+            self.feed = self.image();
             return Ok(());
         }
         if cmd == [0x1e, 0x05] && self.reverse {
@@ -165,6 +212,11 @@ impl Transport for SimulatedScanner {
     }
 
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, ScanError> {
+        if self.replies.is_empty()
+            && let Some(block) = self.feed.as_mut().and_then(Feed::next)
+        {
+            self.replies.extend(block);
+        }
         let Some(mut reply) = self.replies.pop_front() else {
             return Err(ScanError::Backend(
                 "simulator: read with nothing to send".into(),
@@ -214,5 +266,20 @@ mod tests {
         g[18] = 11;
         p.command([0x1e, 0x41], &[&g]).unwrap();
         assert_eq!(p.read_data(30 * 1920 * 3).unwrap().len(), 30 * 1920 * 3);
+    }
+
+    #[test]
+    fn takes_long_tables_in_pieces() {
+        // A whole film area's shading table at 6,400 dpi: 17,280 px × 6 bytes.
+        let mut sim = SimulatedScanner::default();
+        let table = vec![7u8; 17280 * 6];
+        let mut p = Protocol::new(&mut sim, Duration::ZERO);
+        crate::session::upload(&mut p, 6, [0, 8, 1, 2], &table).unwrap();
+        p.wait_ready().unwrap();
+        let pieces: Vec<usize> = sim.writes[2..].iter().map(Vec::len).collect();
+        assert_eq!(pieces[..2], [MAX_WRITE, table.len() - MAX_WRITE]);
+        // Whole, it is refused.
+        let mut sim = SimulatedScanner::default();
+        assert!(sim.write(&table).is_err());
     }
 }

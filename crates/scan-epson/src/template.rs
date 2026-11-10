@@ -95,6 +95,9 @@ pub struct Script {
     pub plan: FlatbedPlan,
     pub layout: RawLayout,
     pub calibration: Option<CalibrationPoints>,
+    /// The shading table's white step is `1 << white_shift` counts, as the read's `1e 41` has it
+    /// (see [`Shading::step_code`]).
+    pub white_shift: u8,
 }
 
 /// Where the requested area sits in the raw read.
@@ -293,6 +296,7 @@ impl Template {
 
         let mut before = self.transfers[..=self.read].to_vec();
         let g = &mut before[self.geometry].data;
+        let white_shift = ((g[15] >> 4) + (g[11] & 3)).saturating_sub(2);
         g[4..6].copy_from_slice(&(plan.lines as u16).to_le_bytes());
         before[self.scan_length].data[..4].copy_from_slice(&plan.scan_steps.to_le_bytes());
         before[self.carriage_move].data[..4].copy_from_slice(&plan.move_steps.to_le_bytes());
@@ -307,6 +311,7 @@ impl Template {
             },
             plan,
             calibration: self.calibration,
+            white_shift,
         })
     }
 
@@ -361,16 +366,22 @@ impl Template {
                 before[p.white_levels].data = calibration::white_read_levels(darks).to_vec();
                 let white = stage(&before, p.dark_ref_end..p.white_end)?.data;
                 let dark = stage(&before, p.white_end..p.dark_end)?.data;
-                let shading =
-                    Shading::compute(&white, &dark, p.width, darks, geometry::bed_units())
-                        .ok_or_else(|| {
-                            ScanError::Backend(format!(
-                                "calibration reads of {} and {} bytes don't fit {} pixels",
-                                white.len(),
-                                dark.len(),
-                                p.width
-                            ))
-                        })?;
+                let shading = Shading::compute(
+                    &white,
+                    &dark,
+                    p.width,
+                    darks,
+                    geometry::bed_units(),
+                    script.white_shift..=script.white_shift,
+                )
+                .ok_or_else(|| {
+                    ScanError::Backend(format!(
+                        "calibration reads of {} and {} bytes don't fit {} pixels",
+                        white.len(),
+                        dark.len(),
+                        p.width
+                    ))
+                })?;
                 log::info!(
                     "calibration: offsets {:02x?}, white-read darks {darks:?}, \
                      white base {:?}, dark base {:?}",
