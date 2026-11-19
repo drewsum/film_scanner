@@ -26,6 +26,8 @@ const NO_ELEVATE: &str = "--no-elevate";
 fn main() -> eframe::Result {
     scan_epson::system::apply_forwarded_env();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // An elevated copy doesn't see the network drives mapped in the session it came from.
+    scan_epson::system::reconnect_drives();
     if elevate() {
         return Ok(());
     }
