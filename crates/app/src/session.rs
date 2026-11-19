@@ -55,10 +55,17 @@ pub struct Roll {
     pub dust_strength: f32,
     #[serde(default)]
     pub metadata: RollMetadata,
+    /// The Export step's number for the first frame.
+    #[serde(default = "one")]
+    pub first_frame: usize,
 }
 
 fn yes() -> bool {
     true
+}
+
+fn one() -> usize {
+    1
 }
 
 fn half() -> f32 {
@@ -194,6 +201,7 @@ impl Roll {
             remove_dust: state.dust.enabled,
             dust_strength: state.dust.strength,
             metadata: state.export.metadata.clone(),
+            first_frame: state.export.first,
         })
     }
 
@@ -337,6 +345,7 @@ impl Roll {
         state.dust.enabled = self.remove_dust;
         state.dust.strength = self.dust_strength;
         state.export.metadata = self.metadata;
+        state.export.first = self.first_frame.max(1);
         state.export.film_from = state.invert.profile_film().map(|p| p.id);
         state.roll_file = Some((path, generation));
         state.forget_settled();

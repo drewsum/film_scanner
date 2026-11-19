@@ -7,6 +7,10 @@
 //! [`restore_wia`] before exiting, in case a scan was still running. Windows starts the
 //! elevated copy with a fresh environment, so the relaunch passes [`FORWARDED_ENV`] on as
 //! arguments, which [`apply_forwarded_env`] sets again first thing.
+//!
+//! The elevated copy also runs in a logon session of its own, without the network drives
+//! mapped in the user's (a NAS share as `Z:`), so the relaunch passes those on too, and
+//! [`reconnect_drives`] maps them again there.
 
 use std::sync::Mutex;
 
@@ -79,17 +83,51 @@ pub fn apply_forwarded_env() {
     }
 }
 
-/// The arguments for an elevated copy: this process's own, without any forwarded variables,
-/// then the [`FORWARDED_ENV`] variables set now.
+/// Carries a mapped network drive as `--drive=Z:=\\server\share`.
+const DRIVE_ARG: &str = "--drive=";
+
+/// Map the network drives a relaunch passed on that this session doesn't have, with the
+/// credentials Windows saved for them. Each is mapped for this session only.
+pub fn reconnect_drives() {
+    for (letter, remote) in forwarded_drives(std::env::args().skip(1)) {
+        match imp::connect_drive(letter, &remote) {
+            Ok(true) => log::info!("mapped {letter}: to {remote} for this session"),
+            Ok(false) => {}
+            Err(e) => log::warn!("couldn't map {letter}: to {remote}: {e}"),
+        }
+    }
+}
+
+/// The drive letters and shares carried in `args`.
+fn forwarded_drives(args: impl Iterator<Item = String>) -> Vec<(char, String)> {
+    args.filter_map(|arg| {
+        let (drive, remote) = arg.strip_prefix(DRIVE_ARG)?.split_once('=')?;
+        let mut chars = drive.chars();
+        match (chars.next(), chars.next(), chars.next()) {
+            (Some(letter), Some(':'), None) if letter.is_ascii_alphabetic() => {
+                Some((letter.to_ascii_uppercase(), remote.to_string()))
+            }
+            _ => None,
+        }
+    })
+    .collect()
+}
+
+/// The arguments for an elevated copy: this process's own, without any forwarded ones,
+/// then the [`FORWARDED_ENV`] variables set now and the network drives mapped now.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn relaunch_args() -> Vec<String> {
     let forwarded = FORWARDED_ENV
         .iter()
         .filter_map(|&name| Some(format!("{ENV_ARG}{name}={}", std::env::var(name).ok()?)));
+    let drives = imp::mapped_drives()
+        .into_iter()
+        .map(|(letter, remote)| format!("{DRIVE_ARG}{letter}:={remote}"));
     std::env::args()
         .skip(1)
-        .filter(|a| !a.starts_with(ENV_ARG))
+        .filter(|a| !a.starts_with(ENV_ARG) && !a.starts_with(DRIVE_ARG))
         .chain(forwarded)
+        .chain(drives)
         .collect()
 }
 
@@ -120,10 +158,16 @@ mod imp {
     use std::time::{Duration, Instant};
 
     use scan_core::ScanError;
-    use windows::Win32::Foundation::{CloseHandle, ERROR_SERVICE_ALREADY_RUNNING, HANDLE};
+    use windows::Win32::Foundation::{
+        CloseHandle, ERROR_SERVICE_ALREADY_RUNNING, HANDLE, NO_ERROR,
+    };
+    use windows::Win32::NetworkManagement::WNet::{
+        CONNECT_TEMPORARY, NETRESOURCEW, RESOURCETYPE_DISK, WNetAddConnection2W, WNetGetConnectionW,
+    };
     use windows::Win32::Security::{
         GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
     };
+    use windows::Win32::Storage::FileSystem::GetLogicalDrives;
     use windows::Win32::System::Services::{
         CloseServiceHandle, ControlService, OpenSCManagerW, OpenServiceW, QueryServiceStatus,
         SC_HANDLE, SC_MANAGER_CONNECT, SERVICE_CONTROL_STOP, SERVICE_QUERY_STATUS, SERVICE_RUNNING,
@@ -133,7 +177,7 @@ mod imp {
     use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-    use windows::core::{HSTRING, w};
+    use windows::core::{HSTRING, PCWSTR, PWSTR, w};
 
     const SERVICE_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -251,6 +295,57 @@ mod imp {
         }
     }
 
+    /// Every drive letter mapped to a network share in this session, with its share.
+    pub fn mapped_drives() -> Vec<(char, String)> {
+        // SAFETY: no arguments.
+        let present = unsafe { GetLogicalDrives() };
+        ('A'..='Z')
+            .zip(0..)
+            .filter(|&(_, bit)| present & (1 << bit) != 0)
+            .filter_map(|(letter, _)| {
+                let local = HSTRING::from(format!("{letter}:"));
+                let mut remote = [0u16; 1024];
+                let mut len = remote.len() as u32;
+                // SAFETY: `remote` holds `len` characters and outlives the call.
+                let result = unsafe {
+                    WNetGetConnectionW(&local, Some(PWSTR(remote.as_mut_ptr())), &mut len)
+                };
+                (result == NO_ERROR).then(|| {
+                    let end = remote.iter().position(|&c| c == 0).unwrap_or(remote.len());
+                    (letter, String::from_utf16_lossy(&remote[..end]))
+                })
+            })
+            .collect()
+    }
+
+    /// Map `letter` to the share `remote` for this session, unless the letter is taken.
+    /// Returns whether it was mapped.
+    pub fn connect_drive(letter: char, remote: &str) -> Result<bool, ScanError> {
+        let bit = u32::from(letter).wrapping_sub(u32::from('A'));
+        // SAFETY: no arguments.
+        if bit >= 26 || unsafe { GetLogicalDrives() } & (1 << bit) != 0 {
+            return Ok(false);
+        }
+        let mut local: Vec<u16> = format!("{letter}:\0").encode_utf16().collect();
+        let mut share: Vec<u16> = format!("{remote}\0").encode_utf16().collect();
+        let resource = NETRESOURCEW {
+            dwType: RESOURCETYPE_DISK,
+            lpLocalName: PWSTR(local.as_mut_ptr()),
+            lpRemoteName: PWSTR(share.as_mut_ptr()),
+            ..Default::default()
+        };
+        // SAFETY: `resource`'s strings are NUL-terminated and outlive the call. Without a
+        // password or user name, the credentials Windows saved for the share are used.
+        let result = unsafe {
+            WNetAddConnection2W(&resource, PCWSTR::null(), PCWSTR::null(), CONNECT_TEMPORARY)
+        };
+        if result == NO_ERROR {
+            Ok(true)
+        } else {
+            Err(error("connect the share", result.to_hresult().into()))
+        }
+    }
+
     /// Start this program again with administrator rights (a UAC prompt) and the same
     /// arguments. Returns `Ok` once the elevated copy has started; the caller should exit.
     pub fn relaunch_elevated() -> Result<(), ScanError> {
@@ -299,6 +394,14 @@ mod imp {
         false
     }
 
+    pub fn mapped_drives() -> Vec<(char, String)> {
+        Vec::new()
+    }
+
+    pub fn connect_drive(_letter: char, _remote: &str) -> Result<bool, ScanError> {
+        Ok(false)
+    }
+
     pub fn relaunch_elevated() -> Result<(), ScanError> {
         Err(ScanError::Unsupported(
             "elevation is only needed on Windows".into(),
@@ -309,6 +412,26 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forwarded_drives_are_read_back() {
+        let args = [
+            r"--drive=Z:=\\drewnas-home\drewset",
+            r"--drive=y:=\\nas\photos share",
+            "--drive=ZZ:=x",
+            "--drive=1:=x",
+            "--drive=Q:",
+            "--no-elevate",
+        ]
+        .map(String::from);
+        assert_eq!(
+            forwarded_drives(args.into_iter()),
+            [
+                ('Z', r"\\drewnas-home\drewset".to_string()),
+                ('Y', r"\\nas\photos share".to_string())
+            ]
+        );
+    }
 
     #[test]
     fn quotes_for_the_windows_command_line() {

@@ -48,9 +48,9 @@ impl Filmstrip {
         self.thumbs.resize_with(n, || None);
         let mut budget = PER_FRAME;
         let mut waiting = false;
-        for i in 0..n {
+        for (i, thumb) in self.thumbs.iter_mut().enumerate() {
             let Some(key) = key(state, i) else { continue };
-            if self.thumbs[i].as_ref().is_some_and(|t| t.key == key) {
+            if thumb.as_ref().is_some_and(|t| t.key == key) {
                 continue;
             }
             if budget == 0 {
@@ -59,7 +59,7 @@ impl Filmstrip {
             }
             budget -= 1;
             if let Some(image) = render(state, &key) {
-                let texture = match self.thumbs[i].take() {
+                let texture = match thumb.take() {
                     Some(mut t) => {
                         t.texture.set(image, TextureOptions::LINEAR);
                         t.texture
@@ -69,7 +69,7 @@ impl Filmstrip {
                             .load_texture(format!("frame {i}"), image, TextureOptions::LINEAR)
                     }
                 };
-                self.thumbs[i] = Some(Thumb { key, texture });
+                *thumb = Some(Thumb { key, texture });
             }
         }
         if waiting {
@@ -116,6 +116,21 @@ impl Filmstrip {
                                     .changed()
                                 {
                                     frame.skip = !export;
+                                }
+                                let turns = &mut frame.adjust.quarter_turns;
+                                if ui
+                                    .small_button("⟲")
+                                    .on_hover_text("Turn this frame a quarter anticlockwise")
+                                    .clicked()
+                                {
+                                    *turns = (*turns + 3) % 4;
+                                }
+                                if ui
+                                    .small_button("⟳")
+                                    .on_hover_text("Turn this frame a quarter clockwise")
+                                    .clicked()
+                                {
+                                    *turns = (*turns + 1) % 4;
                                 }
                                 if !frame.adjust.is_identity() {
                                     ui.label(RichText::new("edited").weak().small());
