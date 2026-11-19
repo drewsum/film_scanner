@@ -117,6 +117,21 @@ impl Filmstrip {
                                 {
                                     frame.skip = !export;
                                 }
+                                let turns = &mut frame.adjust.quarter_turns;
+                                if ui
+                                    .small_button("⟲")
+                                    .on_hover_text("Turn this frame a quarter anticlockwise")
+                                    .clicked()
+                                {
+                                    *turns = (*turns + 3) % 4;
+                                }
+                                if ui
+                                    .small_button("⟳")
+                                    .on_hover_text("Turn this frame a quarter clockwise")
+                                    .clicked()
+                                {
+                                    *turns = (*turns + 1) % 4;
+                                }
                                 if !frame.adjust.is_identity() {
                                     ui.label(RichText::new("edited").weak().small());
                                 }
