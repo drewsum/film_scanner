@@ -52,6 +52,9 @@ pub struct ExportSettings {
     pub folder: Option<PathBuf>,
     /// Frames are saved as `<prefix>_01`, `<prefix>_02`, ...
     pub prefix: String,
+    /// The first frame's number: a roll scanned over several sessions carries on from the
+    /// last session's, so its frames don't replace those already exported.
+    pub first: usize,
     pub format: FrameFormat,
     /// Write [`METADATA_FILE`] next to the frames.
     pub write_metadata: bool,
@@ -66,6 +69,7 @@ impl Default for ExportSettings {
         Self {
             folder: None,
             prefix: "roll".into(),
+            first: 1,
             format: FrameFormat::Jpeg(95),
             write_metadata: true,
             metadata: RollMetadata {
@@ -89,19 +93,46 @@ impl ExportSettings {
         (!bad.is_empty()).then(|| format!("File names can't contain {bad}"))
     }
 
-    /// Where the `n`th frame (from 0) of `count` is saved: numbered from 01, with enough
-    /// digits that the files sort in frame order, as the publisher uploads them.
+    /// Where the `n`th frame (from 0) of `count` is saved: numbered from [`Self::first`],
+    /// with enough digits that the files sort in frame order, as the publisher uploads them.
     pub fn frame_path(&self, folder: &Path, n: usize, count: usize) -> PathBuf {
-        let digits = count.to_string().len().max(2);
-        let prefix = match self.prefix.trim() {
-            "" => "frame",
-            p => p,
-        };
+        let first = self.first.max(1);
+        let digits = (first + count.max(1) - 1).to_string().len().max(2);
         folder.join(format!(
-            "{prefix}_{:0digits$}.{}",
-            n + 1,
+            "{}_{:0digits$}.{}",
+            self.file_prefix(),
+            first + n,
             self.format.extension()
         ))
+    }
+
+    /// The number after the last frame exported to `folder` with this prefix, in any
+    /// format: where the next session of the roll starts. `None` if there are none.
+    pub fn next_after(&self, folder: &Path) -> Option<usize> {
+        let start = format!("{}_", self.file_prefix());
+        std::fs::read_dir(folder)
+            .ok()?
+            .filter_map(|entry| {
+                let name = entry.ok()?.file_name().into_string().ok()?;
+                let (stem, ext) = name.rsplit_once('.')?;
+                let known = [FrameFormat::Jpeg(0), FrameFormat::Png, FrameFormat::Tiff]
+                    .iter()
+                    .any(|f| ext.eq_ignore_ascii_case(f.extension()));
+                let number = stem.strip_prefix(&start)?;
+                if !known || !number.bytes().all(|b| b.is_ascii_digit()) {
+                    return None;
+                }
+                number.parse::<usize>().ok()
+            })
+            .max()
+            .map(|last| last + 1)
+    }
+
+    fn file_prefix(&self) -> &str {
+        match self.prefix.trim() {
+            "" => "frame",
+            p => p,
+        }
     }
 }
 

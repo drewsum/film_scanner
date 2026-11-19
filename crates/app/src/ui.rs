@@ -1045,6 +1045,30 @@ impl ScannerApp {
                         "The start of every frame's file name: frames are saved as \
                          <this>_01, <this>_02, ... in frame order",
                     );
+                    ui.horizontal(|ui| {
+                        ui.label("Start at");
+                        ui.add(egui::DragValue::new(&mut settings.first).range(1..=9999))
+                            .on_hover_text(
+                                "The first frame's number: for a roll scanned a few strips at \
+                                 a time, carry on from the last session's frames (13 after 12)",
+                            );
+                        let next = settings
+                            .folder
+                            .as_deref()
+                            .and_then(|folder| settings.next_after(folder))
+                            .filter(|&n| n != settings.first);
+                        if let Some(next) = next
+                            && ui
+                                .small_button(format!("Continue at {next}"))
+                                .on_hover_text(
+                                    "Numbers this session's frames after those already in the \
+                                     folder with these names",
+                                )
+                                .clicked()
+                        {
+                            settings.first = next;
+                        }
+                    });
                     let count = frames.max(1);
                     let folder = std::path::Path::new("");
                     let name = |n| settings.frame_path(folder, n, count).display().to_string();

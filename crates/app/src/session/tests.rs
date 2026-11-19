@@ -57,6 +57,7 @@ fn rolls_save_and_open_with_every_edit() {
     state.invert.mono.toning = Toning::Sepia;
     state.invert.printing.contrast = 1.7;
     state.export.metadata.name = "Halloween".into();
+    state.export.first = 13;
     state.dust.strength = 0.8;
 
     let dir = tempfile::tempdir().unwrap();
@@ -104,6 +105,7 @@ fn rolls_save_and_open_with_every_edit() {
     assert_eq!(back.invert.mono.toning, Toning::Sepia);
     assert_eq!(back.invert.printing.contrast, 1.7);
     assert_eq!(back.export.metadata.name, "Halloween");
+    assert_eq!(back.export.first, 13);
     assert_eq!(back.dust.strength, 0.8);
     // The film base came with it, so the frames aren't looked for again, and the film is
     // ready to print.

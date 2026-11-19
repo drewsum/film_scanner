@@ -156,6 +156,42 @@ fn frames_are_numbered_to_sort_in_order() {
 }
 
 #[test]
+fn later_sessions_carry_on_the_numbering() {
+    let dir = Path::new("out");
+    let second = ExportSettings {
+        first: 13,
+        ..ExportSettings::default()
+    };
+    assert_eq!(second.frame_path(dir, 0, 12), dir.join("roll_13.jpg"));
+    assert_eq!(second.frame_path(dir, 11, 12), dir.join("roll_24.jpg"));
+    // Padded for the last number, not the count.
+    let late = ExportSettings {
+        first: 95,
+        ..ExportSettings::default()
+    };
+    assert_eq!(late.frame_path(dir, 0, 12), dir.join("roll_095.jpg"));
+}
+
+#[test]
+fn the_next_number_follows_the_folders_frames() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = ExportSettings::default();
+    assert_eq!(settings.next_after(dir.path()), None);
+    for name in [
+        "roll_01.jpg",
+        "roll_12.JPG",
+        "roll_07.tif",
+        "roll_40.txt",
+        "roll_x3.jpg",
+        "other_30.jpg",
+        "metadata.yml",
+    ] {
+        std::fs::write(dir.path().join(name), "").unwrap();
+    }
+    assert_eq!(settings.next_after(dir.path()), Some(13));
+}
+
+#[test]
 fn today_is_a_valid_date() {
     assert!(parse_date(&today()).is_some(), "{}", today());
 }

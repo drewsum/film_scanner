@@ -257,6 +257,11 @@ is there for archiving. Every file is tagged with an sRGB color profile, so view
 Immich know its colors. Frames unticked in the strip are left out, and the rest numbered
 without gaps. Files already in the folder are pointed out before they're replaced.
 
+A 36-frame roll usually takes three scanning sessions of 12. *Start at* numbers a session's
+frames from where the last one stopped (`roll180_13.jpg` ... `roll180_24.jpg`), and
+*Continue at* sets it to one past the highest number already in the folder. The number is
+saved in the roll file with the rest.
+
 Tick *Write metadata.yml for film_roll_publisher* to save the roll's details next to the
 frames, in the publisher's format 0:
 
