@@ -16,6 +16,7 @@ mod strip;
 mod tooltip_art;
 mod ui;
 mod view;
+mod wheel;
 mod worker;
 
 use eframe::egui;

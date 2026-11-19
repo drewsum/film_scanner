@@ -22,6 +22,7 @@ use crate::stock_curves::{self, Stock};
 use crate::strip::Filmstrip;
 use crate::tooltip_art::ArtTip;
 use crate::view::{self, ImageView};
+use crate::wheel::WheelSlider;
 use crate::worker::{Event, ScanKind, Worker};
 
 /// Where the scan's turn is remembered between sessions.
@@ -533,7 +534,9 @@ impl ScannerApp {
                 );
             ui.add_enabled_ui(dust.enabled, |ui| {
                 let slider = ui
-                    .add(egui::Slider::new(&mut self.dust_strength, 0.0..=1.0).text("Strength"))
+                    .add(
+                        WheelSlider::new(&mut self.dust_strength, 0.0..=1.0, 0.01).text("Strength"),
+                    )
                     .on_hover_art("Higher also repairs fainter defects", "dust", &["strength"]);
                 if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
                     dust.strength = self.dust_strength;
@@ -891,12 +894,8 @@ impl ScannerApp {
             .spacing([12.0, 6.0])
             .show(ui, |ui| {
                 ui.label("Exposure");
-                ui.add(
-                    egui::Slider::new(&mut printing.exposure_ev, -3.0..=3.0)
-                        .step_by(0.05)
-                        .suffix(" EV"),
-                )
-                .on_hover_text("Brighter or darker, in stops, as a printer's exposure");
+                ui.add(WheelSlider::new(&mut printing.exposure_ev, -3.0..=3.0, 0.05).suffix(" EV"))
+                    .on_hover_text("Brighter or darker, in stops, as a printer's exposure");
                 ui.end_row();
                 for (c, (label, hover, part)) in [
                     ("Cyan - Red", "More red (+) or cyan (-), in stops", "cr"),
@@ -917,20 +916,23 @@ impl ScannerApp {
                     ui.add_enabled(color, egui::Label::new(label));
                     ui.add_enabled(
                         color,
-                        egui::Slider::new(&mut printing.balance_ev[c], -1.5..=1.5)
-                            .step_by(0.01)
+                        WheelSlider::new(&mut printing.balance_ev[c], -1.5..=1.5, 0.01)
                             .suffix(" EV"),
                     )
                     .on_hover_art(hover, "balance", &[part]);
                     ui.end_row();
                 }
                 ui.label("Contrast");
-                ui.add(egui::Slider::new(&mut printing.contrast, CONTRAST_RANGE).step_by(0.05))
-                    .on_hover_art(
-                        "The print curve's contrast; grey stays grey",
-                        "contrast",
-                        &["contrast"],
-                    );
+                ui.add(WheelSlider::new(
+                    &mut printing.contrast,
+                    CONTRAST_RANGE,
+                    0.05,
+                ))
+                .on_hover_art(
+                    "The print curve's contrast; grey stays grey",
+                    "contrast",
+                    &["contrast"],
+                );
                 ui.end_row();
                 if film_type != FilmType::ColorNegative {
                     return;
@@ -1426,9 +1428,7 @@ fn mono_controls(ui: &mut egui::Ui, mono: &mut Mono) {
             ui.label("Strength");
             ui.add_enabled(
                 mono.toning != Toning::None,
-                egui::Slider::new(&mut mono.toning_amount, 0.0..=1.0)
-                    .step_by(0.01)
-                    .fixed_decimals(2),
+                WheelSlider::new(&mut mono.toning_amount, 0.0..=1.0, 0.01).fixed_decimals(2),
             );
             ui.end_row();
         });

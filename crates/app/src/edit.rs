@@ -22,6 +22,7 @@ use scan_process::{FrameRect, Rgb16Image};
 use crate::state::{AppState, Film};
 use crate::tooltip_art::{ArtTip, Tip, art};
 use crate::view::{ImageView, Placement};
+use crate::wheel::WheelSlider;
 
 /// Longest side of the preview a frame is edited on.
 const PREVIEW_SIDE: u32 = 2048;
@@ -761,7 +762,7 @@ impl Editor {
             .show(ui, |ui| {
                 channel_picker(ui, &mut self.channel, "levels_channel");
                 if let Some(h) = &base_histogram {
-                    histogram_plot(ui, h, self.channel, Some(&adj.levels[self.channel]));
+                    histogram_plot(ui, h, self.channel, Some(&mut adj.levels[self.channel]));
                 }
                 levels_controls(ui, &mut adj.levels[self.channel]);
             });
@@ -866,16 +867,12 @@ impl Editor {
             let s = &mut adj.selective[self.hue];
             grid(ui, "selective", |ui| {
                 ui.label("Hue");
-                ui.add(
-                    egui::Slider::new(&mut s.hue_deg, -60.0..=60.0)
-                        .step_by(0.5)
-                        .suffix("°"),
-                )
-                .on_hover_art(
-                    "Towards the next hue round (+: reds towards yellow) or back",
-                    "hue_shift",
-                    &["hue"],
-                );
+                ui.add(WheelSlider::new(&mut s.hue_deg, -60.0..=60.0, 0.5).suffix("°"))
+                    .on_hover_art(
+                        "Towards the next hue round (+: reds towards yellow) or back",
+                        "hue_shift",
+                        &["hue"],
+                    );
                 ui.end_row();
                 signed(
                     ui,
@@ -898,7 +895,7 @@ impl Editor {
             let n = &mut adj.noise;
             grid(ui, "noise", |ui| {
                 ui.label("Grain");
-                ui.add(egui::Slider::new(&mut n.grain, 0.0..=1.0).step_by(0.01))
+                ui.add(WheelSlider::new(&mut n.grain, 0.0..=1.0, 0.01))
                     .on_hover_art(
                         "Smooths film grain in flat areas, keeping edges",
                         "noise",
@@ -906,7 +903,7 @@ impl Editor {
                     );
                 ui.end_row();
                 ui.label("Color noise");
-                ui.add(egui::Slider::new(&mut n.color, 0.0..=1.0).step_by(0.01))
+                ui.add(WheelSlider::new(&mut n.color, 0.0..=1.0, 0.01))
                     .on_hover_art(
                         "Smooths blotches of color, keeping detail in brightness",
                         "noise",
@@ -914,16 +911,12 @@ impl Editor {
                     );
                 ui.end_row();
                 ui.label("Size");
-                ui.add(
-                    egui::Slider::new(&mut n.radius_px, 0.5..=8.0)
-                        .step_by(0.1)
-                        .suffix(" px"),
-                )
-                .on_hover_art(
-                    "How big the grain is, in pixels of the saved frame",
-                    "noise",
-                    &["size"],
-                );
+                ui.add(WheelSlider::new(&mut n.radius_px, 0.5..=8.0, 0.1).suffix(" px"))
+                    .on_hover_art(
+                        "How big the grain is, in pixels of the saved frame",
+                        "noise",
+                        &["size"],
+                    );
                 ui.end_row();
             });
         });
@@ -931,7 +924,7 @@ impl Editor {
             let s = &mut adj.sharpen;
             grid(ui, "sharpen", |ui| {
                 ui.label("Amount");
-                ui.add(egui::Slider::new(&mut s.amount, 0.0..=3.0).step_by(0.01))
+                ui.add(WheelSlider::new(&mut s.amount, 0.0..=3.0, 0.01))
                     .on_hover_art(
                         "Unsharp mask: how much the edges are steepened",
                         "sharpen",
@@ -939,19 +932,15 @@ impl Editor {
                     );
                 ui.end_row();
                 ui.label("Radius");
-                ui.add(
-                    egui::Slider::new(&mut s.radius_px, 0.3..=5.0)
-                        .step_by(0.05)
-                        .suffix(" px"),
-                )
-                .on_hover_art(
-                    "How wide the edges are, in pixels of the saved frame",
-                    "sharpen",
-                    &["radius"],
-                );
+                ui.add(WheelSlider::new(&mut s.radius_px, 0.3..=5.0, 0.05).suffix(" px"))
+                    .on_hover_art(
+                        "How wide the edges are, in pixels of the saved frame",
+                        "sharpen",
+                        &["radius"],
+                    );
                 ui.end_row();
                 ui.label("Threshold");
-                ui.add(egui::Slider::new(&mut s.threshold, 0.0..=0.2).step_by(0.002))
+                ui.add(WheelSlider::new(&mut s.threshold, 0.0..=0.2, 0.002))
                     .on_hover_art(
                         "Differences smaller than this are left, so grain isn't sharpened",
                         "sharpen",
@@ -977,11 +966,7 @@ impl Editor {
                 ui.label("Light falloff");
                 let mut percent = adj.falloff * 100.0;
                 if ui
-                    .add(
-                        egui::Slider::new(&mut percent, 0.0..=100.0)
-                            .step_by(1.0)
-                            .suffix("%"),
-                    )
+                    .add(WheelSlider::new(&mut percent, 0.0..=100.0, 1.0).suffix("%"))
                     .on_hover_art(
                         "Brightens the edges and corners, for a scanner's or lens's light \
                          falling off towards them",
@@ -1013,11 +998,7 @@ impl Editor {
                     ui.label("Straighten");
                     let mut deg = adj.straighten_deg * sign;
                     if ui
-                        .add(
-                            egui::Slider::new(&mut deg, -STRAIGHTEN..=STRAIGHTEN)
-                                .step_by(0.05)
-                                .suffix("°"),
-                        )
+                        .add(WheelSlider::new(&mut deg, -STRAIGHTEN..=STRAIGHTEN, 0.05).suffix("°"))
                         .on_hover_art(
                             "Turns the picture clockwise (+), cutting it just smaller so no \
                              corner is empty",
@@ -1030,17 +1011,13 @@ impl Editor {
                     }
                     ui.end_row();
                     ui.label("Border");
-                    ui.add(
-                        egui::Slider::new(&mut adj.border_mm, 0.0..=4.0)
-                            .step_by(0.05)
-                            .suffix(" mm"),
-                    )
-                    .on_hover_art(
-                        "Keeps this much film around the frame: its edges, rebate and \
+                    ui.add(WheelSlider::new(&mut adj.border_mm, 0.0..=4.0, 0.05).suffix(" mm"))
+                        .on_hover_art(
+                            "Keeps this much film around the frame: its edges, rebate and \
                          sprocket holes",
-                        "border",
-                        &["border"],
-                    );
+                            "border",
+                            &["border"],
+                        );
                     ui.end_row();
                 });
                 ui.horizontal(|ui| {
@@ -1080,8 +1057,8 @@ impl Editor {
                     self.toggle(Tool::Heal);
                 }
                 ui.add(
-                    egui::Slider::new(&mut self.heal_radius_mm, 0.05..=3.0)
-                        .logarithmic(true)
+                    WheelSlider::new(&mut self.heal_radius_mm, 0.05..=3.0, 0.05)
+                        .logarithmic()
                         .suffix(" mm"),
                 )
                 .on_hover_art(
@@ -1394,9 +1371,7 @@ fn signed_if<'a>(
     let mut percent = *value * 100.0;
     let slider = ui.add_enabled(
         enabled,
-        egui::Slider::new(&mut percent, -100.0..=100.0)
-            .step_by(1.0)
-            .suffix("%"),
+        WheelSlider::new(&mut percent, -100.0..=100.0, 1.0).suffix("%"),
     );
     if hover.into().on(slider).changed() {
         *value = percent / 100.0;
@@ -1413,12 +1388,8 @@ fn color_controls(ui: &mut egui::Ui, adj: &mut Adjustments, film: bool, mono: bo
     };
     grid(ui, "frame_color", |ui| {
         ui.label("Exposure");
-        ui.add(
-            egui::Slider::new(&mut adj.exposure_ev, -3.0..=3.0)
-                .step_by(0.05)
-                .suffix(" EV"),
-        )
-        .on_hover_text(format!("Brighter or darker, in stops, {how}"));
+        ui.add(WheelSlider::new(&mut adj.exposure_ev, -3.0..=3.0, 0.05).suffix(" EV"))
+            .on_hover_text(format!("Brighter or darker, in stops, {how}"));
         ui.end_row();
         signed_if(
             ui,
@@ -1449,9 +1420,7 @@ fn color_controls(ui: &mut egui::Ui, adj: &mut Adjustments, film: bool, mono: bo
             ui.add_enabled(!mono, egui::Label::new(label));
             ui.add_enabled(
                 !mono,
-                egui::Slider::new(&mut adj.balance_ev[c], -1.5..=1.5)
-                    .step_by(0.01)
-                    .suffix(" EV"),
+                WheelSlider::new(&mut adj.balance_ev[c], -1.5..=1.5, 0.01).suffix(" EV"),
             )
             .on_hover_art(format!("In stops, {how}"), "balance", &[part]);
             ui.end_row();
@@ -1488,7 +1457,7 @@ fn levels_controls(ui: &mut egui::Ui, l: &mut Levels) {
         ui.label(label);
         let mut x = *v * 255.0;
         if ui
-            .add(egui::Slider::new(&mut x, 0.0..=255.0).step_by(1.0))
+            .add(WheelSlider::new(&mut x, 0.0..=255.0, 1.0))
             .on_hover_art(hover, "levels", &[part])
             .changed()
         {
@@ -1505,7 +1474,7 @@ fn levels_controls(ui: &mut egui::Ui, l: &mut Levels) {
             "black",
         );
         ui.label("Midtones");
-        ui.add(egui::Slider::new(&mut l.gamma, 0.2..=5.0).logarithmic(true))
+        ui.add(WheelSlider::new(&mut l.gamma, 0.2..=5.0, 0.01).logarithmic())
             .on_hover_art(
                 "Gamma: above 1 lightens the midtones, below darkens them",
                 "levels",
@@ -1540,11 +1509,86 @@ fn levels_controls(ui: &mut egui::Ui, l: &mut Levels) {
     }
 }
 
+/// One of the levels marked under a histogram.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum LevelMark {
+    Black,
+    Mid,
+    White,
+}
+
+impl LevelMark {
+    /// Where the mark is on `l`, 0–1 across: the midtone is the input that comes out grey.
+    fn at(self, l: &Levels) -> f32 {
+        match self {
+            LevelMark::Black => l.black,
+            LevelMark::Mid => l.black + (l.white - l.black) * 0.5f32.powf(l.gamma),
+            LevelMark::White => l.white,
+        }
+    }
+
+    /// The mark nearest `x`, 0–1 across.
+    fn nearest(l: &Levels, x: f32) -> Self {
+        [LevelMark::Black, LevelMark::Mid, LevelMark::White]
+            .into_iter()
+            .min_by(|a, b| (a.at(l) - x).abs().total_cmp(&(b.at(l) - x).abs()))
+            .expect("three marks")
+    }
+
+    /// Move the mark to `x`, 0–1 across, keeping black below white. The midtone sets the
+    /// gamma, so it stays at its place between black and white when they move.
+    fn set(self, l: &mut Levels, x: f32) {
+        let x = x.clamp(0.0, 1.0);
+        match self {
+            LevelMark::Black => l.black = x.min(l.white - 0.02),
+            LevelMark::White => l.white = x.max(l.black + 0.02),
+            LevelMark::Mid => {
+                let t = ((x - l.black) / (l.white - l.black)).clamp(0.01, 0.99);
+                l.gamma = (t.ln() / 0.5f32.ln()).clamp(0.2, 5.0);
+            }
+        }
+    }
+}
+
 /// A histogram of `channel` ([`MASTER`]: brightness, with red, green and blue over it), with
-/// `levels`' black, midtone and white marked under it.
-fn histogram_plot(ui: &mut egui::Ui, h: &Histogram, channel: usize, levels: Option<&Levels>) {
+/// `levels`' black, midtone and white marked under it: a click or drag moves the nearest.
+fn histogram_plot(
+    ui: &mut egui::Ui,
+    h: &Histogram,
+    channel: usize,
+    mut levels: Option<&mut Levels>,
+) {
     let width = ui.available_width().min(300.0);
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 70.0), Sense::hover());
+    let sense = match levels {
+        Some(_) => Sense::click_and_drag(),
+        None => Sense::hover(),
+    };
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 70.0), sense);
+    if let Some(l) = levels.as_deref_mut() {
+        let across = |p: Pos2| (p.x - rect.left()) / rect.width();
+        let id = response.id.with("mark");
+        if response.drag_started()
+            && let Some(p) = ui.input(|i| i.pointer.press_origin())
+        {
+            let mark = LevelMark::nearest(l, across(p));
+            ui.data_mut(|d| d.insert_temp(id, mark));
+        }
+        let mark = if response.clicked() {
+            response
+                .interact_pointer_pos()
+                .map(|p| LevelMark::nearest(l, across(p)))
+        } else if response.dragged() {
+            ui.data(|d| d.get_temp(id))
+        } else {
+            None
+        };
+        if let (Some(mark), Some(p)) = (mark, response.interact_pointer_pos()) {
+            mark.set(l, across(p));
+        }
+        response
+            .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+            .on_hover_text("Click or drag to move the nearest of black, midtones and white");
+    }
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
     // Scaled to the inner bins' peak: clipped ends would flatten the rest.
@@ -1579,13 +1623,12 @@ fn histogram_plot(ui: &mut egui::Ui, h: &Histogram, channel: usize, levels: Opti
     }
     if let Some(l) = levels {
         let x = |v: f32| rect.left() + v.clamp(0.0, 1.0) * rect.width();
-        let mid = l.black + (l.white - l.black) * 0.5f32.powf(l.gamma);
-        for (v, color) in [
-            (l.black, Color32::BLACK),
-            (mid, Color32::GRAY),
-            (l.white, Color32::WHITE),
+        for (mark, color) in [
+            (LevelMark::Black, Color32::BLACK),
+            (LevelMark::Mid, Color32::GRAY),
+            (LevelMark::White, Color32::WHITE),
         ] {
-            let p = Pos2::new(x(v), rect.bottom());
+            let p = Pos2::new(x(mark.at(l)), rect.bottom());
             painter.add(Shape::convex_polygon(
                 vec![p, p + Vec2::new(-5.0, -8.0), p + Vec2::new(5.0, -8.0)],
                 color,
@@ -1767,6 +1810,29 @@ fn split_image(before: &ColorImage, after: &ColorImage, at: f32, quarter_turns: 
 mod tests {
     use super::*;
     use scan_core::image::{ImageBuffer, Rgb};
+
+    #[test]
+    fn histogram_clicks_move_the_nearest_level() {
+        let mut l = Levels::default();
+        assert_eq!(LevelMark::nearest(&l, 0.1), LevelMark::Black);
+        assert_eq!(LevelMark::nearest(&l, 0.45), LevelMark::Mid);
+        assert_eq!(LevelMark::nearest(&l, 0.8), LevelMark::White);
+
+        LevelMark::Black.set(&mut l, 0.1);
+        LevelMark::White.set(&mut l, 0.9);
+        assert_eq!((l.black, l.white), (0.1, 0.9));
+        // The midtone was halfway, and stays so.
+        assert!((LevelMark::Mid.at(&l) - 0.5).abs() < 1e-6);
+        // Moved to a quarter of the way, a quarter in comes out grey.
+        LevelMark::Mid.set(&mut l, 0.3);
+        assert!((LevelMark::Mid.at(&l) - 0.3).abs() < 1e-4);
+        assert!((l.apply(0.3) - 0.5).abs() < 1e-4);
+        // Black can't pass white.
+        LevelMark::Black.set(&mut l, 0.95);
+        assert!((l.black - 0.88).abs() < 1e-6, "{}", l.black);
+        LevelMark::White.set(&mut l, -1.0);
+        assert!((l.white - 0.9).abs() < 1e-6, "{}", l.white);
+    }
 
     #[test]
     fn color_images_mirror() {

@@ -47,7 +47,8 @@ in from just outside it, the way dust removal fills its defects.
 5. **Tone**, one table per channel: levels (the channel's own, then RGB), curves (likewise),
    brightness, then contrast.
    - **Levels:** input black and white, a midtone gamma (above 1 lightens), and output
-     black and white, on 0–255.
+     black and white, on 0–255. Clicking or dragging in the histogram above them moves
+     the nearest of black, midtone and white there.
    - **Curves:** a monotone cubic spline (Fritsch–Carlson) through the points. It never
      overshoots between them, so a flat stretch stays flat.
    - **Brightness** raises or lowers the midtones and keeps black and white.
@@ -146,6 +147,8 @@ printing's contrast steepens or flattens it about grey. Slides have no profiles 
   kept between sessions, to apply to a frame or the whole roll.
 - **Undo** and **Redo** (Ctrl+Z, Ctrl+Y) step through each frame's own changes; a slider
   dragged, or a curve point moved, is one change.
+- The mouse wheel over a slider moves it one step a notch (0.05 EV, 1%, 1 of 255, ...),
+  for changes finer than a drag, instead of scrolling the panel.
 - *Save frames as TIFF* saves each frame with its own edits, as 16-bit sRGB, tagged with an
   sRGB profile. *Save as TIFF* saves the whole scan with the whole scan's edits. The whole
   scan has no turn of its own, so its infrared and extra exposure files stay aligned with
