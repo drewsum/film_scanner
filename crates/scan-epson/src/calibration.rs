@@ -165,9 +165,9 @@ impl Shading {
         let mut out = [0u8; 18];
         for c in 0..CHANNELS {
             out[2 * c..2 * c + 2].copy_from_slice(&self.white_base[c].to_le_bytes());
-            for k in 0..2 {
+            for (k, base) in self.dark_base[c].iter().enumerate() {
                 let i = 6 + 4 * c + 2 * k;
-                out[i..i + 2].copy_from_slice(&self.dark_base[c][k].to_le_bytes());
+                out[i..i + 2].copy_from_slice(&base.to_le_bytes());
             }
         }
         out

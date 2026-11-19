@@ -226,8 +226,8 @@ fn the_generic_film_is_the_kodak_sheets_typical_curve() {
         &kodak_e7023_ultramax_400::SHEET,
     ];
     let g = &generic.characteristic[0];
-    for c in 1..3 {
-        assert_eq!(generic.characteristic[c].values, g.values);
+    for curve in &generic.characteristic[1..3] {
+        assert_eq!(curve.values, g.values);
     }
     // Its density, stop by stop from a grey card's, is the members' mean.
     for stops in [-5, -2, 2, 5] {
