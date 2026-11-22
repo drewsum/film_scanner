@@ -324,7 +324,13 @@ cargo test -p scan-wia -- --ignored --nocapture
 # scans from the transparency unit where available.
 ```
 
-### Layout
+### [Layout](https://drewsum.github.io/film_scanner/architecture.html)
+
+The [system flow diagram](https://drewsum.github.io/film_scanner/architecture.html) shows how
+the crates fit together and steps through a roll's path: finding scanners, scanning,
+processing, editing, exporting and reopening a roll. Its source is
+[`docs/architecture.html`](docs/architecture.html); drag cards to rearrange, use the dock or
+the arrow keys to step, and press F to fit.
 
 - `crates/scan-core`: backend-agnostic scanner traits and types (capabilities, scan
   requests with IR and multi-exposure passes), the mock backend, and TIFF export
